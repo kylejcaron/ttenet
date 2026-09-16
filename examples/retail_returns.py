@@ -21,11 +21,9 @@ from numpyro.optim import Adam
 from numpyro_forecast import Horizon, forecast, predict
 
 from ttenet import (
+    RetailReturnModel,
     allowed_days,
     date_grid,
-    fit_stage,
-    forecast_returns,
-    make_observations,
     prepare_history,
     sales_cohorts,
 )
@@ -102,13 +100,21 @@ def simulate_retail(seed=21, training_days=180, horizon=28):
 
 
 def feature_arrays(frame, calendar):
+    """Shared feature/allowed-day builder for both fitting and forecasting rows."""
     product = frame["product"].to_numpy(float)
     weekday = pd.DatetimeIndex(calendar).dayofweek.to_numpy()
-    init = np.empty((len(frame), len(calendar), 2))
-    init[:, :, 0] = product[:, None]
-    init[:, :, 1] = np.sin(2 * np.pi * weekday / 7)[None, :]
-    receipt = np.broadcast_to(storms(calendar)[None, :, None], (len(frame), len(calendar), 1))
-    return init, receipt, product[:, None]
+    initiation_features = np.empty((len(frame), len(calendar), 2))
+    initiation_features[:, :, 0] = product[:, None]
+    initiation_features[:, :, 1] = np.sin(2 * np.pi * weekday / 7)[None, :]
+    receipt_features = np.broadcast_to(
+        storms(calendar)[None, :, None], (len(frame), len(calendar), 1)
+    )
+    return {
+        "initiation_features": initiation_features,
+        "receipt_features": receipt_features,
+        "initiation_cure_features": product[:, None],
+        "receipt_allowed": allowed_days(calendar, weekdays=range(5)),
+    }
 
 
 def sales_model(covariates, data=None):
@@ -132,23 +138,17 @@ def run(steps=150, draws=40, seed=21, plot=None):
     history = prepare_history(observed, as_of=as_of, policy_days=90)
     output_dates = date_grid(as_of + np.timedelta64(1, "D"), as_of + np.timedelta64(horizon, "D"))
     calendar = date_grid(np.datetime64("2026-01-01"), output_dates[-1] + np.timedelta64(90, "D"))
-    init_x, receipt_x, cure_x = feature_arrays(history.frame, calendar)
-    receipt_allowed = allowed_days(calendar, weekdays=range(5))
-    init_obs = make_observations(
-        history, "initiation", calendar, features=init_x, cure_features=cure_x
-    )
-    receipt_obs = make_observations(
-        history, "receipt", calendar, features=receipt_x, allowed=receipt_allowed
-    )
+    initiated = int(history.frame["initiation_date"].notna().sum())
     print(
-        f"Fitting {len(history.frame)} sales and {len(receipt_obs.event_index)} initiated returns",
+        f"Fitting {len(history.frame)} sales and {initiated} initiated returns",
         flush=True,
     )
-    init_fit = fit_stage(init_obs, age_bins=16, num_steps=steps, num_samples=draws, seed=seed)
-    receipt_fit = fit_stage(
-        receipt_obs, age_bins=16, num_steps=steps, num_samples=draws, seed=seed + 1
-    )
-    if not np.isfinite(init_fit.losses).all() or not np.isfinite(receipt_fit.losses).all():
+    model = RetailReturnModel(age_bins=16, feature_builder=feature_arrays)
+    fitted = model.fit(history, calendar=calendar, num_steps=steps, num_samples=draws, seed=seed)
+    if (
+        not np.isfinite(fitted.initiation_fit.losses).all()
+        or not np.isfinite(fitted.receipt_fit.losses).all()
+    ):
         raise RuntimeError("stage fitting produced nonfinite losses")
 
     sales_calendar = calendar[: training_days + horizon]
@@ -157,13 +157,13 @@ def run(steps=150, draws=40, seed=21, plot=None):
     counts = jnp.asarray(sales[:training_days], dtype=jnp.int32)
     guide = AutoNormal(sales_model)
     svi = SVI(sales_model, guide, Adam(0.03), Trace_ELBO())
-    fitted = svi.run(
+    sales_fit = svi.run(
         random.PRNGKey(seed + 2), steps, covariates[:training_days], counts, progress_bar=False
     )
-    if not np.isfinite(fitted.losses).all():
+    if not np.isfinite(sales_fit.losses).all():
         raise RuntimeError("sales fitting produced nonfinite losses")
     posterior = guide.sample_posterior(
-        random.PRNGKey(seed + 3), fitted.params, sample_shape=(draws,)
+        random.PRNGKey(seed + 3), sales_fit.params, sample_shape=(draws,)
     )
     sales_draws = forecast(random.PRNGKey(seed + 4), sales_model, posterior, counts, covariates)
     future_frames, future_counts = [], []
@@ -176,20 +176,11 @@ def run(steps=150, draws=40, seed=21, plot=None):
         future_counts.append(sampled_counts)
     future_sales = pd.concat(future_frames, ignore_index=True)
     future_counts = np.concatenate(future_counts, axis=1)
-    all_items = pd.concat([history.frame, future_sales], ignore_index=True)
-    init_x, receipt_x, cure_x = feature_arrays(all_items, calendar)
-    result = forecast_returns(
-        history,
-        init_fit.parameters,
-        receipt_fit.parameters,
+    result = fitted.forecast(
         calendar=calendar,
         horizon=horizon,
         future_sales=future_sales,
         future_counts=future_counts,
-        initiation_features=init_x,
-        receipt_features=receipt_x,
-        initiation_cure_features=cure_x,
-        receipt_allowed=receipt_allowed,
         seed=seed + 5,
     )
     output_weekend = pd.DatetimeIndex(result.dates).dayofweek >= 5

@@ -12,6 +12,7 @@ from .models import (
     stage_log_likelihood,
     stage_model,
 )
+from .retail import FittedRetailReturnModel, RetailReturnModel
 from .survival import (
     StageParameters,
     conditional_susceptibility,
@@ -20,7 +21,9 @@ from .survival import (
 )
 
 __all__ = [
+    "FittedRetailReturnModel",
     "RetailHistory",
+    "RetailReturnModel",
     "ReturnForecast",
     "StageFit",
     "StageObservations",
