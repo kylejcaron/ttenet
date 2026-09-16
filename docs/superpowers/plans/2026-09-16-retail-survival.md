@@ -31,22 +31,31 @@ class RetailHistory:
     as_of: np.datetime64  # datetime64[D]
     policy_days: int
 
+
 def prepare_history(data, *, as_of, layout="tabular", policy_days=90) -> RetailHistory: ...
 def expand_covariates(records, items, dates, columns, *, layout="changes") -> np.ndarray: ...
+
+
 # changes: item_id/date + feature columns; sparse cells are unchanged.
 # longitudinal: exact daily rows; missing required coverage is an error.
 # Returns [item, calendar_day, feature]. No backward fill.
 
+
 # dates.py
-def to_day(values): ... # scalar or array, datetime64[D], missing allowed as NaT
+def to_day(values): ...  # scalar or array, datetime64[D], missing allowed as NaT
 
-def date_grid(start, end): ... # inclusive daily numpy array
 
-def elapsed_days(origin, dates): ... # integer day differences
+def date_grid(start, end): ...  # inclusive daily numpy array
 
-def calendar_features(dates) -> pd.DataFrame: ... # date, weekday, weekday_sin/cos
+
+def elapsed_days(origin, dates): ...  # integer day differences
+
+
+def calendar_features(dates) -> pd.DataFrame: ...  # date, weekday, weekday_sin/cos
+
 
 def allowed_days(dates, *, weekdays=range(7), closed_dates=()) -> np.ndarray: ...
+
 
 # survival.py
 class StageParameters(NamedTuple):
@@ -55,10 +64,14 @@ class StageParameters(NamedTuple):
     cure_intercept: Any  # scalar or [draw]
     cure_beta: Any  # [Q], or [draw, Q]
 
+
 def stage_hazard(parameters, ages, features, allowed=None): ...
 def susceptibility(parameters, cure_features): ...
 def conditional_susceptibility(probability, log_survival): ...
+
+
 # Numerical functions operate on one parameter draw; caller vmaps/selects draws.
+
 
 # models.py
 @dataclass(frozen=True)
@@ -70,18 +83,24 @@ class StageObservations:
     allowed: Any  # [N,T], hard closures, distinct from observation/censor mask
     event_index: Any  # [N], calendar index, -1 when censored
 
+
 @dataclass(frozen=True)
 class StageFit:
     parameters: StageParameters  # leading posterior draw dimension
     losses: Any
 
-def make_observations(history, stage, calendar, *, features=None,
-                      cure_features=None, allowed=None) -> StageObservations: ...
-def stage_log_likelihood(parameters, observations): ... # [N], differentiable
+
+def make_observations(
+    history, stage, calendar, *, features=None, cure_features=None, allowed=None
+) -> StageObservations: ...
+def stage_log_likelihood(parameters, observations): ...  # [N], differentiable
+
 
 def stage_model(observations, *, age_bins=30): ...
-def fit_stage(observations, *, age_bins=30, num_steps=500,
-              num_samples=100, seed=0, learning_rate=0.02) -> StageFit: ...
+def fit_stage(
+    observations, *, age_bins=30, num_steps=500, num_samples=100, seed=0, learning_rate=0.02
+) -> StageFit: ...
+
 
 # forecast.py
 @dataclass(frozen=True)
@@ -95,12 +114,26 @@ class ReturnForecast:
     expected_uninitiated_receipts: Any  # [draw]
     expected_open_receipts: Any  # [draw]
 
-def forecast_returns(history, initiation, receipt, *, calendar, horizon,
-                     future_sales=None, future_counts=None,
-                     initiation_features=None, receipt_features=None,
-                     initiation_cure_features=None, receipt_cure_features=None,
-                     initiation_allowed=None, receipt_allowed=None,
-                     seed=0) -> ReturnForecast: ...
+
+def forecast_returns(
+    history,
+    initiation,
+    receipt,
+    *,
+    calendar,
+    horizon,
+    future_sales=None,
+    future_counts=None,
+    initiation_features=None,
+    receipt_features=None,
+    initiation_cure_features=None,
+    receipt_cure_features=None,
+    initiation_allowed=None,
+    receipt_allowed=None,
+    seed=0,
+) -> ReturnForecast: ...
+
+
 # future_sales: DataFrame item_id,sale_date,quantity (cohort rows, extra features allowed).
 # future_counts: optional nonnegative integer [draw, future_cohort] overriding quantity.
 # Both parameter arguments accept one draw or a leading posterior draw axis.
@@ -116,16 +149,22 @@ def forecast_returns(history, initiation, receipt, *, calendar, horizon,
 
 **Owner:** data implementer. **Files:** create `src/ttenet/dates.py`, `src/ttenet/data.py`, `tests/test_data.py`.
 
-- [ ] Implement shared signatures with descriptive docstrings and validated canonical frames. Tabular uses canonical columns; absent event-date columns mean unobserved. Longitudinal uses `recorded_date` and full snapshots; changes use `date,event` with sale/initiation/receipt. Filter records to as-of before deriving known outcomes. Preserve static features on sale rows. Canonical output adds `age_since_sale`, nullable `age_since_initiation`, `eligible`.
-- [ ] Derive eligibility as no observed initiation and `0 <= age_since_sale <= policy_days`. Dates after cutoff become NaT; sales after cutoff are excluded. Reject impossible observed sequences and initiation after deadline. Receipts without observed initiation cannot enter receipt risk sets.
-- [ ] Implement per-column forward propagation for sparse change records. Do not interpret an unchanged sparse cell as missing and overwrite its prior value. Missing values before the first known value are errors on requested risk dates.
-- [ ] Add meaningful boundary tests, including this behavior:
+- [x] Implement shared signatures with descriptive docstrings and validated canonical frames. Tabular uses canonical columns; absent event-date columns mean unobserved. Longitudinal uses `recorded_date` and full snapshots; changes use `date,event` with sale/initiation/receipt. Filter records to as-of before deriving known outcomes. Preserve static features on sale rows. Canonical output adds `age_since_sale`, nullable `age_since_initiation`, `eligible`.
+- [x] Derive eligibility as no observed initiation and `0 <= age_since_sale <= policy_days`. Dates after cutoff become NaT; sales after cutoff are excluded. Reject impossible observed sequences and initiation after deadline. Receipts without observed initiation cannot enter receipt risk sets.
+- [x] Implement per-column forward propagation for sparse change records. Do not interpret an unchanged sparse cell as missing and overwrite its prior value. Missing values before the first known value are errors on requested risk dates.
+- [x] Add meaningful boundary tests, including this behavior:
 
 ```python
-history = prepare_history(pd.DataFrame({
-    "item_id": ["a", "b"], "sale_date": ["2026-01-01"] * 2,
-    "initiation_date": ["2026-01-10", "2026-04-02"],
-}), as_of="2026-01-05")
+history = prepare_history(
+    pd.DataFrame(
+        {
+            "item_id": ["a", "b"],
+            "sale_date": ["2026-01-01"] * 2,
+            "initiation_date": ["2026-01-10", "2026-04-02"],
+        }
+    ),
+    as_of="2026-01-05",
+)
 assert history.frame.initiation_date.isna().all()
 assert history.frame.eligible.all()
 ```
@@ -136,37 +175,40 @@ Also cover equivalent three layouts, day-90/day-91, timezone normalization, futu
 
 **Owner:** numerical implementer. **Files:** create `src/ttenet/survival.py`, `src/ttenet/models.py`, `tests/test_survival.py`.
 
-- [ ] Implement single-draw numerical primitives with JAX arrays and masked hazards. Tail age index is clipped to the final baseline bin. Negative ages must not accidentally accumulate survival; caller risk masks exclude them.
-- [ ] Implement likelihood in log space; risk mask includes only observed days through event/censor/deadline. Avoid undefined gradients from computing unused impossible branches. Observed event on a closed day has negative-infinite likelihood, never clipped to a small nonzero probability.
+- [x] Implement single-draw numerical primitives with JAX arrays and masked hazards. Tail age index is clipped to the final baseline bin. Negative ages must not accidentally accumulate survival; caller risk masks exclude them.
+- [x] Implement likelihood in log space; risk mask includes only observed days through event/censor/deadline. Avoid undefined gradients from computing unused impossible branches. Observed event on a closed day has negative-infinite likelihood, never clipped to a small nonzero probability.
 
 ```python
 # At h=.5, pi=.4, event on second exposed day has probability .4*.5*.5=.1.
 # Censor after two exposed days has probability .6+.4*.25=.7.
-np.testing.assert_allclose(np.exp(log_likelihood), [.1, .7], rtol=1e-6)
+np.testing.assert_allclose(np.exp(log_likelihood), [0.1, 0.7], rtol=1e-6)
 # Conditional susceptibility after those two days is .1/.7 = 1/7.
 ```
 
-- [ ] `make_observations` uses the exact calendar and source-row feature indexing. Initiation uses all historical sales; receipt uses initiated sales only. Filter corresponding feature/cure/mask rows for receipt, resetting age at initiation. Require calendar history coverage; future days are not likelihood contributions.
-- [ ] Implement NumPyro stage model with regularized flexible age baseline, linear time-varying regressors, and static susceptibility regression. Document site names and priors; provide real SVI with AutoNormal returning draws and losses. No custom inference engine.
-- [ ] Tests defend analytical probabilities, hard-zero days, same-day events, masking/censoring, finite gradients for ordinary valid inputs, and tail continuation. Skip validation during concurrent wave.
+- [x] `make_observations` uses the exact calendar and source-row feature indexing. Initiation uses all historical sales; receipt uses initiated sales only. Filter corresponding feature/cure/mask rows for receipt, resetting age at initiation. Require calendar history coverage; future days are not likelihood contributions.
+- [x] Implement NumPyro stage model with regularized flexible age baseline, linear time-varying regressors, and static susceptibility regression. Document site names and priors; provide real SVI with AutoNormal returning draws and losses. No custom inference engine.
+- [x] Tests defend analytical probabilities, hard-zero days, same-day events, masking/censoring, finite gradients for ordinary valid inputs, and tail continuation. Skip validation during concurrent wave.
 
 ## Task 3: Conditional, count-conserving return forecasts
 
 **Owner:** forecast implementer. **Files:** create `src/ttenet/forecast.py`, `tests/test_forecast.py`.
 
-- [ ] Implement the shared API using host-side NumPy count simulation and JAX stage primitives. Validate feature widths/calendar coverage/count support at the boundary. Normalize single vs posterior parameter draws without averaging; align or broadcast a single parameter draw with future count draws.
-- [ ] For historical uninitiated items, compute conditional susceptibility from all observed initiation risk days. For historical initiated/not-received items, condition receipt susceptibility from initiation through as-of. Exclude received units and expired uninitiated units. Future cohorts start with count quantities, not materialized unit rows.
-- [ ] Sequentially simulate initiation then receipt each calendar day, permitting same-day receipt of new initiations. Maintain separate receipt cohorts by initiation date, since their age clocks differ. Binomial conditional hazards include the current posterior susceptible fraction; update survival for survivors. Counts may never be negative or exceed remaining source population.
-- [ ] Compute exact expected remaining receipts at origin using the policy-limited initiation event probability and receipt susceptibility, plus conditioned existing open returns. Do not count future sales in `expected_existing_receipts`. Report the receipt tail assumption in docstrings.
-- [ ] Include a deterministic mass-conservation case with all-susceptible near-certain hazards, a zero-cure probability case, a conditional analytical example, abandonment, day-90 policy, no-weekend receipts, late receipt after initiation expiry, heterogeneous origin clocks, and uncertain future counts.
+- [x] Implement the shared API using host-side NumPy count simulation and stable logit arithmetic consistent with the JAX stage likelihood. Validate feature widths/calendar coverage/count support at the boundary. Normalize single vs posterior parameter draws without averaging; align or broadcast a single parameter draw with future count draws.
+- [x] For historical uninitiated items, compute conditional susceptibility from all observed initiation risk days. For historical initiated/not-received items, condition receipt susceptibility from initiation through as-of. Exclude received units and expired uninitiated units. Future cohorts start with count quantities, not materialized unit rows.
+- [x] Sequentially simulate initiation then receipt each calendar day, permitting same-day receipt of new initiations. Maintain separate receipt cohorts by initiation date, since their age clocks differ. Binomial conditional hazards include the current posterior susceptible fraction; update survival for survivors. Counts may never be negative or exceed remaining source population.
+- [x] Compute exact expected remaining receipts at origin using the policy-limited initiation event probability and receipt susceptibility, plus conditioned existing open returns. Do not count future sales in `expected_existing_receipts`. Report the receipt tail assumption in docstrings.
+- [x] Include a deterministic mass-conservation case with all-susceptible near-certain hazards, a zero-cure probability case, a conditional analytical example, abandonment, day-90 policy, no-weekend receipts, late receipt after initiation expiry, heterogeneous origin clocks, and uncertain future counts.
 
 ```python
-assert np.all(result.receipts.sum(axis=1) <= (
-    historical_open + historical_eligible + future_counts.sum(axis=1)
-))
+assert np.all(
+    result.receipts.sum(axis=1)
+    <= (historical_open + historical_eligible + future_counts.sum(axis=1))
+)
 assert np.all(result.receipts[:, weekend_output_mask] == 0)
-np.testing.assert_allclose(result.expected_existing_receipts,
-                           result.expected_open_receipts + result.expected_uninitiated_receipts)
+np.testing.assert_allclose(
+    result.expected_existing_receipts,
+    result.expected_open_receipts + result.expected_uninitiated_receipts,
+)
 ```
 
 No test should merely assert these field copies; use analytically known expected probabilities and independently known source counts. Skip all validation during concurrent wave.
@@ -175,17 +217,36 @@ No test should merely assert these field copies; use analytically known expected
 
 **Owner:** coordinator/integration. **Files:** create `pyproject.toml`, `src/ttenet/__init__.py`, `src/ttenet/integration.py`, `examples/retail_returns.py`, `tests/test_integration.py`; update `README.md`.
 
-- [ ] Package with hatchling and uv; base dependencies NumPy/pandas/JAX/NumPyro. Optional forecast and example extras. Dev dependencies pytest/ruff. Expose the agreed APIs without duplicate abstractions.
-- [ ] Implement `sales_cohorts(samples, dates, *, series=0, prefix="future") -> (DataFrame, np.ndarray)` for actual NumPyro Forecast samples `[draw,time,obs]`. Preserve each integer draw exactly, one homogeneous future cohort per date for the selected series. Reject invalid count draws rather than rounding or silently replacing with expectations.
-- [ ] Example simulates real item-level truth using cure draws and age/calendar-dependent hazards, then creates a censored training snapshot. Set policy 90, weekend receipt closures, and a storm regressor. Fit both stages with real SVI, keeping future records hidden. Fit a NumPyro sales model and obtain actual `numpyro_forecast.forecast` draws for future quantities. Run return forecasts, print outstanding estimates and held-out count forecast scores, and optionally save a plot.
-- [ ] README documents install, runnable command, low-level likelihood and fitting APIs, three input representations, exact date/policy semantics, scenario coverage, finite-data cure limitations, and continuing receipt tail. No claims of generic event networks or perfect cure identification.
+- [x] Package with hatchling and uv; base dependencies NumPy/pandas/JAX/NumPyro. Optional forecast and example extras. Dev dependencies pytest/ruff. Expose the agreed APIs without duplicate abstractions.
+- [x] Implement `sales_cohorts(samples, dates, *, series=0, prefix="future") -> (DataFrame, np.ndarray)` for actual NumPyro Forecast samples `[draw,time,obs]`. Preserve each integer draw exactly, one homogeneous future cohort per date for the selected series. Reject invalid count draws rather than rounding or silently replacing with expectations.
+- [x] Example simulates real item-level truth using cure draws and age/calendar-dependent hazards, then creates a censored training snapshot. Set policy 90, weekend receipt closures, and a storm regressor. Fit both stages with real SVI, keeping future records hidden. Fit a NumPyro sales model and obtain actual `numpyro_forecast.forecast` draws for future quantities. Run return forecasts, print outstanding estimates and held-out count forecast scores, and optionally save a plot.
+- [x] README documents install, runnable command, low-level likelihood and fitting APIs, three input representations, exact date/policy semantics, scenario coverage, finite-data cure limitations, and continuing receipt tail. No claims of generic event networks or perfect cure identification.
 
 ## Verification and review gates
 
-- [ ] Install: `uv sync --all-extras`.
-- [ ] Focused combined tests: `uv run pytest -q` (the repository begins with no existing suite).
-- [ ] Execute actual example: `uv run python examples/retail_returns.py --steps 150 --draws 40`.
-- [ ] Validate generated counts, zero weekend receipts, policy boundaries, finite fitted losses/draws, outstanding decomposition, and held-out scores from the example output.
-- [ ] Run `uv run ruff check .` and `uv run ruff format --check .`, applying the formatter once at integration.
-- [ ] Obtain independent numerical and data/API reviews; fix actionable findings and rerun their covering cases. Reviewers skip build/lint/test commands.
-- [ ] Commit only implementation/doc/example files and lockfile; preserve unrelated existing working-tree changes. Close tracked work with exact command/output evidence. Leave branch unmerged and report run instructions and modeling limitations.
+- [x] Install: `uv sync --all-extras`.
+- [x] Focused combined tests: `uv run pytest -q` (the repository begins with no existing suite).
+- [x] Execute actual example: `uv run python examples/retail_returns.py --steps 150 --draws 40`.
+- [x] Validate generated counts, zero weekend receipts, policy boundaries, finite fitted losses/draws, outstanding decomposition, and held-out scores from the example output.
+- [x] Run `uv run ruff check .` and `uv run ruff format --check .`, applying the formatter at integration.
+- [x] Obtain independent numerical and data/API reviews; fix actionable findings and rerun their covering cases. Reviewers skip build/lint/test commands.
+- [x] Commit only implementation/doc/example files and lockfile; preserve unrelated existing working-tree changes. Close tracked work with exact command/output evidence. Leave branch unmerged and report run instructions and modeling limitations.
+
+## Completion evidence
+
+- `uv run pytest -q`: **97 passed**.
+- `uv run ruff check .` and `uv run ruff format --check .`: passed.
+- `uv build`: source distribution and wheel built successfully.
+- `uv run python examples/retail_returns.py --steps 150 --draws 40 --plot /tmp/ttenet-retail-returns.png`: real SVI fits and upstream sales forecasting completed with finite losses, exact daily outstanding-count conservation, and zero weekend receipts. Plot inspected.
+- Example: 366 historical sales, 112 initiations, 142 eligible uninitiated units, and 22 open returns. Expected remaining receipts from past sales: 9.9532. Forecast receipts including future sales: mean 15.8, total 90% interval [8.95, 25.15], versus 10 held-out receipts. These are synthetic smoke-run results, not a convergence or calibration guarantee.
+- Direct public `stage_model` NUTS smoke: five warmup steps, three finite posterior draws using `StageObservations` as a pytree.
+- Independent data, numerical, forecast, and integration reviews completed; final integration verdict: spec compliance PASS, code quality PASS, no shipping blockers.
+- `roborev fix --list --branch feat/retail-survival`: no open jobs.
+
+### Implementation decisions and regression coverage
+
+- Forecast propagation stays in host float64 NumPy rather than passing sigmoid probabilities through JAX float32. It uses the same logit-defined hazards, avoids saturation/cancellation, and does not change global JAX configuration.
+- Likelihood uses `log_sigmoid` directly on finite logits; closure days remain exactly impossible. Regression cases cover finite gradients at strong logits and cancellation-free remaining-initiation probability.
+- Reproduced and fixed stale derived clocks, duplicated longitudinal indices, conflicting same-feature/day updates, missing future sale dates, and the final-day loss of abandoned future-return cohorts.
+- Actual fitted SVI-to-forecast execution covers posterior-axis compatibility, including zero-width receipt cure features. Kept behavioral regressions rather than adding shape-only plumbing tests.
+- Source distribution explicitly selects package, examples, tests, and public metadata; local agent/kata configuration is excluded. User-owned repository configuration remains unchanged and outside implementation commits.

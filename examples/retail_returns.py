@@ -1,0 +1,270 @@
+"""Fit two return stages and forecast arrivals from real NumPyro sales draws.
+
+Run: uv run python examples/retail_returns.py --steps 150 --draws 40
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import jax.numpy as jnp
+import numpy as np
+import numpyro
+import numpyro.distributions as dist
+import pandas as pd
+from jax import random
+from numpyro.infer import SVI, Trace_ELBO
+from numpyro.infer.autoguide import AutoNormal
+from numpyro.optim import Adam
+from numpyro_forecast import Horizon, forecast, predict
+
+from ttenet import (
+    allowed_days,
+    date_grid,
+    fit_stage,
+    forecast_returns,
+    make_observations,
+    prepare_history,
+    sales_cohorts,
+)
+
+
+def sigmoid(value):
+    return 1 / (1 + np.exp(-value))
+
+
+def storms(days):
+    """An explicitly supplied historical/future weather scenario, not a forecast."""
+    age = (np.asarray(days, dtype="datetime64[D]") - np.datetime64("2026-01-01")).astype(int)
+    return (
+        ((age >= 45) & (age <= 49)) | ((age >= 125) & (age <= 129)) | ((age >= 185) & (age <= 189))
+    ).astype(float)
+
+
+def simulate_retail(seed=21, training_days=180, horizon=28):
+    rng = np.random.default_rng(seed)
+    start = np.datetime64("2026-01-01")
+    sales_days = date_grid(start, start + np.timedelta64(training_days + horizon - 1, "D"))
+    weekday = pd.DatetimeIndex(sales_days).dayofweek.to_numpy()
+    season = np.sin(2 * np.pi * weekday / 7)
+    rates = np.exp(np.log([1.2, 0.8]) + season[:, None] * np.array([0.3, -0.2]))
+    daily_sales = rng.poisson(rates)
+    rows = []
+    for day_index, date in enumerate(sales_days):
+        for product in range(2):
+            for _ in range(daily_sales[day_index, product]):
+                initiated = np.datetime64("NaT", "D")
+                received = np.datetime64("NaT", "D")
+                susceptible = rng.random() < sigmoid(-0.8 + 0.45 * product)
+                if susceptible:
+                    for age in range(91):
+                        day = date + np.timedelta64(age, "D")
+                        week = pd.Timestamp(day).dayofweek
+                        hazard = sigmoid(
+                            -2.5
+                            + 0.35 * np.cos(min(age, 15) / 5)
+                            - 0.25 * product
+                            + 0.3 * np.sin(2 * np.pi * week / 7)
+                        )
+                        if rng.random() < hazard:
+                            initiated = day
+                            break
+                abandoned = False
+                if not np.isnat(initiated):
+                    abandoned = rng.random() >= 0.8
+                    if not abandoned:
+                        # Continue until receipt, not until the sale's policy expires.
+                        age = 0
+                        while np.isnat(received):
+                            day = initiated + np.timedelta64(age, "D")
+                            if pd.Timestamp(day).dayofweek < 5:
+                                hazard = sigmoid(
+                                    -1.0
+                                    + 0.2 * np.cos(min(age, 15) / 5)
+                                    - 2.0 * float(storms([day])[0])
+                                )
+                                if rng.random() < hazard:
+                                    received = day
+                            age += 1
+                rows.append(
+                    {
+                        "item_id": f"sale_{len(rows)}",
+                        "sale_date": date,
+                        "initiation_date": initiated,
+                        "receipt_date": received,
+                        "product": float(product),
+                        "abandoned_truth": abandoned,
+                    }
+                )
+    return pd.DataFrame(rows), daily_sales
+
+
+def feature_arrays(frame, calendar):
+    product = frame["product"].to_numpy(float)
+    weekday = pd.DatetimeIndex(calendar).dayofweek.to_numpy()
+    init = np.empty((len(frame), len(calendar), 2))
+    init[:, :, 0] = product[:, None]
+    init[:, :, 1] = np.sin(2 * np.pi * weekday / 7)[None, :]
+    receipt = np.broadcast_to(storms(calendar)[None, :, None], (len(frame), len(calendar), 1))
+    return init, receipt, product[:, None]
+
+
+def sales_model(covariates, data=None):
+    h = Horizon.from_data(covariates, data)
+    log_rate = numpyro.sample(
+        "log_rate", dist.Normal(jnp.log(jnp.array([1.2, 0.8])), 0.6).to_event(1)
+    )
+    weekday_effect = numpyro.sample("weekday_effect", dist.Normal(0, 0.4).expand([2]).to_event(1))
+    eta = log_rate + covariates * weekday_effect
+    predict(h, lambda value: dist.Poisson(jnp.exp(value)), eta)
+
+
+def run(steps=150, draws=40, seed=21, plot=None):
+    if steps <= 0 or draws <= 0:
+        raise ValueError("steps and draws must be positive")
+    training_days, horizon = 180, 28
+    truth, sales = simulate_retail(seed, training_days, horizon)
+    as_of = np.datetime64("2026-01-01") + np.timedelta64(training_days - 1, "D")
+    # Only business observations reach the estimator; latent abandonment labels do not.
+    observed = truth.drop(columns="abandoned_truth")
+    history = prepare_history(observed, as_of=as_of, policy_days=90)
+    output_dates = date_grid(as_of + np.timedelta64(1, "D"), as_of + np.timedelta64(horizon, "D"))
+    calendar = date_grid(np.datetime64("2026-01-01"), output_dates[-1] + np.timedelta64(90, "D"))
+    init_x, receipt_x, cure_x = feature_arrays(history.frame, calendar)
+    receipt_allowed = allowed_days(calendar, weekdays=range(5))
+    init_obs = make_observations(
+        history, "initiation", calendar, features=init_x, cure_features=cure_x
+    )
+    receipt_obs = make_observations(
+        history, "receipt", calendar, features=receipt_x, allowed=receipt_allowed
+    )
+    print(
+        f"Fitting {len(history.frame)} sales and {len(receipt_obs.event_index)} initiated returns",
+        flush=True,
+    )
+    init_fit = fit_stage(init_obs, age_bins=16, num_steps=steps, num_samples=draws, seed=seed)
+    receipt_fit = fit_stage(
+        receipt_obs, age_bins=16, num_steps=steps, num_samples=draws, seed=seed + 1
+    )
+    if not np.isfinite(init_fit.losses).all() or not np.isfinite(receipt_fit.losses).all():
+        raise RuntimeError("stage fitting produced nonfinite losses")
+
+    sales_calendar = calendar[: training_days + horizon]
+    week = pd.DatetimeIndex(sales_calendar).dayofweek.to_numpy()
+    covariates = jnp.asarray(np.sin(2 * np.pi * week / 7)[:, None])
+    counts = jnp.asarray(sales[:training_days], dtype=jnp.int32)
+    guide = AutoNormal(sales_model)
+    svi = SVI(sales_model, guide, Adam(0.03), Trace_ELBO())
+    fitted = svi.run(
+        random.PRNGKey(seed + 2), steps, covariates[:training_days], counts, progress_bar=False
+    )
+    if not np.isfinite(fitted.losses).all():
+        raise RuntimeError("sales fitting produced nonfinite losses")
+    posterior = guide.sample_posterior(
+        random.PRNGKey(seed + 3), fitted.params, sample_shape=(draws,)
+    )
+    sales_draws = forecast(random.PRNGKey(seed + 4), sales_model, posterior, counts, covariates)
+    future_frames, future_counts = [], []
+    for product in range(2):
+        frame, sampled_counts = sales_cohorts(
+            sales_draws, output_dates, series=product, prefix=f"product{product}"
+        )
+        frame["product"] = float(product)
+        future_frames.append(frame)
+        future_counts.append(sampled_counts)
+    future_sales = pd.concat(future_frames, ignore_index=True)
+    future_counts = np.concatenate(future_counts, axis=1)
+    all_items = pd.concat([history.frame, future_sales], ignore_index=True)
+    init_x, receipt_x, cure_x = feature_arrays(all_items, calendar)
+    result = forecast_returns(
+        history,
+        init_fit.parameters,
+        receipt_fit.parameters,
+        calendar=calendar,
+        horizon=horizon,
+        future_sales=future_sales,
+        future_counts=future_counts,
+        initiation_features=init_x,
+        receipt_features=receipt_x,
+        initiation_cure_features=cure_x,
+        receipt_allowed=receipt_allowed,
+        seed=seed + 5,
+    )
+    output_weekend = pd.DatetimeIndex(result.dates).dayofweek >= 5
+    assert np.all(result.receipts[:, output_weekend] == 0)
+    assert np.all(result.initiations >= 0) and np.all(result.receipts >= 0)
+    historical_open = int(
+        (history.frame.initiation_date.notna() & history.frame.receipt_date.isna()).sum()
+    )
+    historical_eligible = int(history.frame.eligible.sum())
+    assert np.all(result.initiations.sum(axis=1) <= historical_eligible + future_counts.sum(axis=1))
+    assert np.all(result.receipts.sum(axis=1) <= historical_open + result.initiations.sum(axis=1))
+    np.testing.assert_array_equal(
+        result.open_returns + result.receipts.cumsum(axis=1),
+        historical_open + result.initiations.cumsum(axis=1),
+    )
+    np.testing.assert_allclose(
+        result.expected_existing_receipts,
+        result.expected_open_receipts + result.expected_uninitiated_receipts,
+    )
+    actual_receipts = np.array(
+        [(truth.receipt_date == pd.Timestamp(date)).sum() for date in result.dates]
+    )
+    predicted = result.receipts.mean(axis=0)
+    # Empirical CRPS for counts, computed per forecast date from predictive draws.
+    pairwise = np.abs(result.receipts[:, None, :] - result.receipts[None, :, :]).mean(axis=(0, 1))
+    crps = (np.abs(result.receipts - actual_receipts).mean(axis=0) - 0.5 * pairwise).mean()
+    summary = {
+        "historical_sales": len(history.frame),
+        "eligible_uninitiated_at_origin": historical_eligible,
+        "initiated_not_received_at_origin": historical_open,
+        "expected_remaining_receipts_from_past_sales": float(
+            result.expected_existing_receipts.mean()
+        ),
+        "expected_from_uninitiated": float(result.expected_uninitiated_receipts.mean()),
+        "expected_from_open_returns": float(result.expected_open_receipts.mean()),
+        "forecast_receipts_mean": float(result.receipts.sum(axis=1).mean()),
+        "forecast_receipts_90pct_interval": np.quantile(
+            result.receipts.sum(axis=1), [0.05, 0.95]
+        ).tolist(),
+        "held_out_receipts": int(actual_receipts.sum()),
+        "daily_receipt_mae": float(np.abs(predicted - actual_receipts).mean()),
+        "daily_receipt_crps": float(crps),
+        "weekend_receipts": int(result.receipts[:, output_weekend].sum()),
+        "abandoned_initiations_in_synthetic_truth": int(truth.abandoned_truth.sum()),
+        "posterior_draws": draws,
+        "finite_stage_and_sales_losses": True,
+        "mass_conservation": True,
+    }
+    print(json.dumps(summary, indent=2), flush=True)
+    if plot:
+        import matplotlib.pyplot as plt
+
+        lo, hi = np.quantile(result.receipts, [0.05, 0.95], axis=0)
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.fill_between(result.dates, lo, hi, alpha=0.25, label="90% predictive interval")
+        ax.plot(result.dates, predicted, label="Mean predicted receipts")
+        ax.plot(result.dates, actual_receipts, "o", label="Held-out receipts")
+        ax.set(
+            ylabel="Received units per day", title="Retail returns: two linked cure-capable stages"
+        )
+        ax.legend()
+        fig.autofmt_xdate()
+        fig.tight_layout()
+        destination = Path(plot)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(destination)
+        plt.close(fig)
+    return summary
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--steps", type=int, default=600)
+    parser.add_argument("--draws", type=int, default=100)
+    parser.add_argument("--seed", type=int, default=21)
+    parser.add_argument("--plot", type=str)
+    args = parser.parse_args()
+    run(args.steps, args.draws, args.seed, args.plot)

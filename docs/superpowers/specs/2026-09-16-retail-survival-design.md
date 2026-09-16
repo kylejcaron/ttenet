@@ -2,7 +2,7 @@
 
 ## Authorization and scope
 
-The user approved retail sales with two observed transitions (initiation and receipt), abandonment, both outstanding measures, date conveniences, calendar regressors, and a 90-day initiation policy. The user then explicitly requested a plan followed by immediate subagent-driven implementation, superseding further interactive design/spec approval pauses.
+The user approved retail sales with two observed transitions (initiation and receipt), abandonment, both outstanding measures, date conveniences, calendar regressors, and a 90-day initiation policy. The user then explicitly requested a plan followed by immediate implementation, superseding further interactive design/spec approval pauses.
 
 Build a Python library and runnable end-to-end example, not rental inventory optimization. Preserve existing uncommitted repository configuration. Work on `feat/retail-survival`; do not merge or push.
 
