@@ -250,3 +250,43 @@ No test should merely assert these field copies; use analytically known expected
 - Reproduced and fixed stale derived clocks, duplicated longitudinal indices, conflicting same-feature/day updates, missing future sale dates, and the final-day loss of abandoned future-return cohorts.
 - Actual fitted SVI-to-forecast execution covers posterior-axis compatibility, including zero-width receipt cure features. Kept behavioral regressions rather than adding shape-only plumbing tests.
 - Source distribution explicitly selects package, examples, tests, and public metadata; local agent/kata configuration is excluded. User-owned repository configuration remains unchanged and outside implementation commits.
+
+## Follow-up: thin public model interface
+
+**Goal:** Expose reusable configuration and separate fitted forecasts without replacing the functional numerical core. The user selected this direction after seeing the functional API.
+
+**Architecture:** New `src/ttenet/retail.py` holds frozen `RetailReturnModel` and `FittedRetailReturnModel`; `src/ttenet/__init__.py` exports them. A single feature-builder callable uses the six existing forecast keyword names. Explicit calendars/scenarios, numerical priors, count simulation, and upstream sales forecasting remain unchanged.
+
+### Public contract
+
+```python
+model = RetailReturnModel(policy_days=90, age_bins=16, feature_builder=retail_features)
+fitted = model.fit(
+    sales,
+    as_of=cutoff,
+    calendar=calendar,
+    num_steps=150,
+    num_samples=40,
+    seed=21,
+)
+result = fitted.forecast(
+    calendar=calendar,
+    horizon=28,
+    future_sales=future_sales,
+    future_counts=future_counts,
+    seed=26,
+)
+```
+
+`retail_features(frame, calendar)` returns a mapping with keys drawn from `initiation_features`, `receipt_features`, `initiation_cure_features`, `receipt_cure_features`, `initiation_allowed`, `receipt_allowed`. Historical rows are canonical and future records are hidden at fitting; forecasting builds features once for historical rows followed by future cohorts. Missing keys retain existing zero-regressor/all-open defaults; unknown keys fail explicitly.
+
+`fit` also accepts a copied `RetailHistory` with matching policy, without cutoff/layout overrides. It calls `make_observations` for each stage and `fit_stage` with seeds `seed` and `seed + 1`. Returned attributes are `model`, `history`, `initiation_fit`, `receipt_fit`; each call creates a distinct fitted snapshot. All existing inference controls pass through unchanged.
+
+### Implementation
+
+- [ ] Main: add behavior-first tests in `tests/test_retail.py`. Exercise actual SVI fits, then fit the same configuration to a completed population and verify the earlier fit's forecasts are unchanged. Use real fixed posterior parameters to verify two future cohorts with different receipt closures preserve draw-specific quantities and remain correctly ordered. Reject misspelled feature keys rather than silently allowing closed-day receipts. Observe missing-API failures before implementation.
+- [ ] Model owner: implement `src/ttenet/retail.py` and exports only. Reuse `prepare_history`, `make_observations`, `fit_stage`, and `forecast_returns`; no duplicate validation of numerical shapes, date rules, or likelihoods. Copy caller-owned canonical histories; keep fit state separate from configuration.
+- [ ] Example/docs owner: migrate `examples/retail_returns.py` and the README's primary call flow to the class. Adapt the existing `feature_arrays` helper to return the shared mapping and include the existing weekend mask. Keep SVI seeds, upstream `numpyro_forecast.forecast`, sales draws, forecast seed, scores, and exact conservation checks unchanged. Keep low-level documentation for direct numerical use.
+- [ ] Main: run `uv run pytest -q`, `uv run python examples/retail_returns.py --steps 150 --draws 40 --plot /tmp/ttenet-retail-class.png`, Ruff checks, and `uv build`. Compare deterministic example metrics with the preceding functional run. Obtain scoped API/behavior review and resolve findings.
+
+Parallel ownership: model and example/docs edits are disjoint; both implementers skip builds, tests, formatters, and linters. Main owns tests, design/plan updates, and final verification. Preserve `.gitignore`, `.kata.toml`, and `AGENTS.md`; stay on `feat/retail-survival`, without merge/push.

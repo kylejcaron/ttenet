@@ -65,3 +65,17 @@ Run an end-to-end synthetic retail example with a 90-day policy, non-returners, 
 ## Limits made explicit
 
 Daily resolution, conditional independence between units given parameters/covariates, no partial-unit returns or repeated return attempts, no inventory feedback, no automatic forecasting of unknown weather, and no identification of infinite-lifetime cure from finite data. Forecasts depend on the supplied future-sales mix, date scenarios, and documented tail convention.
+
+## Thin public model interface
+
+The user selected a thin public class after reviewing the functional API. Use two frozen dataclasses, not a stateful fit-in-place estimator or a model inheritance hierarchy:
+
+- `RetailReturnModel(policy_days=90, age_bins=30, feature_builder=None)` owns reusable configuration. Both stages use `age_bins`; existing stage functions remain available for advanced configurations.
+- `.fit(data, *, calendar, as_of=None, layout="tabular", num_steps=500, num_samples=100, seed=0, learning_rate=0.02)` returns a separate `FittedRetailReturnModel`. Raw data require `as_of` and use the existing layout adapters. A `RetailHistory` is accepted without `as_of`/layout overrides, must match the model policy, and is copied so subsequent caller edits do not change the fit's history.
+- `FittedRetailReturnModel` retains `model`, `history`, `initiation_fit`, and `receipt_fit`. `.forecast(*, calendar, horizon, future_sales=None, future_counts=None, seed=0)` returns the existing `ReturnForecast`. Fitting the same configuration again must not change an earlier fit's forecasts.
+
+`feature_builder(frame, calendar)` is a pure callable returning a mapping with any of the existing forecast keyword names: `initiation_features`, `receipt_features`, `initiation_cure_features`, `receipt_cure_features`, `initiation_allowed`, `receipt_allowed`. Unknown keys are errors rather than silently ignored regressors or closure masks. With no builder, both stages have no regressors and all days are allowed. Fit-time rows are canonical historical units; forecast-time rows are historical units followed by future cohorts. The wrapper handles that ordering. Array shape validation stays in the existing numerical boundary functions.
+
+Keep calendars and future covariate scenarios explicit. The builder must preserve feature definitions, ordering, and fixed training-derived scaling; the wrapper does not learn preprocessing or forecast weather. Frozen containers do not make nested arrays/dataframes/callback state deeply immutable; treat fitted contents and builder inputs as read-only.
+
+The numerical model, priors, simulator, and optional sales-forecast integration are unchanged. No scan rewrite, serialization framework, feature-expression language, or additional inference backend is included. The README and full worked example lead with the class interface; low-level functions remain supported numerical building blocks.
