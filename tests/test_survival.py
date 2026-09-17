@@ -11,7 +11,12 @@ import pandas as pd
 import pytest
 
 from ttenet.dates import date_grid
-from ttenet.models import StageObservations, make_observations, stage_log_likelihood
+from ttenet.models import (
+    StageObservations,
+    make_event_observations,
+    make_observations,
+    stage_log_likelihood,
+)
 from ttenet.survival import (
     StageParameters,
     conditional_susceptibility,
@@ -378,3 +383,152 @@ def test_make_observations_future_calendar_days_are_not_at_risk():
     as_of_index = 9  # 2026-01-10 is the 10th day (index 9)
     assert at_risk[as_of_index]
     assert not np.any(at_risk[as_of_index + 1 :])
+
+
+# --- Conditional-entry likelihood (pre_entry) -------------------------------
+
+
+def test_pre_entry_conditions_cure_logit_on_known_prior_survival():
+    # h=.5 constant, pi=.4. Two known event-free pre-entry days (S_pre=.25),
+    # then censored through two more post-entry at-risk days (S_post=.25).
+    # The conditional-entry likelihood must equal the exact Bayes identity
+    # for "survive all 4 days given already known to survive the first 2":
+    # ((1-pi) + pi*S_pre*S_post) / ((1-pi) + pi*S_pre) = 0.625 / 0.7.
+    params = _constant_hazard_params(hazard=0.5, cure_probability=0.4)
+    observations = StageObservations(
+        ages=jnp.array([[0, 1, 2, 3]]),
+        features=jnp.zeros((1, 4, 0)),
+        cure_features=jnp.zeros((1, 0)),
+        at_risk=jnp.array([[False, False, True, True]]),
+        allowed=jnp.ones((1, 4), dtype=bool),
+        event_index=jnp.array([-1]),
+        pre_entry=jnp.array([[True, True, False, False]]),
+    )
+    log_likelihood = stage_log_likelihood(params, observations)
+    np.testing.assert_allclose(np.exp(np.array(log_likelihood)), [0.625 / 0.7], rtol=1e-6)
+
+
+# --- make_event_observations (generic conditional-entry stage clock) --------
+
+
+def test_make_observations_none_policy_days_is_an_unbounded_deadline():
+    # policy_days=None must behave as an unbounded initiation deadline: an
+    # uninitiated row stays at risk straight through as_of regardless of age.
+    history = _history(
+        as_of="2026-06-01",
+        policy_days=None,
+        item_id=["a"],
+        sale_date=pd.to_datetime(["2026-01-01"]),
+        initiation_date=pd.to_datetime([pd.NaT]),
+        receipt_date=pd.to_datetime([pd.NaT]),
+    )
+    calendar = date_grid("2026-01-01", "2026-06-01")
+    observations = make_observations(history, "initiation", calendar)
+    at_risk = np.array(observations.at_risk[0])
+    as_of_index = int(
+        (np.datetime64("2026-06-01") - np.datetime64("2026-01-01")) / np.timedelta64(1, "D")
+    )
+    assert at_risk[as_of_index]
+    assert int(at_risk.sum()) == as_of_index + 1
+
+
+def test_make_event_observations_entry_splits_pre_entry_and_at_risk():
+    # A row entering a snapshot on day 3 keeps its origin-based age clock,
+    # but at_risk only starts at entry; pre_entry covers the known
+    # event-free run from origin through the day before entry.
+    frame = pd.DataFrame(
+        {"origin": pd.to_datetime(["2026-01-01"]), "own_event": pd.to_datetime([pd.NaT])}
+    )
+    calendar = date_grid("2026-01-01", "2026-01-10")
+    observations = make_event_observations(
+        frame,
+        origin_column="origin",
+        event_column="own_event",
+        as_of=np.datetime64("2026-01-10", "D"),
+        calendar=calendar,
+        entry_dates=pd.to_datetime(["2026-01-04"]),
+    )
+    pre_entry = np.array(observations.pre_entry[0])
+    at_risk = np.array(observations.at_risk[0])
+    # origin=day0, entry=day3: pre-entry covers days 0,1,2; at_risk starts day3.
+    np.testing.assert_array_equal(pre_entry[:3], [True, True, True])
+    assert not np.any(pre_entry[3:])
+    assert not np.any(at_risk[:3])
+    assert at_risk[3]
+
+
+def test_make_event_observations_event_before_entry_excludes_row():
+    # A row whose own event already happened before its snapshot entry
+    # contributes no new likelihood: it must be dropped entirely, not
+    # zeroed out or forced into a degenerate probability.
+    frame = pd.DataFrame(
+        {
+            "origin": pd.to_datetime(["2026-01-01", "2026-01-01"]),
+            "own_event": pd.to_datetime(["2026-01-02", pd.NaT]),
+        }
+    )
+    calendar = date_grid("2026-01-01", "2026-01-10")
+    observations = make_event_observations(
+        frame,
+        origin_column="origin",
+        event_column="own_event",
+        as_of=np.datetime64("2026-01-10", "D"),
+        calendar=calendar,
+        entry_dates=pd.to_datetime(["2026-01-05", "2026-01-05"]),
+    )
+    # Row 0's event (day 1) precedes its entry (day 4): excluded. Only row 1 remains.
+    assert observations.ages.shape[0] == 1
+
+
+def test_make_event_observations_event_without_parent_raises():
+    frame = pd.DataFrame(
+        {"origin": pd.to_datetime([pd.NaT]), "own_event": pd.to_datetime(["2026-01-02"])}
+    )
+    with pytest.raises(ValueError):
+        make_event_observations(
+            frame,
+            origin_column="origin",
+            event_column="own_event",
+            as_of=np.datetime64("2026-01-10", "D"),
+            calendar=date_grid("2026-01-01", "2026-01-10"),
+        )
+
+
+def test_make_event_observations_event_exceeds_deadline_raises():
+    frame = pd.DataFrame(
+        {
+            "origin": pd.to_datetime(["2026-01-01"]),
+            "own_event": pd.to_datetime(["2026-01-15"]),  # 14 days later
+        }
+    )
+    with pytest.raises(ValueError, match="deadline"):
+        make_event_observations(
+            frame,
+            origin_column="origin",
+            event_column="own_event",
+            as_of=np.datetime64("2026-01-20", "D"),
+            calendar=date_grid("2026-01-01", "2026-01-20"),
+            deadline_days=10,
+        )
+
+
+def test_entry_before_parent_starts_exposure_at_parent_event():
+    frame = pd.DataFrame(
+        {
+            "origin": pd.to_datetime(["2026-01-05"]),
+            "own_event": pd.to_datetime(["2026-01-06"]),
+        }
+    )
+    observations = make_event_observations(
+        frame,
+        origin_column="origin",
+        event_column="own_event",
+        as_of="2026-01-10",
+        calendar=date_grid("2026-01-01", "2026-01-10"),
+        entry_dates=["2026-01-01"],
+    )
+    parameters = _constant_hazard_params(hazard=0.5, cure_probability=0.4)
+    # Parent day zero survives, then the event happens at age one: .4*.5*.5.
+    np.testing.assert_allclose(
+        np.exp(stage_log_likelihood(parameters, observations)), [0.1], rtol=1e-6
+    )

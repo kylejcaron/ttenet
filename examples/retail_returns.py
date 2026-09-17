@@ -1,4 +1,4 @@
-"""Fit two return stages and forecast arrivals from real NumPyro sales draws.
+"""Jointly fit sales and return processes, including a pre-window population.
 
 Run: uv run python examples/retail_returns.py --steps 150 --draws 40
 """
@@ -14,18 +14,15 @@ import numpy as np
 import numpyro
 import numpyro.distributions as dist
 import pandas as pd
-from jax import random
-from numpyro.infer import SVI, Trace_ELBO
-from numpyro.infer.autoguide import AutoNormal
-from numpyro.optim import Adam
-from numpyro_forecast import Horizon, forecast, predict
+from numpyro_forecast import Horizon, predict
 
 from ttenet import (
+    CountProcess,
+    CureProcess,
+    RetailData,
     RetailReturnModel,
-    allowed_days,
     date_grid,
     prepare_history,
-    sales_cohorts,
 )
 
 
@@ -99,29 +96,33 @@ def simulate_retail(seed=21, training_days=180, horizon=28):
     return pd.DataFrame(rows), daily_sales
 
 
-def feature_arrays(frame, calendar):
-    """Shared feature/allowed-day builder for both fitting and forecasting rows."""
+def initiation_covariates(frame, calendar):
+    """Product attributes and calendar features with fixed meanings across windows."""
     product = frame["product"].to_numpy(float)
     weekday = pd.DatetimeIndex(calendar).dayofweek.to_numpy()
-    initiation_features = np.empty((len(frame), len(calendar), 2))
-    initiation_features[:, :, 0] = product[:, None]
-    initiation_features[:, :, 1] = np.sin(2 * np.pi * weekday / 7)[None, :]
-    receipt_features = np.broadcast_to(
-        storms(calendar)[None, :, None], (len(frame), len(calendar), 1)
-    )
+    features = np.empty((len(frame), len(calendar), 2))
+    features[:, :, 0] = product[:, None]
+    features[:, :, 1] = np.sin(2 * np.pi * weekday / 7)[None, :]
+    return {"features": features, "cure_features": product[:, None]}
+
+
+def receipt_covariates(frame, calendar):
     return {
-        "initiation_features": initiation_features,
-        "receipt_features": receipt_features,
-        "initiation_cure_features": product[:, None],
-        "receipt_allowed": allowed_days(calendar, weekdays=range(5)),
+        "features": np.broadcast_to(
+            storms(calendar)[None, :, None],
+            (len(frame), len(calendar), 1),
+        ),
     }
+
+
+def sales_covariates(calendar):
+    weekday = pd.DatetimeIndex(calendar).dayofweek.to_numpy()
+    return jnp.asarray(np.sin(2 * np.pi * weekday / 7)[:, None])
 
 
 def sales_model(covariates, data=None):
     h = Horizon.from_data(covariates, data)
-    log_rate = numpyro.sample(
-        "log_rate", dist.Normal(jnp.log(jnp.array([1.2, 0.8])), 0.6).to_event(1)
-    )
+    log_rate = numpyro.sample("log_rate", dist.Normal(0, 0.6).expand([2]).to_event(1))
     weekday_effect = numpyro.sample("weekday_effect", dist.Normal(0, 0.4).expand([2]).to_event(1))
     eta = log_rate + covariates * weekday_effect
     predict(h, lambda value: dist.Poisson(jnp.exp(value)), eta)
@@ -135,52 +136,54 @@ def run(steps=150, draws=40, seed=21, plot=None):
     as_of = np.datetime64("2026-01-01") + np.timedelta64(training_days - 1, "D")
     # Only business observations reach the estimator; latent abandonment labels do not.
     observed = truth.drop(columns="abandoned_truth")
-    history = prepare_history(observed, as_of=as_of, policy_days=90)
+    training_start = np.datetime64("2026-01-31")
+    data = RetailData.from_units(
+        observed,
+        as_of=as_of,
+        calendar=date_grid(training_start, as_of),
+        group_by=["product"],
+    )
+    history = prepare_history(data.units, as_of=as_of, policy_days=90)
+    starting = prepare_history(
+        observed,
+        as_of=training_start - np.timedelta64(1, "D"),
+        policy_days=90,
+    )
     output_dates = date_grid(as_of + np.timedelta64(1, "D"), as_of + np.timedelta64(horizon, "D"))
-    calendar = date_grid(np.datetime64("2026-01-01"), output_dates[-1] + np.timedelta64(90, "D"))
     initiated = int(history.frame["initiation_date"].notna().sum())
+    pre_window_sales = int((data.units.sale_date < pd.Timestamp(training_start)).sum())
+    assert data.sales.sum() + pre_window_sales == len(history.frame)
+    # Series order is carried explicitly by the adapter, never assumed from product labels.
+    product_order = data.groups["product"].to_numpy(int)
+    np.testing.assert_array_equal(data.sales, sales[30:training_days, product_order])
     print(
-        f"Fitting {len(history.frame)} sales and {initiated} initiated returns",
+        f"Jointly fitting {int(data.sales.sum())} in-window sales and {initiated} initiations; "
+        f"retaining {pre_window_sales} earlier unit histories",
         flush=True,
     )
-    model = RetailReturnModel(age_bins=16, feature_builder=feature_arrays)
-    fitted = model.fit(history, calendar=calendar, num_steps=steps, num_samples=draws, seed=seed)
-    if (
-        not np.isfinite(fitted.initiation_fit.losses).all()
-        or not np.isfinite(fitted.receipt_fit.losses).all()
-    ):
-        raise RuntimeError("stage fitting produced nonfinite losses")
-
-    sales_calendar = calendar[: training_days + horizon]
-    week = pd.DatetimeIndex(sales_calendar).dayofweek.to_numpy()
-    covariates = jnp.asarray(np.sin(2 * np.pi * week / 7)[:, None])
-    counts = jnp.asarray(sales[:training_days], dtype=jnp.int32)
-    guide = AutoNormal(sales_model)
-    svi = SVI(sales_model, guide, Adam(0.03), Trace_ELBO())
-    sales_fit = svi.run(
-        random.PRNGKey(seed + 2), steps, covariates[:training_days], counts, progress_bar=False
+    model = RetailReturnModel(
+        sales=CountProcess(model=sales_model),
+        initiation=CureProcess(age_bins=16, deadline_days=90),
+        receipt=CureProcess(age_bins=16, allowed_weekdays=range(5)),
     )
-    if not np.isfinite(sales_fit.losses).all():
-        raise RuntimeError("sales fitting produced nonfinite losses")
-    posterior = guide.sample_posterior(
-        random.PRNGKey(seed + 3), sales_fit.params, sample_shape=(draws,)
+    fitted = model.fit(
+        data,
+        covariates={
+            "sales": sales_covariates(data.calendar),
+            "initiations": initiation_covariates,
+            "receipts": receipt_covariates,
+        },
+        mode="joint",
+        num_steps=steps,
+        num_samples=draws,
+        seed=seed,
     )
-    sales_draws = forecast(random.PRNGKey(seed + 4), sales_model, posterior, counts, covariates)
-    future_frames, future_counts = [], []
-    for product in range(2):
-        frame, sampled_counts = sales_cohorts(
-            sales_draws, output_dates, series=product, prefix=f"product{product}"
-        )
-        frame["product"] = float(product)
-        future_frames.append(frame)
-        future_counts.append(sampled_counts)
-    future_sales = pd.concat(future_frames, ignore_index=True)
-    future_counts = np.concatenate(future_counts, axis=1)
+    if any(not np.isfinite(loss).all() for loss in fitted.losses.values()):
+        raise RuntimeError("joint fitting produced nonfinite losses")
+    # The network generates one SalesForecast and propagates that same draw through both stages.
     result = fitted.forecast(
-        calendar=calendar,
         horizon=horizon,
-        future_sales=future_sales,
-        future_counts=future_counts,
+        covariates={"sales": sales_covariates(output_dates)},
         seed=seed + 5,
     )
     output_weekend = pd.DatetimeIndex(result.dates).dayofweek >= 5
@@ -190,7 +193,9 @@ def run(steps=150, draws=40, seed=21, plot=None):
         (history.frame.initiation_date.notna() & history.frame.receipt_date.isna()).sum()
     )
     historical_eligible = int(history.frame.eligible.sum())
-    assert np.all(result.initiations.sum(axis=1) <= historical_eligible + future_counts.sum(axis=1))
+    assert np.all(
+        result.initiations.sum(axis=1) <= historical_eligible + result.sales.counts.sum(axis=1)
+    )
     assert np.all(result.receipts.sum(axis=1) <= historical_open + result.initiations.sum(axis=1))
     np.testing.assert_array_equal(
         result.open_returns + result.receipts.cumsum(axis=1),
@@ -208,6 +213,14 @@ def run(steps=150, draws=40, seed=21, plot=None):
     pairwise = np.abs(result.receipts[:, None, :] - result.receipts[None, :, :]).mean(axis=(0, 1))
     crps = (np.abs(result.receipts - actual_receipts).mean(axis=0) - 0.5 * pairwise).mean()
     summary = {
+        "fit_mode": fitted.network.mode,
+        "sales_window_start": str(training_start),
+        "in_window_sales": int(data.sales.sum()),
+        "pre_window_sales": pre_window_sales,
+        "starting_eligible_uninitiated": int(starting.frame.eligible.sum()),
+        "starting_open_returns": int(
+            (starting.frame.initiation_date.notna() & starting.frame.receipt_date.isna()).sum()
+        ),
         "historical_sales": len(history.frame),
         "eligible_uninitiated_at_origin": historical_eligible,
         "initiated_not_received_at_origin": historical_open,
@@ -239,7 +252,7 @@ def run(steps=150, draws=40, seed=21, plot=None):
         ax.plot(result.dates, predicted, label="Mean predicted receipts")
         ax.plot(result.dates, actual_receipts, "o", label="Held-out receipts")
         ax.set(
-            ylabel="Received units per day", title="Retail returns: two linked cure-capable stages"
+            ylabel="Received units per day", title="Retail returns: joint sales and event network"
         )
         ax.legend()
         fig.autofmt_xdate()

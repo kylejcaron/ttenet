@@ -1,4 +1,4 @@
-"""Analytically grounded tests for ttenet.forecast.forecast_returns."""
+"""Analytical, boundary, and conservation tests for calendar-day forecasts."""
 
 import numpy as np
 import pandas as pd
@@ -6,7 +6,8 @@ import pytest
 
 from ttenet.data import prepare_history
 from ttenet.dates import date_grid
-from ttenet.forecast import forecast_returns
+from ttenet.forecast import forecast_events, forecast_returns
+from ttenet.integration import SalesForecast
 from ttenet.survival import StageParameters
 
 AS_OF = np.datetime64("2026-03-01", "D")
@@ -124,26 +125,6 @@ def test_feature_width_mismatch_rejected():
         )
 
 
-@pytest.mark.parametrize("value", [-1.0, 1.25, float("nan"), float("inf")])
-def test_invalid_future_counts_rejected(value):
-    history = _history({"item_id": [], "sale_date": [], "initiation_date": [], "receipt_date": []})
-    params = _params()
-    calendar = _calendar()
-    future_sales = pd.DataFrame(
-        {"item_id": ["f1"], "sale_date": [str(AS_OF + np.timedelta64(1, "D"))]}
-    )
-    with pytest.raises(ValueError):
-        forecast_returns(
-            history,
-            params,
-            params,
-            calendar=calendar,
-            horizon=10,
-            future_sales=future_sales,
-            future_counts=np.array([[value]]),
-        )
-
-
 def test_future_sales_duplicate_item_id_rejected():
     history = _history({"item_id": [], "sale_date": [], "initiation_date": [], "receipt_date": []})
     params = _params()
@@ -154,7 +135,7 @@ def test_future_sales_duplicate_item_id_rejected():
             "quantity": [1, 1],
         }
     )
-    with pytest.raises(ValueError, match="unique"):
+    with pytest.raises(ValueError, match="duplicate"):
         forecast_returns(
             history, params, params, calendar=_calendar(), horizon=10, future_sales=future_sales
         )
@@ -191,6 +172,15 @@ def test_future_sales_outside_horizon_rejected():
         )
 
 
+def test_future_sales_must_be_sales_forecast_or_dataframe():
+    history = _history({"item_id": [], "sale_date": [], "initiation_date": [], "receipt_date": []})
+    params = _params()
+    with pytest.raises(ValueError):
+        forecast_returns(
+            history, params, params, calendar=_calendar(), horizon=10, future_sales=object()
+        )
+
+
 def test_mismatched_posterior_draws_rejected():
     history = _history({"item_id": [], "sale_date": [], "initiation_date": [], "receipt_date": []})
     init3 = StageParameters(
@@ -199,44 +189,34 @@ def test_mismatched_posterior_draws_rejected():
         cure_intercept=np.zeros((3,)),
         cure_beta=np.zeros((3, 0)),
     )
-    future_sales = pd.DataFrame(
-        {"item_id": ["f1"], "sale_date": [str(AS_OF + np.timedelta64(1, "D"))]}
+    future_sales = SalesForecast(
+        cohorts=pd.DataFrame(
+            {"item_id": ["f1"], "sale_date": [str(AS_OF + np.timedelta64(1, "D"))]}
+        ),
+        counts=np.zeros((5, 1), dtype=int),  # 5 draws, incompatible with the 3 posterior draws
     )
-    future_counts = np.zeros(
-        (5, 1), dtype=int
-    )  # 5 draws, incompatible with the 3 posterior draws above
     with pytest.raises(ValueError, match="align"):
         forecast_returns(
-            history,
-            init3,
-            init3,
-            calendar=_calendar(),
-            horizon=10,
-            future_sales=future_sales,
-            future_counts=future_counts,
+            history, init3, init3, calendar=_calendar(), horizon=10, future_sales=future_sales
         )
 
 
 def test_single_draw_broadcasts_against_future_count_draws():
     history = _history({"item_id": [], "sale_date": [], "initiation_date": [], "receipt_date": []})
     params = _params(hazard=0.9, cure=1 - 1e-9)  # single draw
-    future_sales = pd.DataFrame(
-        {"item_id": ["f1"], "sale_date": [str(AS_OF + np.timedelta64(1, "D"))]}
+    future_sales = SalesForecast(
+        cohorts=pd.DataFrame(
+            {"item_id": ["f1"], "sale_date": [str(AS_OF + np.timedelta64(1, "D"))]}
+        ),
+        counts=np.array([[0], [100]]),  # 2 draws
     )
-    future_counts = np.array([[0], [100]])  # 2 draws
     result = forecast_returns(
-        history,
-        params,
-        params,
-        calendar=_calendar(),
-        horizon=5,
-        seed=0,
-        future_sales=future_sales,
-        future_counts=future_counts,
+        history, params, params, calendar=_calendar(), horizon=5, seed=0, future_sales=future_sales
     )
     assert result.initiations.shape == (2, 5)
     assert result.initiations[0].sum() == 0
     assert result.initiations[1].sum() > 0
+    assert result.sales is future_sales
 
 
 # --------------------------------------------------------------------------
@@ -295,6 +275,33 @@ def test_day90_inclusive_vs_day91_policy_boundary_closed_form():
     np.testing.assert_allclose(result.expected_uninitiated_receipts, [expected], rtol=1e-6)
 
 
+def test_unbounded_initiation_deadline_uses_conditional_susceptibility_directly():
+    # policy_days=None: eventual initiation probability reduces to the posterior
+    # conditional susceptibility itself (no deadline window to integrate against),
+    # exactly like the already-unbounded receipt stage's own eventual expectation.
+    history = _history(
+        {
+            "item_id": ["a"],
+            "sale_date": [str(AS_OF - np.timedelta64(3, "D"))],
+            "initiation_date": [None],
+            "receipt_date": [None],
+        },
+        policy_days=None,
+    )
+    h, pi_init = 0.3, 0.6
+    init = _params(k=10, hazard=h, cure=pi_init)
+    receipt = _params(k=10, hazard=h, cure=1 - 1e-9)
+    calendar = _calendar()
+    result = forecast_returns(history, init, receipt, calendar=calendar, horizon=5, seed=0)
+
+    s_asof = (1 - h) ** 4  # ages 0..3 inclusive (age0 = 3)
+    smarg = (1 - pi_init) + pi_init * s_asof
+    conditional_pi_init = pi_init * s_asof / smarg
+    pi_receipt_raw = 1.0 / (1.0 + np.exp(-(_logit(1 - 1e-9))))
+    expected = conditional_pi_init * pi_receipt_raw
+    np.testing.assert_allclose(result.expected_uninitiated_receipts, [expected], rtol=1e-6)
+
+
 def test_no_weekend_receipts():
     history = _history(
         {
@@ -339,6 +346,8 @@ def test_heterogeneous_origins_share_calendar_day_features():
     # Two open items with different initiation dates (different ages on any given calendar
     # day). A feature that spikes hazard on exactly one calendar day must fire for both on
     # that same calendar day, proving features are indexed by calendar day, not by age.
+    # Pre/post-storm hazards saturate sigmoid to exactly 0/1 in float64 so the outcome is
+    # deterministic, not merely likely, regardless of random-draw ordering.
     raw = {
         "item_id": ["A", "B"],
         "sale_date": ["2026-01-01", "2026-01-01"],
@@ -351,12 +360,12 @@ def test_heterogeneous_origins_share_calendar_day_features():
     history = _history(raw)
     calendar = _calendar()
     k = 20
-    age_logits = np.full(k, _logit(1e-4))
-    beta = np.array([15.0])
+    age_logits = np.full(k, -1000.0)  # sigmoid(-1000) == 0.0 exactly in float64
+    beta = np.array([2000.0])  # -1000 + 2000*1 == 1000 -> sigmoid(1000) == 1.0 exactly
     receipt = StageParameters(
         age_logits=age_logits,
         beta=beta,
-        cure_intercept=np.array(_logit(1 - 1e-9)),
+        cure_intercept=np.array(1000.0),  # sigmoid(1000) == 1.0 exactly
         cure_beta=np.zeros((0,)),
     )
     init = _params(k=k, p=1)
@@ -506,13 +515,18 @@ def test_mass_conservation_and_expected_receipts_identity():
     calendar = _calendar()
     init = _params(hazard=0.3, cure=0.7)
     receipt = _params(hazard=0.25, cure=0.6)
-    future_sales = pd.DataFrame(
-        {
-            "item_id": ["f1", "f2"],
-            "sale_date": [str(AS_OF + np.timedelta64(1, "D")), str(AS_OF + np.timedelta64(3, "D"))],
-        }
+    future_sales = SalesForecast(
+        cohorts=pd.DataFrame(
+            {
+                "item_id": ["f1", "f2"],
+                "sale_date": [
+                    str(AS_OF + np.timedelta64(1, "D")),
+                    str(AS_OF + np.timedelta64(3, "D")),
+                ],
+            }
+        ),
+        counts=np.array([[10, 25], [3, 50], [0, 0]]),  # 3 draws
     )
-    future_counts = np.array([[10, 25], [3, 50], [0, 0]])  # 3 draws
     result = forecast_returns(
         history,
         init,
@@ -521,14 +535,15 @@ def test_mass_conservation_and_expected_receipts_identity():
         horizon=30,
         seed=0,
         future_sales=future_sales,
-        future_counts=future_counts,
     )
 
     historical_eligible = 2  # elig1, elig2
     historical_open = 1  # open1
-    source = historical_eligible + historical_open + future_counts.sum(axis=1)
+    source = historical_eligible + historical_open + future_sales.counts.sum(axis=1)
     assert np.all(result.receipts.sum(axis=1) <= source)
-    assert np.all(result.initiations.sum(axis=1) <= historical_eligible + future_counts.sum(axis=1))
+    assert np.all(
+        result.initiations.sum(axis=1) <= historical_eligible + future_sales.counts.sum(axis=1)
+    )
     assert np.all(result.eligible >= 0)
     assert np.all(result.open_returns >= 0)
     np.testing.assert_allclose(
@@ -540,19 +555,14 @@ def test_mass_conservation_and_expected_receipts_identity():
 def test_uncertain_future_counts_preserve_draws_without_averaging():
     history = _history({"item_id": [], "sale_date": [], "initiation_date": [], "receipt_date": []})
     params = _params(hazard=0.9, cure=1 - 1e-9)
-    future_sales = pd.DataFrame(
-        {"item_id": ["f1"], "sale_date": [str(AS_OF + np.timedelta64(1, "D"))]}
+    future_sales = SalesForecast(
+        cohorts=pd.DataFrame(
+            {"item_id": ["f1"], "sale_date": [str(AS_OF + np.timedelta64(1, "D"))]}
+        ),
+        counts=np.array([[0], [7], [500]]),
     )
-    future_counts = np.array([[0], [7], [500]])
     result = forecast_returns(
-        history,
-        params,
-        params,
-        calendar=_calendar(),
-        horizon=5,
-        seed=0,
-        future_sales=future_sales,
-        future_counts=future_counts,
+        history, params, params, calendar=_calendar(), horizon=5, seed=0, future_sales=future_sales
     )
     # draws must reflect their own source count exactly, not some averaged blend
     assert result.initiations[0].sum() == 0
@@ -638,3 +648,231 @@ def test_strong_susceptibility_does_not_cancel_remaining_event_probability():
     # Still susceptible after age zero; one remaining day at hazard .5,
     # followed by receipt susceptibility .5, gives .25 eventual receipts.
     np.testing.assert_allclose(result.expected_uninitiated_receipts, [0.25], rtol=1e-12)
+
+
+# --------------------------------------------------------------------------
+# Generic event kernel (forecast_events / EventForecast)
+# --------------------------------------------------------------------------
+
+
+def test_forecast_events_root_cohort_axis_and_conservation():
+    # Historical and newly arriving cohorts retain separate event trajectories;
+    # the aggregate stock conserves both sources.
+    params = _params(hazard=0.4, cure=0.6)
+    origins = np.array(
+        [AS_OF - np.timedelta64(2, "D"), np.datetime64("NaT", "D")], dtype="datetime64[D]"
+    )
+    observed = np.array([np.datetime64("NaT", "D")] * 2, dtype="datetime64[D]")
+    horizon = 6
+    arrivals = np.zeros((1, horizon, 2), dtype=np.int64)
+    arrivals[0, 2, 1] = 10  # cohort 1 arrives (count 10) on forecast day 3
+    result = forecast_events(
+        params,
+        origins=origins,
+        observed=observed,
+        arrivals=arrivals,
+        calendar=_calendar(),
+        as_of=AS_OF,
+        horizon=horizon,
+    )
+    assert result.events.shape == (1, horizon, 2)
+    assert np.all(result.eligible <= result.pending)
+    assert np.all(result.pending >= 0)
+    np.testing.assert_array_equal(result.events[:, :2, 1], 0)
+    np.testing.assert_array_equal(
+        result.pending + result.events.sum(axis=-1).cumsum(axis=1),
+        1 + arrivals.sum(axis=-1).cumsum(axis=1),
+    )
+
+
+def test_forecast_events_deadline_freezes_pending_but_drops_eligible():
+    # Zero hazard (nothing ever triggers): with a 2-day deadline, the single
+    # pending unit must remain in `pending` forever (the generic contract
+    # says pending includes expired members) while dropping out of
+    # `eligible` once its age exceeds the deadline.
+    zero_hazard = StageParameters(np.array([-1000.0]), np.empty(0), np.array(50.0), np.empty(0))
+    origins = np.array([AS_OF], dtype="datetime64[D]")
+    observed = np.array([np.datetime64("NaT", "D")], dtype="datetime64[D]")
+    horizon = 5
+    arrivals = np.zeros((1, horizon, 1), dtype=np.int64)
+    result = forecast_events(
+        zero_hazard,
+        origins=origins,
+        observed=observed,
+        arrivals=arrivals,
+        calendar=_calendar(),
+        as_of=AS_OF,
+        horizon=horizon,
+        deadline_days=2,
+    )
+    np.testing.assert_array_equal(result.pending[0], [1, 1, 1, 1, 1])
+    np.testing.assert_array_equal(result.eligible[0], [1, 1, 0, 0, 0])
+
+
+def test_forecast_events_unbounded_deadline_keeps_eligible_equal_pending():
+    params = _params(hazard=0.3, cure=0.5)
+    origins = np.array([AS_OF - np.timedelta64(10, "D")], dtype="datetime64[D]")
+    observed = np.array([np.datetime64("NaT", "D")], dtype="datetime64[D]")
+    horizon = 8
+    arrivals = np.zeros((1, horizon, 1), dtype=np.int64)
+    result = forecast_events(
+        params,
+        origins=origins,
+        observed=observed,
+        arrivals=arrivals,
+        calendar=_calendar(),
+        as_of=AS_OF,
+        horizon=horizon,
+        deadline_days=None,
+    )
+    np.testing.assert_array_equal(result.eligible, result.pending)
+
+
+def test_forecast_events_child_call_consumes_parent_events_as_arrivals_unchanged():
+    # Certain parent and child hazards: chaining two forecast_events calls
+    # (child arrivals = parent events, exactly the forecast_returns
+    # composition) must move every unit through both events on the day the
+    # parent event happened, preserving cohort identity through the chain.
+    certain = StageParameters(np.array([50.0]), np.empty(0), np.array(50.0), np.empty(0))
+    origins = np.array([np.datetime64("NaT", "D")], dtype="datetime64[D]")
+    observed = np.array([np.datetime64("NaT", "D")], dtype="datetime64[D]")
+    horizon = 4
+    arrivals = np.zeros((1, horizon, 1), dtype=np.int64)
+    arrivals[0, 1, 0] = 7  # 7 units arrive on forecast day 2
+    parent = forecast_events(
+        certain,
+        origins=origins,
+        observed=observed,
+        arrivals=arrivals,
+        calendar=_calendar(),
+        as_of=AS_OF,
+        horizon=horizon,
+    )
+    child = forecast_events(
+        certain,
+        origins=origins,
+        observed=observed,
+        arrivals=parent.events,
+        calendar=_calendar(),
+        as_of=AS_OF,
+        horizon=horizon,
+    )
+    np.testing.assert_array_equal(parent.events[0, :, 0], [0, 7, 0, 0])
+    np.testing.assert_array_equal(child.events[0, :, 0], [0, 7, 0, 0])
+
+
+def test_forecast_events_rejects_event_without_known_parent():
+    params = _params()
+    origins = np.array([np.datetime64("NaT", "D")], dtype="datetime64[D]")
+    observed = np.array([AS_OF], dtype="datetime64[D]")
+    with pytest.raises(ValueError):
+        forecast_events(
+            params,
+            origins=origins,
+            observed=observed,
+            arrivals=np.zeros((1, 3, 1), dtype=np.int64),
+            calendar=_calendar(),
+            as_of=AS_OF,
+            horizon=3,
+        )
+
+
+def test_old_survivors_are_conditioned_but_new_arrivals_are_not():
+    parameters = StageParameters(np.array([1000.0]), np.empty(0), np.array(0.0), np.empty(0))
+    arrivals = np.zeros((64, 1, 2), dtype=np.int64)
+    arrivals[:, 0, 1] = 500
+    result = forecast_events(
+        parameters,
+        origins=[AS_OF, np.datetime64("NaT", "D")],
+        observed=[np.datetime64("NaT", "D")] * 2,
+        arrivals=arrivals,
+        calendar=date_grid(AS_OF, AS_OF + np.timedelta64(1, "D")),
+        as_of=AS_OF,
+        horizon=1,
+        seed=7,
+    )
+    # Failure to trigger on the certain-hazard birth day identifies the old
+    # unit as cured. New cohorts retain their original .5 susceptibility.
+    np.testing.assert_array_equal(result.events[:, 0, 0], 0)
+    assert 200 < result.events[:, 0, 1].mean() < 300
+
+
+def test_int64_population_limits_apply_per_draw_not_across_draws():
+    parameters = StageParameters(np.array([1000.0]), np.empty(0), np.array(1000.0), np.empty(0))
+    count = 2**62
+    result = forecast_events(
+        parameters,
+        origins=[np.datetime64("NaT", "D")],
+        observed=[np.datetime64("NaT", "D")],
+        arrivals=np.full((3, 1, 1), count, dtype=np.int64),
+        calendar=date_grid(AS_OF, AS_OF + np.timedelta64(1, "D")),
+        as_of=AS_OF,
+        horizon=1,
+    )
+    np.testing.assert_array_equal(result.events[:, 0, 0], count)
+
+
+def test_empty_sales_scenario_preserves_its_predictive_draw_axis():
+    history = _history({"item_id": [], "sale_date": []})
+    empty = SalesForecast(
+        pd.DataFrame(columns=["item_id", "sale_date"]),
+        np.zeros((3, 0), dtype=np.int64),
+    )
+    parameters = _params()
+    result = forecast_returns(
+        history,
+        parameters,
+        parameters,
+        calendar=_calendar(),
+        horizon=2,
+        future_sales=empty,
+    )
+    np.testing.assert_array_equal(result.receipts, np.zeros((3, 2), dtype=np.int64))
+    two_draws = StageParameters(
+        *[np.broadcast_to(value, (2,) + np.shape(value)) for value in parameters]
+    )
+    with pytest.raises(ValueError):
+        forecast_returns(
+            history,
+            two_draws,
+            parameters,
+            calendar=_calendar(),
+            horizon=2,
+            future_sales=empty,
+        )
+
+
+def test_parent_arrival_dates_vary_by_draw_and_within_cohort():
+    parameters = StageParameters(
+        np.array([-1000.0, 1000.0]), np.empty(0), np.array(1000.0), np.empty(0)
+    )
+    arrivals = np.array(
+        [
+            [[1, 2], [0, 0], [0, 3], [0, 0]],
+            [[0, 0], [0, 5], [1, 0], [0, 7]],
+        ],
+        dtype=np.int64,
+    )
+    result = forecast_events(
+        parameters,
+        origins=np.full(2, np.datetime64("NaT", "D")),
+        observed=np.full(2, np.datetime64("NaT", "D")),
+        arrivals=arrivals,
+        calendar=date_grid(AS_OF, AS_OF + np.timedelta64(4, "D")),
+        as_of=AS_OF,
+        horizon=4,
+        deadline_days=1,
+    )
+    # Every parent batch triggers exactly at its own age one, not the
+    # cohort's earliest parent date, and not another draw's parent date.
+    np.testing.assert_array_equal(
+        result.events,
+        [
+            [[0, 0], [1, 2], [0, 0], [0, 3]],
+            [[0, 0], [0, 0], [0, 5], [1, 0]],
+        ],
+    )
+    np.testing.assert_array_equal(
+        result.pending + result.events.sum(axis=-1).cumsum(axis=1),
+        arrivals.sum(axis=-1).cumsum(axis=1),
+    )

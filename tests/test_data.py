@@ -467,3 +467,150 @@ def test_expand_covariates_preserves_requested_item_order():
     arr = expand_covariates(records, ["a", "b"], grid, ["v"], layout="changes")
     assert arr[0, 0, 0] == 1.0
     assert arr[1, 0, 0] == 100.0
+
+
+def test_selected_starting_snapshot_updates_preserve_conditional_entry_likelihood():
+    import jax.numpy as jnp
+
+    from ttenet import RetailData, StageParameters, make_event_observations, stage_log_likelihood
+
+    starting = pd.DataFrame(
+        {
+            "item_id": ["old", "parked"],
+            "sale_date": ["2025-12-20", "2025-12-25"],
+            "initiation_date": ["2025-12-28", None],
+            "product": ["alpha", "beta"],
+        }
+    )
+    updates = pd.DataFrame(
+        {
+            "item_id": ["old", "new"],
+            "sale_date": [None, "2026-01-01"],
+            "receipt_date": ["2026-01-02", None],
+            "product": [None, "alpha"],
+        }
+    )
+    data = RetailData.from_units(
+        updates,
+        starting_items=starting,
+        as_of="2026-01-03",
+        calendar=date_grid("2026-01-01", "2026-01-03"),
+        group_by=["product"],
+    )
+    np.testing.assert_array_equal(data.sales, [[1, 0], [0, 0], [0, 0]])
+    parameters = StageParameters(jnp.zeros(1), jnp.empty(0), 0.0, jnp.empty(0))
+    receipt = make_event_observations(
+        data.units,
+        origin_column="initiation_date",
+        event_column="receipt_date",
+        as_of=data.as_of,
+        calendar=data.context_calendar,
+        entry_dates=data.entry_dates,
+    )
+    # Four pre-entry receipt exposures; Jan 1 survival and Jan 2 arrival.
+    np.testing.assert_allclose(
+        stage_log_likelihood(parameters, receipt), [np.log(1 / 68)], atol=1e-6
+    )
+    initiation = make_event_observations(
+        data.units,
+        origin_column="sale_date",
+        event_column="initiation_date",
+        as_of=data.as_of,
+        calendar=data.context_calendar,
+        entry_dates=data.entry_dates,
+    )
+    # The already initiated snapshot item contributes no second initiation event.
+    expected = np.log(0.5 + 0.5 * 0.5**3) + np.log((0.5 + 0.5 * 0.5**10) / (0.5 + 0.5 * 0.5**7))
+    np.testing.assert_allclose(
+        stage_log_likelihood(parameters, initiation).sum(), expected, atol=1e-6
+    )
+
+
+def test_full_pre_window_history_is_informative_but_not_new_sales():
+    import jax.numpy as jnp
+
+    from ttenet import RetailData, StageParameters, make_event_observations, stage_log_likelihood
+
+    units = pd.DataFrame(
+        {
+            "item_id": ["old", "new", "future"],
+            "sale_date": ["2025-12-25", "2026-01-01", "2026-01-05"],
+            "initiation_date": ["2025-12-29", None, "2025-12-10"],
+            "receipt_date": ["2026-01-01", None, "2025-12-11"],
+            "inspection_date": ["2026-01-04", None, None],
+            "product": ["b", "a", "c"],
+        }
+    )
+    data = RetailData.from_units(
+        units,
+        as_of="2026-01-02",
+        calendar=date_grid("2026-01-01", "2026-01-02"),
+        group_by=["product"],
+        event_columns={"inspections": "inspection_date"},
+    )
+    np.testing.assert_array_equal(data.sales, [[0, 1], [0, 0]])
+    assert data.units.inspection_date.isna().all()
+    receipt = make_event_observations(
+        data.units,
+        origin_column="initiation_date",
+        event_column="receipt_date",
+        as_of=data.as_of,
+        calendar=data.context_calendar,
+        entry_dates=data.entry_dates,
+    )
+    parameters = StageParameters(jnp.zeros(1), jnp.empty(0), 0.0, jnp.empty(0))
+    np.testing.assert_allclose(
+        stage_log_likelihood(parameters, receipt), [np.log(1 / 32)], atol=1e-6
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"sale_date": "2026-01-01"},
+        {"initiation_date": "2026-01-02"},
+        {"receipt_date": "2025-12-30"},
+    ],
+)
+def test_starting_snapshot_cannot_contain_new_or_completed_items(change):
+    from ttenet import RetailData
+
+    starting = pd.DataFrame([{"item_id": "old", "sale_date": "2025-12-20", **change}])
+    with pytest.raises(ValueError):
+        RetailData.from_units(
+            pd.DataFrame(columns=["item_id", "sale_date"]),
+            starting_items=starting,
+            as_of="2026-01-03",
+            calendar=date_grid("2026-01-01", "2026-01-03"),
+        )
+
+
+def test_starting_snapshot_cannot_replace_a_known_origin():
+    from ttenet import RetailData
+
+    with pytest.raises(ValueError):
+        RetailData.from_units(
+            pd.DataFrame({"item_id": ["old"], "sale_date": ["2025-12-25"]}),
+            starting_items=pd.DataFrame({"item_id": ["old"], "sale_date": ["2025-12-20"]}),
+            as_of="2026-01-03",
+            calendar=date_grid("2026-01-01", "2026-01-03"),
+        )
+
+
+def test_retail_data_does_not_impose_a_process_deadline():
+    from ttenet import RetailData, RetailReturnModel
+
+    data = RetailData.from_units(
+        pd.DataFrame(
+            {
+                "item_id": ["late"],
+                "sale_date": ["2026-01-01"],
+                "initiation_date": ["2026-05-01"],
+            }
+        ),
+        as_of="2026-05-02",
+        calendar=date_grid("2026-04-01", "2026-05-02"),
+    )
+    assert data.sales.sum() == 0
+    with pytest.raises(ValueError):
+        RetailReturnModel().fit(data, num_steps=1, num_samples=1)

@@ -12,7 +12,7 @@ Build a Python library and runnable end-to-end example, not rental inventory opt
 2. Continuous-time parametric duration models. Compact, but hard closures and changing regressors complicate integration and restrict duration shapes.
 3. Aggregate stationary convolution. Fast for homogeneous, stationary cohorts, but insufficient as the primary abstraction for conditional outstanding populations and calendar regressors.
 
-The primitive is a cure-capable event stage; retail links two such stages. No generic graph executor is required for these two linked stages.
+The primitive is a cure-capable event stage. A typed count-root/event-node graph retains dated root-cohort lineage; the retail interface is its sale → initiation → receipt specialization, not a second implementation.
 
 ## Process and clocks
 
@@ -54,7 +54,7 @@ To compute all remaining initiation probability, the supplied scenario calendar 
 
 ## NumPyro Forecast integration
 
-Use the real optional `numpyro_forecast>=0.3,<0.4` functional API, not the old class API. Compose its posterior predictive sales counts (sample, time, observation) with TTENet future cohorts without replacing uncertain draws by their mean. Reject fractional, negative, or nonfinite counts. A worked example must fit a real NumPyro sales model, call `numpyro_forecast.forecast`, and pass its draws into the return forecast. The return-stage likelihood remains event-history based; do not pretend aggregate daily counts are independent likelihoods for the two observed stages.
+Use the optional `numpyro_forecast>=0.3,<0.4` functional model protocol (`Horizon`, `predict`, root `obs` and `forecast` sites). Preserve posterior predictive count samples without averaging. `SalesForecast` binds dated cohort metadata, integer quantities, and draw identity in one value. Reject fractional, negative, nonfinite, or overflowing counts. Fit the root count likelihood and the event-history likelihoods in one scoped NumPyro program for joint mode. Do not add aggregate initiation/receipt likelihoods on top of the unit-history evidence.
 
 ## Validation and error handling
 
@@ -66,16 +66,48 @@ Run an end-to-end synthetic retail example with a 90-day policy, non-returners, 
 
 Daily resolution, conditional independence between units given parameters/covariates, no partial-unit returns or repeated return attempts, no inventory feedback, no automatic forecasting of unknown weather, and no identification of infinite-lifetime cure from finite data. Forecasts depend on the supplied future-sales mix, date scenarios, and documented tail convention.
 
-## Thin public model interface
+## Public network and retail interface
 
-The user selected a thin public class after reviewing the functional API. Use two frozen dataclasses, not a stateful fit-in-place estimator or a model inheritance hierarchy:
+The user approved this clean cutover after reviewing the single-sales/joint-network mockups and starting-population semantics:
 
-- `RetailReturnModel(policy_days=90, age_bins=30, feature_builder=None)` owns reusable configuration. Both stages use `age_bins`; existing stage functions remain available for advanced configurations.
-- `.fit(data, *, calendar, as_of=None, layout="tabular", num_steps=500, num_samples=100, seed=0, learning_rate=0.02)` returns a separate `FittedRetailReturnModel`. Raw data require `as_of` and use the existing layout adapters. A `RetailHistory` is accepted without `as_of`/layout overrides, must match the model policy, and is copied so subsequent caller edits do not change the fit's history.
-- `FittedRetailReturnModel` retains `model`, `history`, `initiation_fit`, and `receipt_fit`. `.forecast(*, calendar, horizon, future_sales=None, future_counts=None, seed=0)` returns the existing `ReturnForecast`. Fitting the same configuration again must not change an earlier fit's forecasts.
+```python
+model = RetailReturnModel(
+    sales=CountProcess(model=sales_model),
+    initiation=CureProcess(age_bins=30, deadline_days=90),
+    receipt=CureProcess(age_bins=30, allowed_weekdays=range(5)),
+)
+observed = RetailData.from_units(
+    unit_history,
+    as_of=cutoff,
+    calendar=training_calendar,
+    group_by=["product"],
+)
+fitted = model.fit(observed, covariates=historical_covariates, mode="joint", num_samples=500)
+forecast = fitted.forecast(horizon=28, covariates=future_covariates)
+```
 
-`feature_builder(frame, calendar)` is a pure callable returning a mapping with any of the existing forecast keyword names: `initiation_features`, `receipt_features`, `initiation_cure_features`, `receipt_cure_features`, `initiation_allowed`, `receipt_allowed`. Unknown keys are errors rather than silently ignored regressors or closure masks. With no builder, both stages have no regressors and all days are allowed. Fit-time rows are canonical historical units; forecast-time rows are historical units followed by future cohorts. The wrapper handles that ordering. Array shape validation stays in the existing numerical boundary functions.
+`CountNode`, `EventNode`, and `ForecastNetwork` expose the same underlying execution path. One count root supplies dated unit cohorts; each event node has one immediate source and its own origin/age, cure process, optional inclusive deadline, and hard weekday mask. Arbitrary event descendants are supported; branching children are separate events, not competing risks. Data uses a canonical sale-date root; custom event columns are explicit. Reject cycles, missing sources, duplicate names, and reuse of one observed event column as multiple likelihoods.
 
-Keep calendars and future covariate scenarios explicit. The builder must preserve feature definitions, ordering, and fixed training-derived scaling; the wrapper does not learn preprocessing or forecast weather. Frozen containers do not make nested arrays/dataframes/callback state deeply immutable; treat fitted contents and builder inputs as read-only.
+`joint` uses one NumPyro program, one SVI guide, and one posterior draw across the entire graph. `modular` explicitly fits independent blocks. Fully observed parents and independent priors still factorize in joint mode. Optional `shared_model()` samples shared latent values: count callbacks receive `shared=values`; custom event `parameter_model(observations, values)` callbacks return `StageParameters` sampled from conditional priors. This provides real cross-stage learning without a feature-expression language. Shared models require joint mode. The default guide is mean-field variational inference, not exact posterior uncertainty; the joint model is directly usable with NumPyro MCMC.
 
-The numerical model, priors, simulator, and optional sales-forecast integration are unchanged. No scan rewrite, serialization framework, feature-expression language, or additional inference backend is included. The README and full worked example lead with the class interface; low-level functions remain supported numerical building blocks.
+`SalesForecast.from_frame` accepts sale dates, quantities, static attributes, and optional draw labels. `from_numpyro_forecast` accepts all `[draw, time, group]` trajectories and group metadata. Missing draw/cohort cells are errors, not implicit zeros. The object owns cohort metadata and count paths; the public `future_counts` argument and tuple-returning sales adapter are removed. One source draw broadcasts; otherwise source and parameter draw counts must match. Same-posterior source labels preserve pairing.
+
+At forecasting, supplied `future_sales` replaces internal generation; it is an external scenario, not extra sales or posterior conditioning. A modeled source can generate internally. With no modeled source, an explicit sales scenario is required; an empty `SalesForecast` states that no new sales will occur.
+
+Covariates map node names to count-model arrays or event mappings/callables returning `features`, `cure_features`, and `allowed`. Event providers receive the cohort frame and requested dates. Fitting uses the original-origin context calendar. Forecasting retains cached historical exposures and requests future values for historical units followed by new cohorts. Only pre-birth padding may be zero-filled; missing values during risk exposure are errors. Historical cure features are static. Learned feature definitions/scaling remain fixed; no future weather is invented.
+
+Configuration and fitted snapshots are separate frozen containers; fitted data is copied. Nested frames, mappings, and callback state remain read-only by convention. There is no in-place refit, inheritance framework, serialization system, or automatic preprocessing.
+
+## Starting populations and observation entry
+
+`RetailData.calendar` is the root sales observation window and ends at `as_of`. Full `unit_history` may precede its first day. Old purchases never enter the in-window sales count likelihood, but their original sale and initiation clocks remain. Complete historical event evidence contributes once, including completed pre-window events.
+
+Optional `starting_items` is a survivor-selected snapshot at end-of-day before the first observed day. Merge its known histories with later outcomes by item identifier; do not duplicate units or overwrite known origins/events. Reject conflicting static groups, future snapshot events, completed snapshot receipts, and purchases on/after the window start. Already completed stages contribute no second event likelihood. A parent event arising after entry starts its child's clock normally.
+
+For selected survivors, condition on survival to entry. With susceptible pre-entry survival `S_pre`, the post-entry susceptibility logit is `logit(pi) + log(S_pre)`. Evaluate the post-entry event/censor likelihood with that conditional susceptibility, rather than treating selected survivors as a complete birth cohort or subtracting large marginal likelihoods. Original-origin covariates are required to compute this selection probability. Unknown starting ages/counts are not silently imputed.
+
+## Implementation and verification boundaries
+
+The event-history likelihood stays vectorized JAX. The shared cohort propagation kernel uses host float64 logits/log-survival and binomial counts, retaining exact dated lineage without expanding quantities into units. A scan rewrite is not required for joint fitting and must not compromise numerical stability. All public forecast paths use this same kernel.
+
+Verify joint shared-effect learning with real inference, native count forecast uncertainty, explicit source replacement, arbitrary descendant clock propagation, starting-population receipts without in-window sales, conditional-entry likelihood/gradients, existing strong-logit regressions, same-day events, inclusive deadlines, hard closures, fit isolation, and draw-wise stock conservation. Run the complete retail example with a sales window starting after the earliest unit history, plus the existing suite, formatter/linter, and package build. Leave the branch unmerged.

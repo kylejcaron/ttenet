@@ -11,7 +11,7 @@ observed sequences are rejected rather than coerced.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -36,7 +36,7 @@ class RetailHistory:
 
     frame: pd.DataFrame
     as_of: np.datetime64
-    policy_days: int
+    policy_days: Optional[int]
 
 
 def _empty_day_array(n: int) -> np.ndarray:
@@ -196,7 +196,7 @@ def _hide_future(days: np.ndarray, as_of: np.datetime64) -> np.ndarray:
     return days
 
 
-def _finalize(raw: pd.DataFrame, as_of: np.datetime64, policy_days: int) -> pd.DataFrame:
+def _finalize(raw: pd.DataFrame, as_of: np.datetime64, policy_days: Optional[int]) -> pd.DataFrame:
     """Apply as-of isolation, validate event ordering/policy, add derived columns."""
     frame = raw.reset_index(drop=True)
     n = len(frame)
@@ -236,7 +236,11 @@ def _finalize(raw: pd.DataFrame, as_of: np.datetime64, policy_days: int) -> pd.D
         raise ValueError("observed initiation_date cannot precede sale_date")
 
     elapsed_to_initiation = (initiation - sale) / np.timedelta64(1, "D")
-    if init_observed.any() and (elapsed_to_initiation[init_observed] > policy_days).any():
+    if (
+        policy_days is not None
+        and init_observed.any()
+        and (elapsed_to_initiation[init_observed] > policy_days).any()
+    ):
         raise ValueError(
             f"observed initiation_date exceeds the {policy_days}-day policy deadline for at "
             "least one item"
@@ -253,7 +257,8 @@ def _finalize(raw: pd.DataFrame, as_of: np.datetime64, policy_days: int) -> pd.D
     age_since_initiation = np.where(
         init_observed, (as_of - initiation) / np.timedelta64(1, "D"), np.nan
     )
-    eligible = (~init_observed) & (age_since_sale >= 0) & (age_since_sale <= policy_days)
+    within_deadline = True if policy_days is None else (age_since_sale <= policy_days)
+    eligible = (~init_observed) & (age_since_sale >= 0) & within_deadline
 
     out = pd.DataFrame({"item_id": frame["item_id"].to_numpy()})
     out["sale_date"] = sale
@@ -284,7 +289,7 @@ def prepare_history(
     *,
     as_of: Any,
     layout: str = "tabular",
-    policy_days: int = 90,
+    policy_days: Optional[int] = 90,
 ) -> RetailHistory:
     """Build a canonical, as-of-isolated :class:`RetailHistory`.
 
@@ -309,6 +314,11 @@ def prepare_history(
     dates that remain visible after this cutoff is applied -- so a future,
     not-yet-visible initiation can never trigger a policy-deadline error.
 
+    ``policy_days`` is the initiation deadline in days after sale; ``None``
+    means there is no deadline at all (every uninitiated, non-future-sale
+    item is eligible, with no upper age bound and no policy-deadline
+    validation). The default (``90``) is unchanged.
+
     Raises ``ValueError`` on missing required columns, duplicate/ambiguous
     item identifiers or events, a missing mandatory sale, or any of the
     invalid observed sequences above. Never silently repairs or imputes.
@@ -317,13 +327,13 @@ def prepare_history(
         raise TypeError("data must be a pandas DataFrame")
     if layout not in _LAYOUTS:
         raise ValueError(f"unknown layout '{layout}'; expected one of {sorted(_LAYOUTS)}")
-    invalid_policy = (
+    invalid_policy = policy_days is not None and (
         not isinstance(policy_days, (int, np.integer))
         or isinstance(policy_days, bool)
         or policy_days < 0
     )
     if invalid_policy:
-        raise ValueError("policy_days must be a non-negative integer")
+        raise ValueError("policy_days must be None or a non-negative integer")
 
     as_of_day = to_day(as_of)
     if pd.isna(as_of_day):
@@ -336,8 +346,9 @@ def prepare_history(
     else:
         raw = _prepare_changes(data, as_of_day)
 
-    frame = _finalize(raw, as_of_day, int(policy_days))
-    return RetailHistory(frame=frame, as_of=as_of_day, policy_days=int(policy_days))
+    normalized_policy = None if policy_days is None else int(policy_days)
+    frame = _finalize(raw, as_of_day, normalized_policy)
+    return RetailHistory(frame=frame, as_of=as_of_day, policy_days=normalized_policy)
 
 
 def _to_numeric_strict(series: pd.Series, column_name: str) -> np.ndarray:
