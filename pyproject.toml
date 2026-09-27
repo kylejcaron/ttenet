@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ttenet"
+version = "0.1.0"
+description = "Calendar-aware time-to-event and retail return forecasting"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+  "numpy>=2.0",
+  "pandas>=2.2",
+  "jax>=0.10.0,<0.11.1",
+  "numpyro>=0.20.0",
+]
+
+[project.optional-dependencies]
+forecast = ["numpyro-forecast>=0.3.0,<0.4"]
+examples = ["numpyro-forecast>=0.3.0,<0.4", "matplotlib>=3.8"]
+
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.12"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ttenet"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/ttenet", "tests", "examples", "README.md", "LICENSE", "pyproject.toml", "uv.lock"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
