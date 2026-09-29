@@ -33,6 +33,13 @@ It prints held-out scores and checks count conservation. Latent abandonment
 labels never enter fitting. Short runs are execution checks, not convergence
 or calibration guarantees.
 
+The same example as an illustrated, interactive essay (a marimo notebook with
+parameter recovery, held-out checks, and demand/weather scenario controls):
+
+```bash
+uv run marimo run examples/retail_returns_blog.py   # or `marimo edit` to see the code
+```
+
 ## Fit and forecast
 
 A count process follows the functional

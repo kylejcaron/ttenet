@@ -38,13 +38,14 @@ def storms(days):
     ).astype(float)
 
 
-def simulate_retail(seed=21, training_days=180, horizon=28):
+def simulate_retail(seed=21, training_days=180, horizon=28, volume=1.0):
+    """Simulate unit histories; ``volume`` scales both products' daily sales rates."""
     rng = np.random.default_rng(seed)
     start = np.datetime64("2026-01-01")
     sales_days = date_grid(start, start + np.timedelta64(training_days + horizon - 1, "D"))
     weekday = pd.DatetimeIndex(sales_days).dayofweek.to_numpy()
     season = np.sin(2 * np.pi * weekday / 7)
-    rates = np.exp(np.log([1.2, 0.8]) + season[:, None] * np.array([0.3, -0.2]))
+    rates = volume * np.exp(np.log([1.2, 0.8]) + season[:, None] * np.array([0.3, -0.2]))
     daily_sales = rng.poisson(rates)
     rows = []
     for day_index, date in enumerate(sales_days):

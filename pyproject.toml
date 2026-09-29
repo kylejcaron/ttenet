@@ -18,7 +18,13 @@ dependencies = [
 
 [project.optional-dependencies]
 forecast = ["numpyro-forecast>=0.3.0,<0.4"]
-examples = ["numpyro-forecast>=0.3.0,<0.4", "matplotlib>=3.8"]
+examples = [
+  "numpyro-forecast>=0.3.0,<0.4",
+  "matplotlib>=3.8",
+  "marimo>=0.23.15",
+  "altair>=5.4",
+  "coeftable>=0.12.1",
+]
 
 [dependency-groups]
 dev = ["pytest>=8.0", "ruff>=0.12"]
