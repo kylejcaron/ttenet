@@ -1849,7 +1849,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "altair", marker = "extra == 'examples'", specifier = ">=5.4" },
+    { name = "altair", marker = "extra == 'examples'", specifier = ">=5.5" },
     { name = "coeftable", marker = "extra == 'examples'", specifier = ">=0.12.1" },
     { name = "jax", specifier = ">=0.10.0,<0.11.1" },
     { name = "marimo", marker = "extra == 'examples'", specifier = ">=0.23.15" },

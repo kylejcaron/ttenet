@@ -404,7 +404,7 @@ def _(AS_OF, data, np):
     # RetailData imposes no deadline; the 90-day policy belongs to the initiation process.
     _within_policy = (AS_OF - data.units.sale_date.to_numpy().astype("datetime64[D]")).astype(
         int
-    ) <= 90
+    ) < 90  # as_of is end-of-day and day 90 is inclusive: age 90 has no opportunity left
     unit_status = np.select(
         [
             data.units.receipt_date.notna(),
@@ -436,7 +436,7 @@ def _(data, escape, mo, pd, unit_status):
     def _day(value, missing="not yet"):
         if pd.isna(value):
             return f'<span class="ttn-missing">{missing}</span>'
-        return pd.Timestamp(value).strftime("%b %-d")
+        return f"{pd.Timestamp(value):%b} {pd.Timestamp(value).day}"
 
     _rows = "".join(
         "<tr>"
@@ -732,7 +732,7 @@ def _(mo):
     For each unit, four things happen (or don't):
 
     1. **Sales.** Product $p$ sells $\text{sales}_{t,p} \sim \text{Poisson}\big(\exp(\alpha_p + \gamma_p \sin(2\pi\,\text{weekday}_t / 7))\big)$ units on day $t$.
-    2. **Will this unit ever be returned?** A sale is *susceptible* with probability $\pi^{\text{init}}_p = \sigma(a + b\,x_p)$. The rest are **cured**: kept forever, however long you wait.
+    2. **Is this unit susceptible?** A sale is *susceptible* with probability $\pi^{\text{init}}_p = \sigma(a + b\,x_p)$. The rest are **cured**: they never start a return, however long you wait. Susceptible units still only return if their clock rings before the deadline.
     3. **When is the return initiated?** A susceptible unit of age $a$ starts a return on day $t$ with discrete hazard $h(a, t) = \sigma\big(\ell_{\min(a,\,15)} + \beta^\top x_t\big)$, but only through day 90 of the policy.
     4. **Does it arrive, and when?** An initiated return arrives at all with probability $\pi^{\text{rec}}$, on a second clock whose hazard drops during storms and is *exactly zero* on weekends.
 
@@ -749,7 +749,7 @@ def _(mo):
     flowchart LR
         W([weekday]) --> S
         S((Sales)) -- "each unit starts a clock" --> I((Return<br/>initiated))
-        S -. "cured: never returned" .-> K[kept]
+        S -. "cured: never starts a return" .-> K[kept]
         P([product]) --> I
         D([90-day policy]) -. deadline .-> I
         I -- "second clock" --> R((Return<br/>received))
@@ -794,7 +794,7 @@ def _(callout):
         r"""A unit that has been quiet for $a$ days is not evidence against a return. Its
         likelihood contribution is $(1-\pi) + \pi\,S(a)$: either it belongs to the cured
         fraction, or it will return and simply hasn't yet. Given that silence, the chance it
-        is still headed back is $\pi S(a) / \big((1-\pi) + \pi S(a)\big)$, which shrinks the
+        is still susceptible is $\pi S(a) / \big((1-\pi) + \pi S(a)\big)$, which shrinks the
         longer it stays quiet. That is what fixes the collapsing line in Part 1.""",
     )
     return
@@ -888,8 +888,8 @@ def _(mo):
     mo.md(r"""
     Because this world is simulated, we know every true parameter. A correctly specified
     model should put its posterior mass around them. Here is the recovery check, including
-    the parts the ledger never shows directly: how many units are *ever* returned, and how
-    many initiated returns never arrive.
+    the parts the ledger never shows directly: what share of units are susceptible to
+    returning, and what share of initiated returns ever arrive.
     """)
     return
 
@@ -913,8 +913,8 @@ def _(SLATE, TABLE_THEME, ct, data, dataclasses, fitted, np, pd):
         ("Sales", "Daily sales rate, product B", _rate[:, _b], 8.0),
         ("Sales", "Weekday effect, product A", _weekday[:, _a], 0.3),
         ("Sales", "Weekday effect, product B", _weekday[:, _b], -0.2),
-        ("Return initiation", "Ever returned, product A", _sigmoid(_ci), _sigmoid(-0.8)),
-        ("Return initiation", "Ever returned, product B", _sigmoid(_ci + _cb), _sigmoid(-0.35)),
+        ("Return initiation", "Susceptible, product A", _sigmoid(_ci), _sigmoid(-0.8)),
+        ("Return initiation", "Susceptible, product B", _sigmoid(_ci + _cb), _sigmoid(-0.35)),
         ("Return initiation", "Hazard shift, product B", _beta_i[:, 0], -0.25),
         ("Return initiation", "Hazard shift, weekday", _beta_i[:, 1], 0.3),
         (
@@ -1019,7 +1019,7 @@ def _(ACCENT, AMBER, INK, alt, figure, fitted, mo, np, pd, swatch):
 def _(AS_OF, data, fitted, np, pd, truth):
     # The model's belief about each still-eligible unit: the probability it starts a return
     # before its deadline, given it has been quiet through the snapshot. Same formula as the
-    # "Key point" above, evaluated per unit and per posterior draw.
+    # "How censoring is handled" note above, evaluated per unit and per posterior draw.
     _params = fitted.initiation_fit.parameters
     _age_logits = np.asarray(_params.age_logits)
     _beta = np.asarray(_params.beta)
@@ -1028,7 +1028,7 @@ def _(AS_OF, data, fitted, np, pd, truth):
 
     _eligible = data.units[
         data.units.initiation_date.isna()
-        & ((AS_OF - data.units.sale_date.to_numpy().astype("datetime64[D]")).astype(int) <= 90)
+        & ((AS_OF - data.units.sale_date.to_numpy().astype("datetime64[D]")).astype(int) < 90)
     ]
     _sale = _eligible.sale_date.to_numpy().astype("datetime64[D]")
     _product = _eligible["product"].to_numpy(float)
@@ -1081,7 +1081,7 @@ def _(AS_OF, data, fitted, np, pd, truth):
             "model": _model_rate.mean(1),
             "model_lo": np.quantile(_model_rate, 0.05, axis=1),
             "model_hi": np.quantile(_model_rate, 0.95, axis=1),
-            "window_opens": pd.Timestamp(str(AS_OF - np.timedelta64(90, "D"))),
+            "window_opens": pd.Timestamp(str(AS_OF - np.timedelta64(89, "D"))),
         }
     )
     # The partial first and last calendar weeks hold only a few days of sales.
@@ -1419,12 +1419,14 @@ def _(section):
 
 
 @app.cell(hide_code=True)
-def _(AS_OF, mo, np, storm_spans):
+def _(AS_OF, mo, np, pd, storm_spans):
     _next = storm_spans[storm_spans.start > str(AS_OF)].iloc[0]
     storm_start = np.datetime64(_next.start.date())
-    _day = np.timedelta64(1, "D")
-    baseline_storm = f"{_next.start:%b %-d}–{(_next.end - _day):%-d}"
-    lingering_storm = f"{_next.start:%b %-d}–{(_next.start + np.timedelta64(9, 'D')):%-d}"
+    _first = _next.start
+    _last = _next.end - pd.Timedelta(days=1)
+    _lingers_to = _first + pd.Timedelta(days=9)
+    baseline_storm = f"{_first:%b} {_first.day}–{_last.day}"
+    lingering_storm = f"{_first:%b} {_first.day}–{_lingers_to.day}"
     demand_scale = mo.ui.dropdown(
         options={
             "Half the forecast (−50%)": 0.5,
