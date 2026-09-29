@@ -387,13 +387,15 @@ def _(np, simulate_retail):
 
 
 @app.cell
-def _(AS_OF, RetailData, TRAINING_START, date_grid, ledger):
+def _(AS_OF, RetailData, TRAINING_START, date_grid, ledger, mo):
+    # The ledger of units becomes the model's input.
     data = RetailData.from_units(
         ledger,
         as_of=AS_OF,  # end-of-day snapshot; anything later is hidden
         calendar=date_grid(TRAINING_START, AS_OF),  # the sales observation window
         group_by=["product"],
     )
+    mo.show_code(position="above")
     return (data,)
 
 
@@ -1099,15 +1101,22 @@ def _(section):
     return
 
 
-@app.cell
-def _(AS_OF, HORIZON, SEED, date_grid, fitted, np, sales_covariates):
+@app.cell(hide_code=True)
+def _(AS_OF, HORIZON, date_grid, np):
     forecast_dates = date_grid(AS_OF + np.timedelta64(1, "D"), AS_OF + np.timedelta64(HORIZON, "D"))
+    return (forecast_dates,)
+
+
+@app.cell
+def _(HORIZON, SEED, fitted, forecast_dates, mo, sales_covariates):
+    # Simulate sales, then push every cohort through both clocks: one call.
     forecast = fitted.forecast(
         horizon=HORIZON,
         covariates={"sales": sales_covariates(forecast_dates)},  # the weather is a known input
         seed=SEED + 5,
     )
-    return forecast, forecast_dates
+    mo.show_code(position="above")
+    return (forecast,)
 
 
 @app.cell(hide_code=True)
@@ -1493,30 +1502,37 @@ def _(np, storm_start, storms, weather):
     return (scenario_receipts,)
 
 
+@app.cell(hide_code=True)
+def _(dataclasses, np):
+    def scale_sales(sales, factor):
+        """Scale every simulated sales path; each path keeps its posterior-draw pairing."""
+        counts = np.rint(np.asarray(sales.counts) * factor).astype(np.int64)
+        return dataclasses.replace(sales, counts=counts)
+
+    return (scale_sales,)
+
+
 @app.cell
 def _(
     HORIZON,
     SEED,
-    dataclasses,
     demand_scale,
     fitted,
     forecast,
     forecast_dates,
-    np,
+    mo,
     sales_covariates,
+    scale_sales,
     scenario_receipts,
 ):
-    # Scale the model's own sales draws; keeping draw identity pairs each path with its posterior draw.
-    scenario_sales = dataclasses.replace(
-        forecast.sales,
-        counts=np.rint(np.asarray(forecast.sales.counts) * demand_scale.value).astype(np.int64),
-    )
+    # Same fitted model, no refit: swap in a scaled sales forecast and a weather scenario.
     scenario = fitted.forecast(
         horizon=HORIZON,
         covariates={"sales": sales_covariates(forecast_dates), "receipts": scenario_receipts},
-        future_sales=scenario_sales,
+        future_sales=scale_sales(forecast.sales, demand_scale.value),
         seed=SEED + 5,
     )
+    mo.show_code(position="above")
     return (scenario,)
 
 
