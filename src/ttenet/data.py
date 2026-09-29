@@ -11,7 +11,7 @@ observed sequences are rejected rather than coerced.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -36,7 +36,7 @@ class RetailHistory:
 
     frame: pd.DataFrame
     as_of: np.datetime64
-    policy_days: Optional[int]
+    policy_days: int | None
 
 
 def _empty_day_array(n: int) -> np.ndarray:
@@ -141,52 +141,47 @@ def _prepare_changes(data: pd.DataFrame, as_of: np.datetime64) -> pd.DataFrame:
     reserved = {"item_id", "date", "event"}
     feature_cols = [c for c in data.columns if c not in reserved]
     columns = ["item_id", "sale_date", "initiation_date", "receipt_date", *feature_cols]
-
-    working = data.copy()
-    working["_date_day"] = date_day
-    visible = working.loc[~np.isnat(date_day) & (date_day <= as_of)]
+    visible_mask = ~np.isnat(date_day) & (date_day <= as_of)
+    visible = data.loc[visible_mask].copy()
+    visible["_date_day"] = date_day[visible_mask]
     bad_events = sorted(set(visible["event"].unique()) - _VALID_EVENTS)
     if bad_events:
         raise ValueError(f"unknown event types in changes input: {bad_events}")
 
-    pivot_rows = []
-    for item_id, group in visible.groupby("item_id", sort=False):
-        counts = group["event"].value_counts()
-        for event in _VALID_EVENTS:
-            if counts.get(event, 0) > 1:
-                raise ValueError(f"item '{item_id}' has duplicate '{event}' change events")
-
-        sale_rows = group.loc[group["event"] == "sale"]
-        if sale_rows.empty:
-            raise ValueError(
-                f"item '{item_id}' has an observed initiation/receipt event without an "
-                "observed sale event"
-            )
-        sale_row = sale_rows.iloc[0]
-        init_rows = group.loc[group["event"] == "initiation"]
-        receipt_rows = group.loc[group["event"] == "receipt"]
-
-        row = {
-            "item_id": item_id,
-            "sale_date": sale_row["_date_day"],
-            "initiation_date": (
-                init_rows["_date_day"].iloc[0] if not init_rows.empty else np.datetime64("NaT", "D")
-            ),
-            "receipt_date": (
-                receipt_rows["_date_day"].iloc[0]
-                if not receipt_rows.empty
-                else np.datetime64("NaT", "D")
-            ),
-        }
-        for col in feature_cols:
-            row[col] = sale_row[col]
-        pivot_rows.append((order_map[item_id], row))
-
+    pivot_rows = [
+        (order_map[item_id], _pivot_change_group(item_id, group, feature_cols))
+        for item_id, group in visible.groupby("item_id", sort=False)
+    ]
     if not pivot_rows:
         return pd.DataFrame(columns=columns)
-
     pivot_rows.sort(key=lambda pair: pair[0])
     return pd.DataFrame([row for _, row in pivot_rows], columns=columns)
+
+
+def _pivot_change_group(
+    item_id: Any, group: pd.DataFrame, feature_cols: list[str]
+) -> dict[str, Any]:
+    counts = group["event"].value_counts()
+    for event in _VALID_EVENTS:
+        if counts.get(event, 0) > 1:
+            raise ValueError(f"item '{item_id}' has duplicate '{event}' change events")
+
+    sale_rows = group.loc[group["event"] == "sale"]
+    if sale_rows.empty:
+        raise ValueError(
+            f"item '{item_id}' has an observed initiation/receipt event without an "
+            "observed sale event"
+        )
+    sale_row = sale_rows.iloc[0]
+    row: dict[str, Any] = {"item_id": item_id, "sale_date": sale_row["_date_day"]}
+    for event, column in (("initiation", "initiation_date"), ("receipt", "receipt_date")):
+        event_rows = group.loc[group["event"] == event]
+        row[column] = (
+            event_rows["_date_day"].iloc[0] if not event_rows.empty else np.datetime64("NaT", "D")
+        )
+    for col in feature_cols:
+        row[col] = sale_row[col]
+    return row
 
 
 def _hide_future(days: np.ndarray, as_of: np.datetime64) -> np.ndarray:
@@ -196,7 +191,7 @@ def _hide_future(days: np.ndarray, as_of: np.datetime64) -> np.ndarray:
     return days
 
 
-def _finalize(raw: pd.DataFrame, as_of: np.datetime64, policy_days: Optional[int]) -> pd.DataFrame:
+def _finalize(raw: pd.DataFrame, as_of: np.datetime64, policy_days: int | None) -> pd.DataFrame:
     """Apply as-of isolation, validate event ordering/policy, add derived columns."""
     frame = raw.reset_index(drop=True)
     n = len(frame)
@@ -289,7 +284,7 @@ def prepare_history(
     *,
     as_of: Any,
     layout: str = "tabular",
-    policy_days: Optional[int] = 90,
+    policy_days: int | None = 90,
 ) -> RetailHistory:
     """Build a canonical, as-of-isolated :class:`RetailHistory`.
 
@@ -360,6 +355,76 @@ def _to_numeric_strict(series: pd.Series, column_name: str) -> np.ndarray:
     return numeric.to_numpy(dtype=np.float64)
 
 
+def _normalize_covariate_records(records: pd.DataFrame, columns: list[Any]) -> pd.DataFrame:
+    if not isinstance(records, pd.DataFrame):
+        raise TypeError("records must be a pandas DataFrame")
+    required = {"item_id", "date", *columns}
+    missing = required - set(records.columns)
+    if missing:
+        raise ValueError(f"records missing required columns: {sorted(missing)}")
+    work = records[["item_id", "date", *columns]].copy()
+    work["date"] = to_day(work["date"])
+    return work
+
+
+def _align_change_values(
+    records: pd.DataFrame | None, item: Any, column: str, dates: np.ndarray
+) -> np.ndarray:
+    """Carry one feature forward, rejecting ambiguity and pre-observation gaps."""
+    if records is None:
+        known_dates = _empty_day_array(0)
+        known_values = np.array([], dtype=np.float64)
+    else:
+        values = _to_numeric_strict(records[column], column)
+        known = ~np.isnan(values)
+        known_dates = records["date"].to_numpy()[known]
+        known_values = values[known]
+    order = np.argsort(known_dates)
+    known_dates, known_values = known_dates[order], known_values[order]
+    if pd.Index(known_dates).has_duplicates:
+        raise ValueError(f"duplicate same-day changes for item '{item}', covariate '{column}'")
+    position = np.searchsorted(known_dates, dates, side="right") - 1
+    if (position < 0).any():
+        bad_date = dates[position < 0][0]
+        raise ValueError(
+            f"item '{item}' has no known value for covariate '{column}' on or "
+            f"before {bad_date}; sparse changes cannot be imputed before the "
+            "first known value"
+        )
+    return known_values[position]
+
+
+def _expand_changes(
+    work: pd.DataFrame, items: list[Any], dates: np.ndarray, columns: list[Any]
+) -> np.ndarray:
+    result = np.empty((len(items), len(dates), len(columns)), dtype=np.float64)
+    grouped = dict(iter(work.groupby("item_id", sort=False)))
+    for f_idx, col in enumerate(columns):
+        for i, item in enumerate(items):
+            result[i, :, f_idx] = _align_change_values(grouped.get(item), item, col, dates)
+    return result
+
+
+def _expand_longitudinal(
+    work: pd.DataFrame, items: list[Any], dates: np.ndarray, columns: list[Any]
+) -> np.ndarray:
+    for col in columns:
+        work[col] = _to_numeric_strict(work[col], col)
+    if work.duplicated(subset=["item_id", "date"]).any():
+        item = work.loc[work.duplicated(subset=["item_id", "date"]), "item_id"].iloc[0]
+        raise ValueError(f"duplicate longitudinal covariate rows for item '{item}'")
+    indexed = work.set_index(["item_id", "date"])[columns]
+    full_index = pd.MultiIndex.from_product([items, dates], names=["item_id", "date"])
+    aligned = indexed.reindex(full_index)
+    missing_mask = aligned.isna().any(axis=1).to_numpy()
+    if missing_mask.any():
+        first = aligned.index[missing_mask][0]
+        raise ValueError(
+            f"missing longitudinal covariate coverage for item '{first[0]}' on {first[1]}"
+        )
+    return aligned.to_numpy(dtype=np.float64).reshape(len(items), len(dates), len(columns))
+
+
 def expand_covariates(
     records: pd.DataFrame,
     items: Any,
@@ -368,92 +433,25 @@ def expand_covariates(
     *,
     layout: str = "changes",
 ) -> np.ndarray:
-    """Expand sparse or dense covariate records onto an explicit
-    ``[item, calendar_day, feature]`` array, in the exact order of ``items``,
-    ``dates``, and ``columns``.
+    """Expand covariates into an explicit ``[item, calendar_day, feature]`` array.
 
-    ``layout="changes"``: ``records`` has ``item_id``, ``date``, and one column
-    per requested feature. A non-missing cell is a value change effective on
-    that date; a missing cell means "no change on this date" and is skipped,
-    never overwriting the item's last known value. Every requested date is
-    filled with the most recent known value at or before it, independently
-    per item and per feature (a step function) -- never from a later record
-    (no backward fill). A requested date strictly before an item's first known
-    value for a feature is an error, never silently imputed.
+    ``layout="changes"`` carries each item's latest known feature value
+    forward, never backward before its first observation. Missing values in
+    a change record leave that feature unchanged; duplicate same-day updates
+    for the same feature are errors.
 
-    ``layout="longitudinal"``: ``records`` must contain an explicit row for
-    every ``(item, date)`` pair spanned by ``items``/``dates``, with every
-    requested feature column populated. Any missing row or missing value is an
-    error; there is no forward propagation in this layout.
+    ``layout="longitudinal"`` requires one complete row per requested item
+    and day. Missing coverage, missing feature values, and duplicate rows
+    are errors. Output follows the supplied item, date, and feature order.
     """
     items = list(items)
     columns = list(columns)
     dates_arr = np.atleast_1d(to_day(dates))
-    n_items, n_days, n_features = len(items), len(dates_arr), len(columns)
-
-    if n_features == 0:
-        return np.zeros((n_items, n_days, 0), dtype=np.float64)
-
-    if not isinstance(records, pd.DataFrame):
-        raise TypeError("records must be a pandas DataFrame")
-    required = {"item_id", "date", *columns}
-    missing = required - set(records.columns)
-    if missing:
-        raise ValueError(f"records missing required columns: {sorted(missing)}")
-
-    work = records[["item_id", "date", *columns]].copy()
-    work["date"] = to_day(work["date"])
-
+    if not columns:
+        return np.zeros((len(items), len(dates_arr), 0), dtype=np.float64)
+    work = _normalize_covariate_records(records, columns)
     if layout == "changes":
-        result = np.empty((n_items, n_days, n_features), dtype=np.float64)
-        grouped = {key: sub for key, sub in work.groupby("item_id", sort=False)}
-        for f_idx, col in enumerate(columns):
-            for i, item in enumerate(items):
-                sub = grouped.get(item)
-                if sub is not None:
-                    values = _to_numeric_strict(sub[col], col)
-                    known = ~np.isnan(values)
-                    known_dates = sub["date"].to_numpy()[known]
-                    known_values = values[known]
-                else:
-                    known_dates = _empty_day_array(0)
-                    known_values = np.array([], dtype=np.float64)
-
-                order = np.argsort(known_dates)
-                known_dates = known_dates[order]
-                known_values = known_values[order]
-                if pd.Index(known_dates).has_duplicates:
-                    raise ValueError(
-                        f"duplicate same-day changes for item '{item}', covariate '{col}'"
-                    )
-
-                position = np.searchsorted(known_dates, dates_arr, side="right") - 1
-                if (position < 0).any():
-                    bad_date = dates_arr[position < 0][0]
-                    raise ValueError(
-                        f"item '{item}' has no known value for covariate '{col}' on or "
-                        f"before {bad_date}; sparse changes cannot be imputed before the "
-                        "first known value"
-                    )
-                result[i, :, f_idx] = known_values[position]
-        return result
-
+        return _expand_changes(work, items, dates_arr, columns)
     if layout == "longitudinal":
-        for col in columns:
-            work[col] = _to_numeric_strict(work[col], col)
-        if work.duplicated(subset=["item_id", "date"]).any():
-            item = work.loc[work.duplicated(subset=["item_id", "date"]), "item_id"].iloc[0]
-            raise ValueError(f"duplicate longitudinal covariate rows for item '{item}'")
-
-        indexed = work.set_index(["item_id", "date"])[columns]
-        full_index = pd.MultiIndex.from_product([items, dates_arr], names=["item_id", "date"])
-        aligned = indexed.reindex(full_index)
-        missing_mask = aligned.isna().any(axis=1).to_numpy()
-        if missing_mask.any():
-            first = aligned.index[missing_mask][0]
-            raise ValueError(
-                f"missing longitudinal covariate coverage for item '{first[0]}' on {first[1]}"
-            )
-        return aligned.to_numpy(dtype=np.float64).reshape(n_items, n_days, n_features)
-
+        return _expand_longitudinal(work, items, dates_arr, columns)
     raise ValueError(f"unknown covariate layout '{layout}'; expected 'changes' or 'longitudinal'")

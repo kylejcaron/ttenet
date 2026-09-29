@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 from functools import partial
-from typing import Any, Optional
+from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
@@ -102,8 +102,8 @@ class StageFit:
 
 
 def _select_rows(
-    array: Optional[Any], row_mask: np.ndarray, total_rows: int, *, name: str
-) -> Optional[np.ndarray]:
+    array: Any | None, row_mask: np.ndarray, total_rows: int, *, name: str
+) -> np.ndarray | None:
     if array is None:
         return None
     array = np.asarray(array)
@@ -120,6 +120,162 @@ def _select_rows(
     return array[row_mask]
 
 
+def _prepare_event_rows(
+    frame: Any,
+    *,
+    origin_column: str,
+    event_column: str,
+    as_of: np.datetime64,
+    deadline_days: int | None,
+    entry_dates: Any | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray, np.ndarray]:
+    """Validate dates and select rows contributing to a stage likelihood."""
+    total_rows = len(frame)
+    origin_full = np.asarray(to_day(frame[origin_column]))
+    event_full = np.asarray(to_day(frame[event_column]))
+    if origin_full.shape[0] != total_rows or event_full.shape[0] != total_rows:
+        raise ValueError("origin_column and event_column must align with the full frame")
+    if entry_dates is None:
+        entry_full = origin_full.copy()
+    else:
+        entry_full = np.asarray(to_day(entry_dates))
+        if entry_full.shape[0] != total_rows:
+            raise ValueError("entry_dates must align with the full history frame")
+
+    origin_known = ~np.isnat(origin_full)
+    event_known = ~np.isnat(event_full)
+    if np.any(event_known & ~origin_known):
+        raise ValueError("an observed event cannot occur without a known parent/origin date")
+    if np.any(event_known & origin_known & (event_full < origin_full)):
+        raise ValueError("event date precedes its origin date")
+
+    deadline_full = None
+    if deadline_days is not None:
+        deadline_full = origin_full + np.timedelta64(int(deadline_days), "D")
+        if np.any(event_known & origin_known & (event_full > deadline_full)):
+            raise ValueError(f"observed event exceeds the {deadline_days}-day deadline")
+    if np.any(origin_known & np.isnat(entry_full)):
+        raise ValueError("entry_dates must be known wherever origin_column is known")
+
+    has_event_full = event_known & (event_full <= as_of)
+    completed_before_entry = has_event_full & (event_full < entry_full)
+    row_mask = origin_known & ~completed_before_entry
+    return (
+        origin_full[row_mask],
+        event_full[row_mask],
+        entry_full[row_mask],
+        None if deadline_full is None else deadline_full[row_mask],
+        has_event_full[row_mask],
+        row_mask,
+    )
+
+
+def _validate_calendar(calendar: Any, origin: np.ndarray, as_of: np.datetime64) -> np.ndarray:
+    """Normalize and validate the inclusive daily calendar."""
+    calendar = np.asarray(calendar, dtype="datetime64[D]")
+    if calendar.ndim != 1 or calendar.shape[0] == 0:
+        raise ValueError("calendar must be a nonempty one-dimensional date array")
+    if np.isnat(calendar).any():
+        raise ValueError("calendar must not contain missing dates")
+    if calendar.shape[0] > 1 and not np.all(
+        np.diff(calendar).astype("timedelta64[D]").astype(np.int64) == 1
+    ):
+        raise ValueError("calendar must be an inclusive, contiguous daily grid")
+    if origin.size > 0 and calendar[0] > origin.min():
+        raise ValueError("calendar must start at or before the earliest original origin date")
+    if calendar[-1] < as_of:
+        raise ValueError("calendar must extend through as_of")
+    return calendar
+
+
+def _construct_exposure(
+    origin: np.ndarray,
+    event: np.ndarray,
+    entry: np.ndarray,
+    deadline: np.ndarray | None,
+    has_event: np.ndarray,
+    calendar: np.ndarray,
+    as_of: np.datetime64,
+    entry_dates_given: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
+    """Construct age, exposure, event-index, and conditional-entry masks."""
+    num_days = calendar.shape[0]
+    calendar_start = calendar[0]
+    stop_date = (
+        np.minimum(deadline, as_of)
+        if deadline is not None
+        else np.full(origin.size, as_of, dtype="datetime64[D]")
+    )
+    end_date = np.where(has_event, event, stop_date)
+    end_index = (end_date - calendar_start).astype("timedelta64[D]").astype(np.int64)
+    event_raw_index = (event - calendar_start).astype("timedelta64[D]").astype(np.int64)
+    if np.any(has_event & ((event_raw_index < 0) | (event_raw_index >= num_days))):
+        raise ValueError("calendar does not cover an observed event date")
+    event_index = np.where(has_event, event_raw_index, -1).astype(np.int64)
+
+    ages = (calendar[None, :] - origin[:, None]).astype("timedelta64[D]").astype(np.int64)
+    day_index = np.arange(num_days)
+    risk_origin = np.maximum(origin, entry)
+    risk_origin_idx = (risk_origin - calendar_start).astype("timedelta64[D]").astype(np.int64)
+    at_risk = (day_index[None, :] >= risk_origin_idx[:, None]) & (
+        day_index[None, :] <= end_index[:, None]
+    )
+    if not entry_dates_given:
+        return ages, at_risk, event_index, None
+
+    origin_idx = (origin - calendar_start).astype("timedelta64[D]").astype(np.int64)
+    pre_entry_stop = entry - np.timedelta64(1, "D")
+    if deadline is not None:
+        pre_entry_stop = np.minimum(pre_entry_stop, deadline)
+    pre_entry_stop_idx = (pre_entry_stop - calendar_start).astype("timedelta64[D]").astype(np.int64)
+    pre_entry = (day_index[None, :] >= origin_idx[:, None]) & (
+        day_index[None, :] <= pre_entry_stop_idx[:, None]
+    )
+    return ages, at_risk, event_index, pre_entry
+
+
+def _observation_allowed(allowed, row_mask, total_rows, num_rows, num_days):
+    """Normalize global or per-row closure masks onto the selected exposure grid."""
+    if allowed is None:
+        return np.ones((num_rows, num_days), dtype=bool)
+    values = np.asarray(allowed)
+    if not np.isin(values, [False, True]).all():
+        raise ValueError("allowed must contain boolean or zero/one values")
+    values = values.astype(bool)
+    if values.ndim == 1:
+        if values.shape[0] != num_days:
+            raise ValueError("a 1-D allowed mask must match the calendar length")
+        return np.broadcast_to(values, (num_rows, num_days))
+    selected = _select_rows(values, row_mask, total_rows, name="allowed")
+    if selected.shape[-1] != num_days:
+        raise ValueError("allowed must be indexed against the exact calendar length")
+    return selected
+
+
+def _normalize_observation_arrays(
+    features: Any | None,
+    cure_features: Any | None,
+    allowed: Any | None,
+    row_mask: np.ndarray,
+    total_rows: int,
+    num_days: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Align covariates and closure masks after stage rows are selected."""
+    num_rows = int(row_mask.sum())
+    features_full = _select_rows(features, row_mask, total_rows, name="features")
+    if features_full is None:
+        features_arr = np.zeros((num_rows, num_days, 0))
+    else:
+        if features_full.shape[1] != num_days:
+            raise ValueError("features must be indexed against the exact calendar length")
+        features_arr = features_full
+
+    cure_full = _select_rows(cure_features, row_mask, total_rows, name="cure_features")
+    cure_arr = np.zeros((num_rows, 0)) if cure_full is None else cure_full
+    allowed_arr = _observation_allowed(allowed, row_mask, total_rows, num_rows, num_days)
+    return features_arr, cure_arr, allowed_arr
+
+
 def make_event_observations(
     frame: Any,
     *,
@@ -127,11 +283,11 @@ def make_event_observations(
     event_column: str,
     as_of: Any,
     calendar: Any,
-    deadline_days: Optional[int] = None,
-    entry_dates: Optional[Any] = None,
-    features: Optional[Any] = None,
-    cure_features: Optional[Any] = None,
-    allowed: Optional[Any] = None,
+    deadline_days: int | None = None,
+    entry_dates: Any | None = None,
+    features: Any | None = None,
+    cure_features: Any | None = None,
+    allowed: Any | None = None,
 ) -> StageObservations:
     """Build calendar-indexed :class:`StageObservations` for one generic event stage.
 
@@ -166,127 +322,30 @@ def make_event_observations(
     origin date (pre-entry susceptibility needs that historical exposure)
     and extends through ``as_of``.
     """
-    total_rows = len(frame)
-    origin_full = np.asarray(to_day(frame[origin_column]))
-    event_full = np.asarray(to_day(frame[event_column]))
-    if origin_full.shape[0] != total_rows or event_full.shape[0] != total_rows:
-        raise ValueError("origin_column and event_column must align with the full frame")
     as_of_day = to_day(as_of)
-
-    if entry_dates is None:
-        entry_full = origin_full.copy()
-    else:
-        entry_full = np.asarray(to_day(entry_dates))
-        if entry_full.shape[0] != total_rows:
-            raise ValueError("entry_dates must align with the full history frame")
-
-    origin_known = ~np.isnat(origin_full)
-    event_known = ~np.isnat(event_full)
-
-    if np.any(event_known & ~origin_known):
-        raise ValueError("an observed event cannot occur without a known parent/origin date")
-    if np.any(event_known & origin_known & (event_full < origin_full)):
-        raise ValueError("event date precedes its origin date")
-
-    if deadline_days is not None:
-        deadline_full = origin_full + np.timedelta64(int(deadline_days), "D")
-        if np.any(event_known & origin_known & (event_full > deadline_full)):
-            raise ValueError(f"observed event exceeds the {deadline_days}-day deadline")
-    else:
-        deadline_full = None
-
-    if np.any(origin_known & np.isnat(entry_full)):
-        raise ValueError("entry_dates must be known wherever origin_column is known")
-
-    has_event_full = event_known & (event_full <= as_of_day)
-    completed_before_entry = has_event_full & (event_full < entry_full)
-    row_mask = origin_known & ~completed_before_entry
-    n_rows = int(row_mask.sum())
-
-    origin = origin_full[row_mask]
-    event_date = event_full[row_mask]
-    entry = entry_full[row_mask]
-    deadline = deadline_full[row_mask] if deadline_full is not None else None
-    has_event = has_event_full[row_mask]
-
-    calendar = np.asarray(calendar, dtype="datetime64[D]")
-    if calendar.ndim != 1 or calendar.shape[0] == 0:
-        raise ValueError("calendar must be a nonempty one-dimensional date array")
-    if np.isnat(calendar).any():
-        raise ValueError("calendar must not contain missing dates")
-    if calendar.shape[0] > 1 and not np.all(
-        np.diff(calendar).astype("timedelta64[D]").astype(np.int64) == 1
-    ):
-        raise ValueError("calendar must be an inclusive, contiguous daily grid")
-    num_days = calendar.shape[0]
-    calendar_start = calendar[0]
-
-    if n_rows > 0 and calendar_start > origin.min():
-        raise ValueError("calendar must start at or before the earliest original origin date")
-    if calendar[-1] < as_of_day:
-        raise ValueError("calendar must extend through as_of")
-
-    if deadline is not None:
-        stop_date = np.minimum(deadline, as_of_day)
-    else:
-        stop_date = np.full(n_rows, as_of_day, dtype="datetime64[D]")
-    end_date = np.where(has_event, event_date, stop_date)
-    end_index = (end_date - calendar_start).astype("timedelta64[D]").astype(np.int64)
-    event_raw_index = (event_date - calendar_start).astype("timedelta64[D]").astype(np.int64)
-    if np.any(has_event & ((event_raw_index < 0) | (event_raw_index >= num_days))):
-        raise ValueError("calendar does not cover an observed event date")
-    event_index = np.where(has_event, event_raw_index, -1).astype(np.int64)
-
-    ages = (calendar[None, :] - origin[:, None]).astype("timedelta64[D]").astype(np.int64)
-    day_index = np.arange(num_days)
-    risk_origin = np.maximum(origin, entry)
-    risk_origin_idx = (risk_origin - calendar_start).astype("timedelta64[D]").astype(np.int64)
-    at_risk = (day_index[None, :] >= risk_origin_idx[:, None]) & (
-        day_index[None, :] <= end_index[:, None]
+    total_rows = len(frame)
+    origin, event, entry, deadline, has_event, row_mask = _prepare_event_rows(
+        frame,
+        origin_column=origin_column,
+        event_column=event_column,
+        as_of=as_of_day,
+        deadline_days=deadline_days,
+        entry_dates=entry_dates,
     )
-
-    if entry_dates is None:
-        pre_entry_arr = None
-    else:
-        origin_idx = (origin - calendar_start).astype("timedelta64[D]").astype(np.int64)
-        pre_entry_stop = entry - np.timedelta64(1, "D")
-        if deadline is not None:
-            pre_entry_stop = np.minimum(pre_entry_stop, deadline)
-        pre_entry_stop_idx = (
-            (pre_entry_stop - calendar_start).astype("timedelta64[D]").astype(np.int64)
-        )
-        pre_entry_arr = (day_index[None, :] >= origin_idx[:, None]) & (
-            day_index[None, :] <= pre_entry_stop_idx[:, None]
-        )
-
-    features_full = _select_rows(features, row_mask, total_rows, name="features")
-    if features_full is None:
-        features_arr = np.zeros((n_rows, num_days, 0))
-    else:
-        if features_full.shape[1] != num_days:
-            raise ValueError("features must be indexed against the exact calendar length")
-        features_arr = features_full
-
-    cure_full = _select_rows(cure_features, row_mask, total_rows, name="cure_features")
-    cure_arr = np.zeros((n_rows, 0)) if cure_full is None else cure_full
-
-    if allowed is None:
-        allowed_arr = np.ones((n_rows, num_days), dtype=bool)
-    else:
-        allowed_input = np.asarray(allowed)
-        if not np.isin(allowed_input, [False, True]).all():
-            raise ValueError("allowed must contain boolean or zero/one values")
-        allowed_input = allowed_input.astype(bool)
-        if allowed_input.ndim == 1:
-            if allowed_input.shape[0] != num_days:
-                raise ValueError("a 1-D allowed mask must match the calendar length")
-            allowed_arr = np.broadcast_to(allowed_input, (n_rows, num_days))
-        else:
-            allowed_full = _select_rows(allowed_input, row_mask, total_rows, name="allowed")
-            if allowed_full.shape[-1] != num_days:
-                raise ValueError("allowed must be indexed against the exact calendar length")
-            allowed_arr = allowed_full
-
+    calendar_arr = _validate_calendar(calendar, origin, as_of_day)
+    ages, at_risk, event_index, pre_entry = _construct_exposure(
+        origin,
+        event,
+        entry,
+        deadline,
+        has_event,
+        calendar_arr,
+        as_of_day,
+        entry_dates is not None,
+    )
+    features_arr, cure_arr, allowed_arr = _normalize_observation_arrays(
+        features, cure_features, allowed, row_mask, total_rows, calendar_arr.shape[0]
+    )
     return StageObservations(
         ages=jnp.asarray(ages),
         features=jnp.asarray(features_arr, dtype=jnp.float32),
@@ -294,7 +353,7 @@ def make_event_observations(
         at_risk=jnp.asarray(at_risk),
         allowed=jnp.asarray(allowed_arr),
         event_index=jnp.asarray(event_index),
-        pre_entry=None if pre_entry_arr is None else jnp.asarray(pre_entry_arr),
+        pre_entry=None if pre_entry is None else jnp.asarray(pre_entry),
     )
 
 
@@ -303,9 +362,9 @@ def make_observations(
     stage: str,
     calendar: Any,
     *,
-    features: Optional[Any] = None,
-    cure_features: Optional[Any] = None,
-    allowed: Optional[Any] = None,
+    features: Any | None = None,
+    cure_features: Any | None = None,
+    allowed: Any | None = None,
 ) -> StageObservations:
     """Build calendar-indexed :class:`StageObservations` for one stage.
 

@@ -16,7 +16,7 @@ checks that require concrete inspection belong to host-side callers
 
 from __future__ import annotations
 
-from typing import Any, NamedTuple, Optional
+from typing import Any, NamedTuple
 
 import jax.numpy as jnp
 from jax.nn import sigmoid
@@ -62,7 +62,7 @@ def _cure_logits(parameters: StageParameters, cure_features: Any) -> Any:
 
 
 def stage_hazard(
-    parameters: StageParameters, ages: Any, features: Any, allowed: Optional[Any] = None
+    parameters: StageParameters, ages: Any, features: Any, allowed: Any | None = None
 ) -> Any:
     """Daily hazard ``h(a, t) = sigmoid(age_logits[min(a, K-1)] + x(t) @ beta)``.
 
