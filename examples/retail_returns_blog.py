@@ -793,7 +793,7 @@ def _(callout):
         "How censoring is handled",
         r"""A unit that has been quiet for $a$ days is not evidence against a return. Its
         likelihood contribution is $(1-\pi) + \pi\,S(a)$: either it belongs to the cured
-        fraction, or it will return and simply hasn't yet. Given that silence, the chance it
+        fraction, or it is susceptible and hasn't returned yet. Given that silence, the chance it
         is still susceptible is $\pi S(a) / \big((1-\pi) + \pi S(a)\big)$, which shrinks the
         longer it stays quiet. That is what fixes the collapsing line in Part 1.""",
     )
