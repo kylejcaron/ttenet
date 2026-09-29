@@ -205,7 +205,7 @@ def _(mo):
             <a href="#fit">Fit</a>
             <a href="#forecast">Forecast</a>
             <a href="#scenarios">Scenarios</a>
-            <a href="#simpler">Simpler?</a>
+            <a href="#simpler">Baseline</a>
             <a href="#wrap-up">Wrap-up</a>
           </nav>
         </header>
@@ -217,12 +217,12 @@ def _(mo):
 def _(mo):
     mo.Html("""
         <div id="top" class="ttn-hero">
-          <p class="ttn-kicker">Survival analysis · Time series · Supply chain · Bayesian modeling</p>
+          <p class="ttn-kicker">Forecasting · Time-to-event · Supply chain · Bayesian modeling</p>
           <h1 class="ttn-title">Returns you haven't seen yet</h1>
           <p class="ttn-dek">
-            Forecasting retail returns from first principles. Every sale starts a clock.
-            Most of those clocks never ring, and the ones that do ring at the warehouse on
-            a weekday, unless it's storming.
+            Forecasting retail returns as a chain of forecasts. Sales feed return
+            initiations, which feed warehouse receipts. Fit the chain once, then push any
+            sales forecast through it, uncertainty and all.
           </p>
           <ul class="ttn-byline">
             <li><b>Kyle Caron</b></li>
@@ -239,122 +239,98 @@ def _(section):
     section(
         "tldr",
         "TL;DR",
-        "Observed returns are not eventual returns",
-        "If you staff a returns warehouse, book refund liabilities, or plan to restock "
-        "returned units, you care about the returns that <em>will</em> arrive. The data only "
-        "shows the ones that already have.",
+        "Returns are a forecast of a forecast",
+        "Next week's warehouse receipts depend on the returns customers start this week, "
+        "which depend on what sold last month and on what sells this month. Forecast each "
+        "step, chain them, and push a sales forecast all the way through.",
     )
     return
 
 
 @app.cell(hide_code=True)
-def _(INK, RED, SLATE, alt, cohort_rates, figure, pd, swatch):
-    _open = pd.DataFrame(
-        {
-            "start": [cohort_rates.window_opens.iloc[0]],
-            "end": [cohort_rates.week.max() + pd.Timedelta(days=6)],
-        }
-    )
-    _base = alt.Chart(cohort_rates).encode(
-        x=alt.X("week:T", title="Week the unit was sold", axis=alt.Axis(format="%b %-d"))
-    )
-    _window = (
-        alt.Chart(_open).mark_rect(color="#ecefe4", opacity=0.7).encode(x="start:T", x2="end:T")
-    )
-    _label = (
-        alt.Chart(_open)
-        .mark_text(align="left", dx=8, dy=12, color="#62695d", fontSize=11)
-        .encode(x="start:T", y=alt.value(0), text=alt.value("Still inside the 90-day window"))
-    )
-    _band = _base.mark_area(color=SLATE, opacity=0.16).encode(y="model_lo:Q", y2="model_hi:Q")
-    _lines = (
-        alt.Chart(
-            cohort_rates.melt(
-                id_vars="week",
-                value_vars=["eventual", "observed", "model"],
-                var_name="series",
-                value_name="rate",
-            ).replace(
-                {
-                    "series": {
-                        "eventual": "Eventually returned (truth)",
-                        "observed": "Returned so far",
-                        "model": "ttenet estimate",
-                    }
-                }
+def _(
+    ACCENT,
+    AMBER,
+    INK,
+    MUTED,
+    alt,
+    fan,
+    figure,
+    forecast,
+    held_out,
+    mo,
+    sales_actual,
+    sales_draws,
+    swatch,
+):
+    def _panel(draws, actual, color, title, show_axis):
+        _frame = fan(forecast.dates, draws, title).assign(actual=actual)
+        _base = alt.Chart(_frame).encode(
+            x=alt.X(
+                "date:T",
+                title=None,
+                axis=alt.Axis(format="%a %b %-d", labels=show_axis, ticks=show_axis, labelAngle=0),
             )
         )
-        .mark_line(strokeWidth=2.4, point=alt.OverlayMarkDef(size=26, filled=True))
-        .encode(
-            x="week:T",
-            y=alt.Y(
-                "rate:Q",
-                title="Share of units with a return initiated",
-                axis=alt.Axis(format="%"),
-                scale=alt.Scale(domain=[0, 0.5]),
-            ),
-            color=alt.Color(
-                "series:N",
-                scale=alt.Scale(
-                    domain=[
-                        "Eventually returned (truth)",
-                        "Returned so far",
-                        "ttenet estimate",
-                    ],
-                    range=[INK, RED, SLATE],
-                ),
-                legend=alt.Legend(orient="top", title=None, symbolType="stroke"),
-            ),
-            strokeDash=alt.StrokeDash(
-                "series:N",
-                scale=alt.Scale(
-                    domain=[
-                        "Eventually returned (truth)",
-                        "Returned so far",
-                        "ttenet estimate",
-                    ],
-                    range=[[5, 4], [1, 0], [1, 0]],
-                ),
-                legend=None,
-            ),
-        )
-    )
+        return alt.layer(
+            _base.mark_area(color=color, opacity=0.14).encode(y="lo90:Q", y2="hi90:Q"),
+            _base.mark_area(color=color, opacity=0.26).encode(y="lo50:Q", y2="hi50:Q"),
+            _base.mark_line(color=color, strokeWidth=2).encode(y=alt.Y("mean:Q", title=title)),
+            _base.mark_circle(color=INK, size=26, opacity=0.85).encode(y="actual:Q"),
+        ).properties(height=120, width="container")
+
     figure(
-        (_window + _label + _band + _lines).properties(height=320, width="container"),
-        "Recent sales look like they never get returned",
-        f"{swatch(RED)}<b>Returns so far</b> collapse for recent cohorts: those units simply "
-        "haven't had time. The truth (dashed) doesn't fall at all. ttenet's estimate "
-        f"{swatch(SLATE)} adds, for every still-eligible unit, the probability it starts a "
-        "return before its deadline given that it hasn't yet. Band: 90% posterior interval.",
+        mo.vstack(
+            [
+                _panel(sales_draws, sales_actual, MUTED, "Units sold", False),
+                _panel(forecast.initiations, held_out.initiations, AMBER, "Returns started", False),
+                _panel(forecast.receipts, held_out.receipts, ACCENT, "Returns received", True),
+            ],
+            gap=0,
+        ),
+        "One sales forecast, propagated twice",
+        f"{swatch(MUTED)}The sales forecast for the next four weeks (top). Every simulated "
+        f"sale starts a return clock {swatch(AMBER)}(middle), and every started return, "
+        "including those started before today, starts a shipping clock "
+        f"{swatch(ACCENT)}(bottom). Bands are 50% and 90% intervals; {swatch(INK)}dots are "
+        "what actually happened. Receipts are zero on weekends and dip during the early-July "
+        "storm.",
     )
     return
 
 
 @app.cell(hide_code=True)
-def _(cards, cohort_rates, forecast, held_out, np):
-    _recent = cohort_rates.tail(4)  # the last month of sales
-    _gap = (_recent.eventual - _recent.observed).mean()
-    _owed = forecast.expected_existing_receipts
-    _next = forecast.receipts.sum(axis=1)
+def _(cards, forecast, held_out, np, sales_actual, sales_draws):
+    def _interval(draws):
+        return (
+            f"{draws.mean():,.0f}"
+            f"<small>[{np.quantile(draws, 0.05):,.0f}–{np.quantile(draws, 0.95):,.0f}]</small>"
+        )
+
     cards(
         [
             (
-                "Naive return rate, last month's sales",
-                f"−{_gap * 100:.0f} pts",
-                "Average shortfall vs. the rate those same units eventually reach.",
-                "red",
+                "Units sold, next 28 days",
+                _interval(sales_draws.sum(axis=1)),
+                f"The sales forecast going in. Actual: <b>{sales_actual.sum():,}</b>.",
+                None,
             ),
             (
-                "Returns still owed by past sales",
-                f"{_owed.mean():,.0f}",
-                "Expected eventual receipts from units already sold, including open returns.",
+                "Returns started",
+                _interval(forecast.initiations.sum(axis=1)),
+                f"Propagated once. Actual: <b>{held_out.initiations.sum():,}</b>.",
+                "amber",
+            ),
+            (
+                "Returns received",
+                _interval(forecast.receipts.sum(axis=1)),
+                f"Propagated twice. Actual: <b>{held_out.receipts.sum():,}</b>.",
                 "accent",
             ),
             (
-                "Receipts, next 28 days",
-                f"{_next.mean():,.0f}"
-                f"<small>[{np.quantile(_next, 0.05):,.0f}–{np.quantile(_next, 0.95):,.0f}]</small>",
-                f"Posterior mean and 90% interval. Held-out actual: <b>{held_out.receipts.sum():,}</b>.",
+                "Still owed by past sales",
+                f"{forecast.expected_existing_receipts.mean():,.0f}",
+                "Eventual receipts from units already sold, whenever they arrive.",
                 None,
             ),
         ]
@@ -365,19 +341,20 @@ def _(cards, cohort_rates, forecast, held_out, np):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    That gap is **right-censoring**. A unit sold three weeks ago with no return yet hasn't
-    told us "I won't be returned"; it has only told us "not yet". Averaging over those units
-    treats "not yet" as "never", and every forecast built on that average inherits the bias.
+    Returns forecasting is an old problem with a well-worn shortcut: multiply a sales
+    forecast by a return rate and shift it by a typical lag. It holds up until something
+    changes: a promo, a storm, a new policy, or simply a quarter whose recent sales haven't
+    had time to come back yet.
 
-    The rest of this post:
+    This post treats it as a **chain of forecasts** instead, and lets
+    [ttenet](https://github.com/kylejcaron/ttenet) do the plumbing:
 
-    - frames returns as a network of **censored clocks** (sale → return initiated → return
-      received) where some clocks never ring at all,
-    - fits sales and both return stages **jointly** with
-      [ttenet](https://github.com/kylejcaron/ttenet),
-    - forecasts **daily warehouse receipts** and the **returns still owed** by past sales,
-    - asks "what if?" about demand and weather, and
-    - checks whether a simpler approach would have been good enough.
+    - each step (a sale, a return started, a return received) gets its own small model,
+    - **one call fits** the whole chain,
+    - **one call propagates** a sales forecast through it: daily receipts, open returns,
+      and returns still owed, with uncertainty carried end to end,
+    - **swapping in** a different sales forecast or weather is one argument, no refit,
+    - and a simple baseline shows what the chain buys you.
     """)
     return
 
@@ -638,13 +615,111 @@ def _(
 
 
 @app.cell(hide_code=True)
+def _(cohort_rates, mo):
+    _recent = cohort_rates.tail(4)
+    mo.md(rf"""
+    ### Why the return-rate shortcut breaks
+
+    The shortcut needs a return rate, and the obvious estimate is returns so far divided
+    by units sold. For the last four weeks of sales that comes out
+    **{(_recent.eventual - _recent.observed).mean() * 100:.0f} points** below the rate those
+    same units eventually reach. Recent units haven't had time: a unit sold three weeks ago
+    with no return yet has only told us "not yet", and the average treats it as "never".
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(INK, RED, SLATE, alt, cohort_rates, figure, pd, swatch):
+    _open = pd.DataFrame(
+        {
+            "start": [cohort_rates.window_opens.iloc[0]],
+            "end": [cohort_rates.week.max() + pd.Timedelta(days=6)],
+        }
+    )
+    _base = alt.Chart(cohort_rates).encode(
+        x=alt.X("week:T", title="Week the unit was sold", axis=alt.Axis(format="%b %-d"))
+    )
+    _window = (
+        alt.Chart(_open).mark_rect(color="#ecefe4", opacity=0.7).encode(x="start:T", x2="end:T")
+    )
+    _label = (
+        alt.Chart(_open)
+        .mark_text(align="left", dx=8, dy=12, color="#62695d", fontSize=11)
+        .encode(x="start:T", y=alt.value(0), text=alt.value("Still inside the 90-day window"))
+    )
+    _band = _base.mark_area(color=SLATE, opacity=0.16).encode(y="model_lo:Q", y2="model_hi:Q")
+    _lines = (
+        alt.Chart(
+            cohort_rates.melt(
+                id_vars="week",
+                value_vars=["eventual", "observed", "model"],
+                var_name="series",
+                value_name="rate",
+            ).replace(
+                {
+                    "series": {
+                        "eventual": "Eventually returned (truth)",
+                        "observed": "Returned so far",
+                        "model": "ttenet estimate",
+                    }
+                }
+            )
+        )
+        .mark_line(strokeWidth=2.4, point=alt.OverlayMarkDef(size=26, filled=True))
+        .encode(
+            x="week:T",
+            y=alt.Y(
+                "rate:Q",
+                title="Share of units with a return initiated",
+                axis=alt.Axis(format="%"),
+                scale=alt.Scale(domain=[0, 0.5]),
+            ),
+            color=alt.Color(
+                "series:N",
+                scale=alt.Scale(
+                    domain=[
+                        "Eventually returned (truth)",
+                        "Returned so far",
+                        "ttenet estimate",
+                    ],
+                    range=[INK, RED, SLATE],
+                ),
+                legend=alt.Legend(orient="top", title=None, symbolType="stroke"),
+            ),
+            strokeDash=alt.StrokeDash(
+                "series:N",
+                scale=alt.Scale(
+                    domain=[
+                        "Eventually returned (truth)",
+                        "Returned so far",
+                        "ttenet estimate",
+                    ],
+                    range=[[5, 4], [1, 0], [1, 0]],
+                ),
+                legend=None,
+            ),
+        )
+    )
+    figure(
+        (_window + _label + _band + _lines).properties(height=320, width="container"),
+        "Recent sales look like they never get returned",
+        f"{swatch(RED)}<b>Returns so far</b> collapse for recent cohorts: those units simply "
+        "haven't had time. The truth (dashed) doesn't fall at all. ttenet's estimate "
+        f"{swatch(SLATE)} adds, for every still-eligible unit, the probability it starts a "
+        "return before its deadline given that it hasn't yet. Band: 90% posterior interval.",
+    )
+    return
+
+
+@app.cell(hide_code=True)
 def _(section):
     section(
         "model",
         "Part 2",
-        "Modeling the data generating process",
-        "Rather than regress daily receipts on lagged sales and hope, write down how each "
-        "unit actually moves through the system, then let the aggregate fall out.",
+        "Three forecasts, chained",
+        "Each step gets its own model: a count forecast for sales, and a time-to-event "
+        "forecast for each return stage. The output of one is the input of the next.",
     )
     return
 
@@ -702,12 +777,23 @@ def _(mo):
 def _(callout):
     callout(
         "Key point",
+        """Propagation happens per draw. A sale simulated for Jul 3 in posterior draw 17
+        starts its own return clock in draw 17, with draw 17's parameters, and so on down
+        the chain. That is why any sales forecast can be swapped in and pushed through with
+        its uncertainty intact, and why every stage's counts add up exactly.""",
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(callout):
+    callout(
+        "How censoring is handled",
         r"""A unit that has been quiet for $a$ days is not evidence against a return. Its
         likelihood contribution is $(1-\pi) + \pi\,S(a)$: either it belongs to the cured
         fraction, or it will return and simply hasn't yet. Given that silence, the chance it
         is still headed back is $\pi S(a) / \big((1-\pi) + \pi S(a)\big)$, which shrinks the
-        longer it stays quiet. That single idea is what fixes the collapsing line in the
-        first chart.""",
+        longer it stays quiet. That is what fixes the collapsing line in Part 1.""",
     )
     return
 
@@ -1048,6 +1134,18 @@ def _(AS_OF, forecast, pd, truth):
 
 
 @app.cell(hide_code=True)
+def _(forecast, np, pd, truth):
+    # Daily totals of the sales forecast that feeds the chain, and what actually sold.
+    _dates = pd.DatetimeIndex(forecast.dates)
+    _slot = _dates.get_indexer(pd.to_datetime(forecast.sales.cohorts.sale_date))
+    _counts = np.asarray(forecast.sales.counts)  # [draw, cohort]
+    sales_draws = np.zeros((_counts.shape[0], len(_dates)))
+    np.add.at(sales_draws.T, _slot, _counts.T)
+    sales_actual = truth.groupby("sale_date").size().reindex(_dates, fill_value=0).to_numpy()
+    return sales_actual, sales_draws
+
+
+@app.cell(hide_code=True)
 def _(np, pd):
     def fan(dates, draws, label):
         """Long frame of mean and 50%/90% intervals for a [draw, day] array."""
@@ -1251,8 +1349,9 @@ def _(
         "Where the owed returns are hiding",
         "Bars are posterior means with 90% intervals; the black tick is how many actually "
         "arrived in the simulated future. Most owed returns sit with customers who haven't "
-        f'clicked "return" yet {swatch(AMBER)}, which is exactly the population the naive '
-        "approach treats as zero. Open returns are shrunk too: an in-transit return is an "
+        f'clicked "return" yet {swatch(AMBER)}, which is exactly the population a '
+        "return-rate shortcut undercounts. Open returns are shrunk too: an in-transit return "
+        "is an "
         "observed status, not a promise it will arrive.",
     )
     return
@@ -1303,8 +1402,9 @@ def _(section):
         "scenarios",
         "Part 5",
         "Asking “what if?”",
-        "Because every step is explicit, you can swap an input and propagate it. Future "
-        "sales and weather are both inputs here; the posterior stays fixed.",
+        "This is where the chain pays off. It takes a sales forecast as an input, so you can "
+        "hand it any forecast (the model's own, a planner's, a promo plan) along with the "
+        "weather, and propagate it in seconds. The fitted model stays exactly as it is.",
     )
     return
 
@@ -1313,22 +1413,28 @@ def _(section):
 def _(AS_OF, mo, np, storm_spans):
     _next = storm_spans[storm_spans.start > str(AS_OF)].iloc[0]
     storm_start = np.datetime64(_next.start.date())
-    _label = f"{_next.start:%b %-d}–{(_next.end - np.timedelta64(1, 'D')):%b %-d}"
-    demand_scale = mo.ui.slider(
-        start=0.5,
-        stop=2.0,
-        step=0.25,
-        value=1.5,
-        label="Future sales vs. forecast",
-        show_value=True,
+    _day = np.timedelta64(1, "D")
+    baseline_storm = f"{_next.start:%b %-d}–{(_next.end - _day):%-d}"
+    lingering_storm = f"{_next.start:%b %-d}–{(_next.start + np.timedelta64(9, 'D')):%-d}"
+    demand_scale = mo.ui.dropdown(
+        options={
+            "Half the forecast (−50%)": 0.5,
+            "25% below forecast": 0.75,
+            "As forecast": 1.0,
+            "25% above forecast": 1.25,
+            "50% above forecast (say, a promo)": 1.5,
+            "Double the forecast (+100%)": 2.0,
+        },
+        value="50% above forecast (say, a promo)",
+        label="Sales over the next 28 days",
     )
     weather = mo.ui.dropdown(
         options={
-            f"Storm as forecast ({_label})": "as_forecast",
-            "Clear skies": "clear",
-            "Storm lingers ten days": "long",
+            f"As forecast: storm {baseline_storm}": "as_forecast",
+            "Clear skies: no storm": "clear",
+            f"Storm lingers ten days ({lingering_storm})": "long",
         },
-        value="Storm lingers ten days",
+        value=f"As forecast: storm {baseline_storm}",
         label="Weather",
     )
     mo.Html(
@@ -1336,7 +1442,39 @@ def _(AS_OF, mo, np, storm_spans):
         + mo.hstack([demand_scale, weather], justify="start", gap=2.5, wrap=True).text
         + "</div>"
     )
-    return demand_scale, storm_start, weather
+    return baseline_storm, demand_scale, lingering_storm, storm_start, weather
+
+
+@app.cell(hide_code=True)
+def _(INK, SLATE, baseline_storm, demand_scale, lingering_storm, mo, swatch, weather):
+    _sales_phrase = {
+        0.5: "at half the forecast",
+        0.75: "25% below forecast",
+        1.0: "as forecast",
+        1.25: "25% above forecast",
+        1.5: "50% above forecast",
+        2.0: "double the forecast",
+    }
+    _weather_phrase = {
+        "as_forecast": f"the storm as forecast ({baseline_storm})",
+        "clear": "clear skies, no storm",
+        "long": f"the storm lingers ten days ({lingering_storm})",
+    }
+    _unchanged = demand_scale.value == 1.0 and weather.value == "as_forecast"
+    mo.Html(
+        '<p class="ttn-caption">'
+        f"{swatch(SLATE)}<b>Solid line, your scenario:</b> "
+        f"sales {_sales_phrase[demand_scale.value]}; {_weather_phrase[weather.value]}.<br>"
+        f"{swatch(INK, dashed=True)}<b>Dashed line, the baseline:</b> the Part 4 forecast, "
+        f"with sales as forecast and the storm on {baseline_storm}. It never moves."
+        + (
+            " Right now the two are identical, so the lines coincide."
+            if _unchanged
+            else " Set both inputs to “as forecast” and the lines coincide."
+        )
+        + "</p>"
+    )
+    return
 
 
 @app.cell
@@ -1385,41 +1523,91 @@ def _(
 @app.cell(hide_code=True)
 def _(
     AMBER,
-    MUTED,
+    INK,
     SLATE,
     alt,
     fan,
     figure,
     forecast,
     forecast_dates,
+    mo,
     pd,
     scenario,
     scenario_receipts,
+    storm_spans,
     swatch,
 ):
-    _frame = fan(forecast.dates, forecast.receipts, "Baseline forecast")
-    _alt_frame = fan(scenario.dates, scenario.receipts, "Scenario")
     _stormy = scenario_receipts(pd.DataFrame(index=[0]), forecast_dates)["features"][0, :, 0] > 0
-    _storm_days = pd.DataFrame({"start": pd.DatetimeIndex(forecast_dates)[_stormy]})
-    _storm_days["end"] = _storm_days.start + pd.Timedelta(days=1)
-    _x = alt.X("date:T", title=None, axis=alt.Axis(format="%a %b %-d", labelAngle=0))
-    _chart = (
-        alt.Chart(_storm_days).mark_rect(color=AMBER, opacity=0.14).encode(x="start:T", x2="end:T")
-        + alt.Chart(_alt_frame)
-        .mark_area(color=SLATE, opacity=0.16)
-        .encode(x=_x, y="lo90:Q", y2="hi90:Q")
-        + alt.Chart(_frame)
-        .mark_line(color=MUTED, strokeDash=[5, 4], strokeWidth=1.8)
-        .encode(x=_x, y=alt.Y("mean:Q", title="Returns received per day"))
-        + alt.Chart(_alt_frame).mark_line(color=SLATE, strokeWidth=2.4).encode(x=_x, y="mean:Q")
-    ).properties(height=240, width="container")
+    _dates = pd.DatetimeIndex(forecast_dates)
+    _scenario_storm = pd.DataFrame({"start": _dates[_stormy]}).assign(
+        end=lambda d: d.start + pd.Timedelta(days=1)
+    )
+    _baseline_storm = storm_spans[
+        (storm_spans.end > _dates.min()) & (storm_spans.start <= _dates.max())
+    ]
+
+    def _panel(baseline_draws, scenario_draws, title, show_axis, weather_matters):
+        _base = fan(forecast.dates, baseline_draws, "baseline")
+        _scen = fan(scenario.dates, scenario_draws, "scenario")
+        _axis = alt.X(
+            "date:T",
+            title=None,
+            axis=alt.Axis(format="%a %b %-d", labelAngle=0, labels=show_axis, ticks=show_axis),
+        )
+        _both = _scen[["date", "mean"]].assign(baseline=_base["mean"].to_numpy())
+        _tooltip = [
+            alt.Tooltip("date:T", format="%a %b %-d"),
+            alt.Tooltip("mean:Q", format=".1f", title="scenario"),
+            alt.Tooltip("baseline:Q", format=".1f", title="baseline"),
+        ]
+        _layers = [
+            alt.Chart(_scen)
+            .mark_area(color=SLATE, opacity=0.16)
+            .encode(x=_axis, y="lo90:Q", y2="hi90:Q"),
+            # Scenario underneath, baseline on top: where they agree you see the dashes
+            # riding on the solid line instead of the baseline vanishing.
+            alt.Chart(_both)
+            .mark_line(
+                color=SLATE,
+                strokeWidth=2.6,
+                point=alt.OverlayMarkDef(size=22, color=SLATE, filled=True),
+            )
+            .encode(x=_axis, y=alt.Y("mean:Q", title=title), tooltip=_tooltip),
+            alt.Chart(_both)
+            .mark_line(color=INK, strokeDash=[4, 4], strokeWidth=1.5, opacity=0.85)
+            .encode(x=_axis, y="baseline:Q", tooltip=_tooltip),
+        ]
+        if weather_matters:
+            _layers = [
+                alt.Chart(_scenario_storm)
+                .mark_rect(color=AMBER, opacity=0.16)
+                .encode(x="start:T", x2="end:T"),
+                alt.Chart(_baseline_storm)
+                .mark_rect(filled=False, stroke=AMBER, strokeDash=[4, 3], strokeWidth=1.2)
+                .encode(x="start:T", x2="end:T"),
+                *_layers,
+            ]
+        return alt.layer(*_layers).properties(height=150, width="container")
+
     figure(
-        _chart,
-        "Scenario receipts vs. the baseline forecast",
-        f"{swatch(SLATE)}Scenario mean with 90% interval; {swatch(MUTED, dashed=True)}baseline "
-        "mean. Extra sales show up in initiations first and reach the warehouse with a lag. "
-        "Weather moves receipts immediately, and a longer storm mostly <em>delays</em> returns "
-        "rather than losing them.",
+        mo.vstack(
+            [
+                _panel(
+                    forecast.initiations, scenario.initiations, "Returns initiated", False, False
+                ),
+                _panel(forecast.receipts, scenario.receipts, "Returns received", True, True),
+            ],
+            gap=0,
+        ),
+        "Your scenario vs. the baseline",
+        f"{swatch(SLATE)}Scenario mean (one point per day) with 90% interval; "
+        f"{swatch(INK, dashed=True)}baseline mean, drawn on top, so where the two agree you "
+        "see the dashes riding on the solid line. Hover a day for both values. In the bottom "
+        f"panel, {swatch(AMBER, block=True)}shading marks the scenario's storm days and the "
+        "dashed amber outline marks the baseline's storm. Sales changes show up in "
+        "<b>initiations</b> within days (top), then in receipts as those returns ship back. "
+        "Weather only touches <b>receipts</b> (bottom): a storm slows them to a trickle, and the "
+        "backlog lands on the first open weekday after it clears.",
     )
     return
 
@@ -1434,20 +1622,20 @@ def _(cards, forecast, scenario):
         [
             (
                 "Receipts, 28 days",
-                f"{_scen:,.0f}<small>{_scen - _base:+,.0f}</small>",
-                f"Baseline {_base:,.0f}. The difference is what the warehouse feels this month.",
+                f"{_scen:,.0f}<small>{_scen - _base:+,.0f} vs. baseline</small>",
+                f"Baseline {_base:,.0f}. What the warehouse feels this month.",
                 "accent",
             ),
             (
                 "Returns initiated, 28 days",
-                f"{_scen_owed:,.0f}<small>{_scen_owed - _base_owed:+,.0f}</small>",
-                f"Baseline {_base_owed:,.0f}. Extra sales show up here first.",
+                f"{_scen_owed:,.0f}<small>{_scen_owed - _base_owed:+,.0f} vs. baseline</small>",
+                f"Baseline {_base_owed:,.0f}. Sales changes show up here first.",
                 "amber",
             ),
             (
                 "Open at horizon end",
                 f"{scenario.open_returns[:, -1].mean():,.0f}"
-                f"<small>{scenario.open_returns[:, -1].mean() - forecast.open_returns[:, -1].mean():+,.0f}</small>",
+                f"<small>{scenario.open_returns[:, -1].mean() - forecast.open_returns[:, -1].mean():+,.0f} vs. baseline</small>",
                 "Initiated but not yet received on the last forecast day.",
                 None,
             ),
@@ -1474,9 +1662,9 @@ def _(section):
     section(
         "simpler",
         "Part 6",
-        "Can we do something simpler?",
-        "Was all of this necessary? A reasonable tabular baseline: forecast each day's "
-        "receipts as the average for that weekday over the last eight weeks.",
+        "Against a simple baseline",
+        "A common shortcut for warehouse planning: forecast each day's receipts as the "
+        "average for that weekday over the last eight weeks.",
     )
     return
 
@@ -1485,12 +1673,12 @@ def _(section):
 def _(daily_history, held_out, pd):
     recent = daily_history.tail(56).assign(weekday=lambda d: d.date.dt.dayofweek)
     weekday_mean = recent.groupby("weekday")["Returns received"].mean()
-    naive = pd.Series(
+    weekday_avg = pd.Series(
         weekday_mean.reindex(held_out.date.dt.dayofweek).to_numpy(),
         index=held_out.date,
-        name="naive",
+        name="weekday_avg",
     )
-    return (naive,)
+    return (weekday_avg,)
 
 
 @app.cell(hide_code=True)
@@ -1504,20 +1692,20 @@ def _(
     figure,
     forecast,
     held_out,
-    naive,
+    weekday_avg,
     pd,
     storm_spans,
     swatch,
 ):
     _frame = fan(forecast.dates, forecast.receipts, "ttenet").assign(
-        naive=naive.to_numpy(), actual=held_out.receipts.to_numpy()
+        weekday_avg=weekday_avg.to_numpy(), actual=held_out.receipts.to_numpy()
     )
     _x = alt.X("date:T", title=None, axis=alt.Axis(format="%a %b %-d", labelAngle=0))
     _lines = pd.concat(
         [
             _frame[["date", "mean"]].rename(columns={"mean": "value"}).assign(series="ttenet mean"),
-            _frame[["date", "naive"]]
-            .rename(columns={"naive": "value"})
+            _frame[["date", "weekday_avg"]]
+            .rename(columns={"weekday_avg": "value"})
             .assign(series="Weekday average"),
         ]
     )
@@ -1542,7 +1730,8 @@ def _(
     ).properties(height=240, width="container")
     figure(
         _chart,
-        "The baseline doesn't know about the storm or the backlog",
+        "The baseline doesn't know about the storm or the backlog. Notice the returns spike "
+        "and overall increase the week after the storm.",
         f"{swatch(RED)}The weekday average repeats the recent past. {swatch(ACCENT)}ttenet "
         "knows which units are in transit, how old they are, and that the storm will hold "
         f"them up. {swatch(INK)}Dots: held-out actuals.",
@@ -1551,7 +1740,7 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(TABLE_THEME, crps, ct, forecast, held_out, naive, np, pd):
+def _(TABLE_THEME, crps, ct, forecast, held_out, weekday_avg, np, pd):
     _actual = held_out.receipts.to_numpy()
     _model_mean = forecast.receipts.mean(axis=0)
     _storm_week = slice(5, 14)
@@ -1559,10 +1748,12 @@ def _(TABLE_THEME, crps, ct, forecast, held_out, naive, np, pd):
         [
             {
                 "Method": "Weekday average (last 8 weeks)",
-                "mae": float(np.abs(naive.to_numpy() - _actual).mean()),
-                "crps": float(np.abs(naive.to_numpy() - _actual).mean()),
-                "storm": float(np.abs(naive.to_numpy()[_storm_week] - _actual[_storm_week]).mean()),
-                "total": float(naive.sum() - _actual.sum()),
+                "mae": float(np.abs(weekday_avg.to_numpy() - _actual).mean()),
+                "crps": float(np.abs(weekday_avg.to_numpy() - _actual).mean()),
+                "storm": float(
+                    np.abs(weekday_avg.to_numpy()[_storm_week] - _actual[_storm_week]).mean()
+                ),
+                "total": float(weekday_avg.sum() - _actual.sum()),
             },
             {
                 "Method": "ttenet",
@@ -1588,34 +1779,33 @@ def _(TABLE_THEME, crps, ct, forecast, held_out, naive, np, pd):
 def _(mo):
     mo.md(r"""
     For a point forecast, CRPS reduces to absolute error, so the baseline's two columns
-    match. The baseline also has no answer at all for *returns still owed*, and its return
-    rate, if you tried to build one from recent cohorts, is the collapsing red line from
-    the very first chart.
+    match. The baseline also has no answer at all for *returns still owed*, and no way to
+    take in a sales forecast or a weather scenario: it can only repeat the recent past.
     """)
     return
 
 
 @app.cell(hide_code=True)
 def _(section):
-    section("wrap-up", "Conclusion", "First principles, again")
+    section("wrap-up", "Conclusion", "Chain the forecasts")
     return
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    This wasn't a tabular prediction problem, and forcing it into one throws away the
-    structure that makes it tractable. Writing down the data generating process turned it
-    into three small, explainable pieces:
+    Returns forecasting is an old problem. Splitting it into a chain of small forecasts is
+    what makes it convenient:
 
-    1. sales arrive as $\text{sales}_{t,p} \sim \text{Poisson}(\lambda_{t,p})$,
-    2. each unit may start a return, on a mixture-cure clock bounded by a 90-day policy,
-    3. each initiated return may arrive, on a second mixture-cure clock that respects
-       storms and a closed warehouse.
+    1. a sales forecast, $\text{sales}_{t,p} \sim \text{Poisson}(\lambda_{t,p})$,
+    2. a return-initiation forecast for every sold unit, bounded by the 90-day policy,
+    3. a receipt forecast for every started return, respecting storms and a closed
+       warehouse.
 
-    Fit jointly, those pieces recover parameters the ledger never shows directly, forecast
-    daily receipts with uncertainty that held up on a held-out month, put a number on
-    returns still owed, and answer "what if?" questions without refitting.
+    ttenet fits the chain in one call and propagates through it in another. Because each
+    stage consumes the previous stage's forecast draw by draw, the same machinery answers
+    daily receipts, returns still owed, "what if we sell more?", and "what if the storm
+    lingers?" without new models or refits, and with uncertainty carried end to end.
 
     ### Where this is honest about its limits
 
