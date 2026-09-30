@@ -972,7 +972,12 @@ def _(mo):
       Use `numpyro_forecast`'s `innovations` block and leave the return stages alone:
 
     ```python
+    import jax.numpy as jnp
+    import numpyro
+    import numpyro.distributions as dist
     from numpyro_forecast import Horizon, innovations, predict
+
+    from ttenet import CountProcess, RetailReturnModel
 
 
     def local_level_sales(covariates, data=None):
@@ -983,12 +988,12 @@ def _(mo):
             "drift_scale", dist.LogNormal(-4, 0.5).expand([2]).to_event(1)
         )
         with numpyro.plate("product", 2, dim=-1):
-            drift = innovations(h, "drift", lambda: dist.Normal(0.0, drift_scale))
+            drift = innovations(h, "drift", dist.Normal(0.0, drift_scale))
         level = jnp.cumsum(drift, axis=-2)  # per-product random-walk log level
         predict(h, lambda v: dist.Poisson(jnp.exp(v)), log_rate + level + covariates * weekday)
 
 
-    model = RetailReturnModel(sales=CountProcess(model=local_level_sales), ...)
+    model = RetailReturnModel(sales=CountProcess(model=local_level_sales))
     ```
 
     The same `innovations`, `markov_series`, and `ssoe` blocks cover local levels, Markov

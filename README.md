@@ -4,7 +4,7 @@ Calendar-aware count and time-to-event forecasting with JAX and NumPyro.
 
 > **This is a demo package.** TTENet is a reference implementation of one
 > modeling idea, forecasting returns as a chain of forecasts, meant to be read,
-> run, and adapted. For now, is not a maintained production library:
+> run, and adapted. For now, it is not a maintained production library.
 
 **Sale → return initiated → return received**
 
@@ -48,10 +48,13 @@ uv run marimo run examples/retail_returns_blog.py   # or `marimo edit` to see th
 
 [`numpyro_forecast`](https://github.com/juanitorduz/numpyro_forecast) is the
 sales half of TTENet. Return timing is what this package adds; forecasting the
-sales that feed it is not, so we do not reimplement it. The root of every
-network is a sales model written to `numpyro_forecast`'s functional protocol,
-`model(covariates, data=None)`, and everything downstream is built to consume
-what that protocol produces.
+sales that feed it is not, so we do not reimplement it. When sales are modeled,
+the root of the network is a sales model written to `numpyro_forecast`'s
+functional protocol, `model(covariates, data=None)`, and everything downstream
+is built to consume what that protocol produces. Sales can also come from
+outside: `RetailReturnModel(sales=None)` fits only the return stages and takes a
+`SalesForecast` at forecast time (see
+[One future-sales value](#one-future-sales-value)).
 
 | Where | What `numpyro_forecast` does |
 | --- | --- |
@@ -87,7 +90,12 @@ For example, adding a slowly drifting demand level per product to the sales
 model:
 
 ```python
+import jax.numpy as jnp
+import numpyro
+import numpyro.distributions as dist
 from numpyro_forecast import Horizon, innovations, predict
+
+from ttenet import CountProcess, RetailReturnModel
 
 
 def local_level_sales(covariates, data=None):
@@ -96,19 +104,19 @@ def local_level_sales(covariates, data=None):
     weekday = numpyro.sample("weekday_effect", dist.Normal(0, 0.4).expand([2]).to_event(1))
     drift_scale = numpyro.sample("drift_scale", dist.LogNormal(-4, 0.5).expand([2]).to_event(1))
     with numpyro.plate("product", 2, dim=-1):
-        drift = innovations(h, "drift", lambda: dist.Normal(0.0, drift_scale))
+        drift = innovations(h, "drift", dist.Normal(0.0, drift_scale))
     level = jnp.cumsum(drift, axis=-2)  # per-product random-walk log level
     predict(h, lambda v: dist.Poisson(jnp.exp(v)), log_rate + level + covariates * weekday)
 
 
-model = RetailReturnModel(sales=CountProcess(model=local_level_sales), ...)
+model = RetailReturnModel(sales=CountProcess(model=local_level_sales))
 ```
 
 What TTENet does **not** take from `numpyro_forecast`: the return stages are
 not forecasting models, and the network runs its own inference (SVI with an
 `AutoNormal` guide, then NumPyro `Predictive`) rather than the upstream
 `forecast` and `draw_posterior` drivers. `numpyro_forecast` is an optional
-dependency (the `forecast` and `examples` extras, `>=0.3.0,<0.4`). A workflow
+dependency (the `forecast` and `examples` extras, `>=0.4.0,<0.5`). A workflow
 that supplies a fixed `SalesForecast` scenario instead of a modeled sales
 process does not need it. Upstream also provides backtesting and scoring
 (`backtest`, `eval_crps`) for the sales model on its own; see its
