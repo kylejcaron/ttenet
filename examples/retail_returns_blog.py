@@ -925,6 +925,56 @@ def _(callout):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
+    ### From clocks to a survival convolution
+
+    A sale does not promise a return on one particular day. It spreads probability across
+    the days ahead. A **survival kernel** captures **susceptible × still waiting × event today**:
+
+    $$
+    K(s,t) = \pi\,S(s,t^-)\,h(t-s,t).
+    $$
+
+    The mass left outside the forecast window means *not by then*, not necessarily
+    *never*. Write the initiation kernel as $K_0$ and the receipt kernel as $K_1$.
+    For a new, homogeneous cohort, with parameters fixed, their composition is a
+    **survival convolution**:
+
+    $$
+    (K_0 K_1)(s,t) = \sum_u K_0(s,u)\,K_1(u,t).
+    $$
+
+    Ordinary convolution shifts one lag curve along time. Here, storms and weekends can
+    change the curve for each source date. We compose it **within each posterior draw**;
+    simulated paths still allocate whole units and carry their actual parent dates forward.
+    The interface need not prescribe a delay family: a parametric distribution or, later,
+    a learned nonparametric survival curve can supply the same kernel.
+
+    The native `numpyro_forecast` prototype expresses the same idea with an event-time
+    distribution. Its `slice_time` and `prefix_condition` registrations tell upstream
+    `predict` how to score the observed prefix and sample only what remains:
+
+    ```python
+    # Sketch: the kernel and EventTime are our components, not upstream built-ins.
+    h = Horizon.from_data(calendar_covariates, observed_events)
+    kernel = survival_kernel(parameters, **calendar_inputs)
+    predict(
+        h,
+        lambda log_mass: EventTime(log_mass, kernel.log_tail),
+        kernel.log_mass,
+    )
+    ```
+
+    **One law for the observed past and the possible future.** Upstream `forecast` then
+    draws the suffix. This is the proposed native backend; the runnable `CureProcess`
+    example below still uses the existing, mathematically equivalent implementation
+    while cohort-scale correctness and performance are evaluated.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
     ### Writing it down
 
     The sales process is an ordinary NumPyro model following the
