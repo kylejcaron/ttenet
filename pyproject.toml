@@ -33,7 +33,17 @@ dev = ["pytest>=8.0", "ruff>=0.12", "complexipy==8.0.1"]
 packages = ["src/ttenet"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/ttenet", "tests", "examples", "README.md", "LICENSE", "pyproject.toml", "uv.lock"]
+include = [
+  "src/ttenet",
+  "tests",
+  "examples",
+  "README.md",
+  "LICENSE",
+  "pyproject.toml",
+  "uv.lock",
+  "noxfile.py",
+  "complexipy-snapshot.json",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
