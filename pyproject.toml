@@ -27,7 +27,7 @@ examples = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.0", "ruff>=0.12"]
+dev = ["pytest>=8.0", "ruff>=0.12", "complexipy==8.0.1"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ttenet"]

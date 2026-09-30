@@ -418,7 +418,12 @@ Memory still scales with posterior draws, horizon, cohort count, and graph size.
 ## Development
 
 ```bash
-uv run pytest -q
-uv run ruff check .
-uv run ruff format --check .
+uvx nox                    # lint, complexity, and tests on Python 3.12-3.14
+uvx nox -s tests-3.14      # one interpreter
+uvx nox -s lint            # ruff check + format check
+uvx nox -s complexity      # complexipy vs. complexipy-snapshot.json
 ```
+
+`complexity` fails when a function is added over complexipy's limit of 15 or an
+existing over-limit function gets more complex. After simplifying a function,
+regenerate the baseline with `uv run complexipy src --plain --snapshot-create`.
