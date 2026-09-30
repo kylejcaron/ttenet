@@ -349,7 +349,7 @@ def _(mo):
           <ul class="ttn-byline">
             <li><b>Kyle Caron</b></li>
             <li>September 2026</li>
-            <li>Built with <b>ttenet</b>, NumPyro &amp; marimo</li>
+            <li>Built with <b>ttenet</b>, <b>numpyro_forecast</b>, NumPyro &amp; marimo</li>
           </ul>
         </div>
     """)
@@ -472,6 +472,9 @@ def _(mo):
     [ttenet](https://github.com/kylejcaron/ttenet) do the plumbing:
 
     - each step (a sale, a return started, a return received) gets its own small model,
+    - the sales step is an ordinary
+      [`numpyro_forecast`](https://github.com/juanitorduz/numpyro_forecast) model, so any
+      NumPyro sales forecaster plugs into the chain,
     - **one call fits** the whole chain,
     - **one call propagates** a sales forecast through it: daily receipts, open returns,
       and returns still owed, with uncertainty carried end to end,
@@ -928,9 +931,10 @@ def _(mo):
     ### Writing it down
 
     The sales process is an ordinary NumPyro model following the
-    [`numpyro_forecast`](https://github.com/juanitorduz/numpyro_forecast) protocol: it
-    receives covariates with time on axis `-2`, and `predict` handles the observed prefix
-    versus the future suffix.
+    [`numpyro_forecast`](https://github.com/juanitorduz/numpyro_forecast) protocol,
+    `model(covariates, data=None)`. `Horizon.from_data` reads the observed prefix and the
+    future suffix off the array shapes, and `predict` registers the `obs` site over the
+    training window and the `forecast` site over the horizon. ttenet supplies the rest.
     """)
     return
 
@@ -943,6 +947,57 @@ def _(initiation_covariates, inspect, mo, receipt_covariates, sales_model):
             for fn in (sales_model, initiation_covariates, receipt_covariates)
         )
     )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    #### Why `numpyro_forecast` fits here
+
+    Return timing is what ttenet adds. Sales forecasting is not, so the count root of the
+    chain is a `numpyro_forecast` model and everything downstream is built around what it
+    produces:
+
+    - **The layout already matches.** Time sits on axis `-2` and the series on `-1`, so
+      the `[day, product]` count matrix from the ledger is exactly a `numpyro_forecast`
+      data array. Nothing is reshaped on its way to the return clocks.
+    - **One function trains and forecasts.** The model above is called once to fit and
+      again, with the fitted prefix plus future covariates, to forecast. Future latents
+      live at separate sites the guide never sees, so the fitted posterior extends to any
+      horizon.
+    - **Draws are the interface.** The `forecast` site yields `[draw, day, product]` sales
+      paths, and each path starts return clocks under its own posterior draw. Sales
+      uncertainty reaches receipts instead of being collapsed to a mean.
+    - **It is just NumPyro.** No framework object to subclass: the sales model shares one
+      joint objective with both return stages, and can share latents with them.
+    - **Swapping the sales model touches nothing else.** Want a demand level that drifts?
+      Use `numpyro_forecast`'s `innovations` block and leave the return stages alone:
+
+    ```python
+    from numpyro_forecast import Horizon, innovations, predict
+
+
+    def local_level_sales(covariates, data=None):
+        h = Horizon.from_data(covariates, data)
+        log_rate = numpyro.sample("log_rate", dist.Normal(0, 0.6).expand([2]).to_event(1))
+        weekday = numpyro.sample("weekday_effect", dist.Normal(0, 0.4).expand([2]).to_event(1))
+        drift_scale = numpyro.sample(
+            "drift_scale", dist.LogNormal(-4, 0.5).expand([2]).to_event(1)
+        )
+        with numpyro.plate("product", 2, dim=-1):
+            drift = innovations(h, "drift", lambda: dist.Normal(0.0, drift_scale))
+        level = jnp.cumsum(drift, axis=-2)  # per-product random-walk log level
+        predict(h, lambda v: dist.Poisson(jnp.exp(v)), log_rate + level + covariates * weekday)
+
+
+    model = RetailReturnModel(sales=CountProcess(model=local_level_sales), ...)
+    ```
+
+    The same `innovations`, `markov_series`, and `ssoe` blocks cover local levels, Markov
+    states, exponential smoothing, ARMA, and intermittent demand. The return stages are not
+    `numpyro_forecast` models; ttenet runs its own inference over the whole chain.
+    """)
     return
 
 
@@ -1231,7 +1286,8 @@ def _(AS_OF, HORIZON, date_grid, np):
 
 @app.cell
 def _(HORIZON, SEED, fitted, forecast_dates, mo, sales_covariates):
-    # Simulate sales, then push every cohort through both clocks: one call.
+    # Sales come from the numpyro_forecast model's `forecast` site; push every cohort
+    # through both clocks: one call.
     forecast = fitted.forecast(
         horizon=HORIZON,
         covariates={"sales": sales_covariates(forecast_dates)},  # the weather is a known input
@@ -1946,6 +2002,14 @@ def _(mo):
     stage consumes the previous stage's forecast draw by draw, the same machinery answers
     daily receipts, returns still owed, "what if we sell more?", and "what if the storm
     lingers?" without new models or refits, and with uncertainty carried end to end.
+
+    The sales end of the chain is where
+    [`numpyro_forecast`](https://github.com/juanitorduz/numpyro_forecast) earns its place:
+    it turns a plain NumPyro function into fit-and-forecast with `[draw, day, product]`
+    output, which is exactly the currency the return clocks consume. Replace the sales
+    model with any other forecaster written to that protocol, or hand in samples from one
+    you already run with `SalesForecast.from_numpyro_forecast`, and the rest of the chain
+    is unchanged.
 
     ### Where this is honest about its limits
 
