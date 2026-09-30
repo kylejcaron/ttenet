@@ -1,0 +1,70 @@
+[
+  {
+    "path": "src/ttenet/dataset.py",
+    "file_name": "dataset.py",
+    "functions": [
+      {
+        "name": "RetailData::from_units",
+        "complexity": 19
+      },
+      {
+        "name": "_validate_starting_items",
+        "complexity": 19
+      },
+      {
+        "name": "_merge_ledger_and_starting",
+        "complexity": 83
+      }
+    ]
+  },
+  {
+    "path": "src/ttenet/forecast.py",
+    "file_name": "forecast.py",
+    "functions": [
+      {
+        "name": "forecast_events",
+        "complexity": 27
+      }
+    ]
+  },
+  {
+    "path": "src/ttenet/integration.py",
+    "file_name": "integration.py",
+    "functions": [
+      {
+        "name": "SalesForecast::__post_init__",
+        "complexity": 19
+      },
+      {
+        "name": "SalesForecast::from_frame",
+        "complexity": 25
+      }
+    ]
+  },
+  {
+    "path": "src/ttenet/network.py",
+    "file_name": "network.py",
+    "functions": [
+      {
+        "name": "ForecastNetwork::fit",
+        "complexity": 16
+      },
+      {
+        "name": "_resolve_features",
+        "complexity": 16
+      },
+      {
+        "name": "_fit_program",
+        "complexity": 22
+      },
+      {
+        "name": "FittedNetwork::_sales",
+        "complexity": 28
+      },
+      {
+        "name": "ForecastNetwork::__post_init__",
+        "complexity": 32
+      }
+    ]
+  }
+]
