@@ -6,9 +6,9 @@
 #     "coeftable>=0.12.1",
 #     "numpy>=2.0",
 #     "pandas>=2.2",
-#     "jax>=0.10.0,<0.11.1",
-#     "numpyro>=0.20.0",
-#     "numpyro-forecast>=0.3.0,<0.4",
+#     "jax>=0.10.0,<0.11.3",
+#     "numpyro>=0.22.0",
+#     "numpyro-forecast>=0.4.0,<0.5",
 #     "ttenet @ git+https://github.com/kylejcaron/ttenet",
 # ]
 # [tool.marimo.display]

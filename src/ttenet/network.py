@@ -170,7 +170,7 @@ def _fit_program(program, resolver, return_sites, *, num_steps, num_samples, see
             params=params,
             num_samples=num_samples,
             return_sites=return_sites,
-            exclude_deterministic=False,
+            condition_deterministic=True,
             parallel=True,
         )(keys[3])
     if any(

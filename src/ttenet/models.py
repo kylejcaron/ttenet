@@ -572,7 +572,7 @@ def fit_stage(
         params=result.params,
         num_samples=num_samples,
         return_sites=["age_logits", "beta", "cure_intercept", "cure_beta"],
-        exclude_deterministic=False,
+        condition_deterministic=True,
     )
     draws = predictive(predictive_key, observations, age_bins=age_bins)
     if any(not np.isfinite(value).all() for value in draws.values()):
