@@ -4,15 +4,7 @@ Calendar-aware count and time-to-event forecasting with JAX and NumPyro.
 
 > **This is a demo package.** TTENet is a reference implementation of one
 > modeling idea, forecasting returns as a chain of forecasts, meant to be read,
-> run, and adapted. It is not a maintained production library:
->
-> - It has only been exercised on the simulated retail data in `examples/`.
->   Nothing here has been validated against real returns data.
-> - The API can change without notice or a deprecation period. Pin a commit if
->   you build on it, or copy the parts you need.
-> - It is not tuned for scale. Event trajectories keep a dense
->   `[draw, day, cohort]` array per node, and the default posterior is a
->   variational approximation.
+> run, and adapted. For now, is not a maintained production library:
 
 **Sale → return initiated → return received**
 

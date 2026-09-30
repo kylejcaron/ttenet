@@ -14,13 +14,14 @@
 # [tool.marimo.display]
 # theme = "light"
 # ///
+
 import marimo
 
 __generated_with = "0.25.0"
 app = marimo.App(
     width="full",
-    css_file="retail_returns_blog.css",
     app_title="Returns you haven't seen yet",
+    css_file="retail_returns_blog.css",
 )
 
 
@@ -304,7 +305,6 @@ def _(alt, ct, escape, mo):
         INK,
         MUTED,
         RED,
-        RULE,
         SLATE,
         TABLE_THEME,
         callout,
@@ -463,10 +463,7 @@ def _(cards, forecast, held_out, np, sales_actual, sales_draws):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    Returns forecasting is an old problem with a well-worn shortcut: multiply a sales
-    forecast by a return rate and shift it by a typical lag. It holds up until something
-    changes: a promo, a storm, a new policy, or simply a quarter whose recent sales haven't
-    had time to come back yet.
+    Returns forecasting is an old problem with a well-worn shortcut: multiply a sales forecast by a return rate and shift it by a typical lag. It holds up until something changes: a promo, a storm, a new policy, or simply a quarter whose recent sales haven't had time to come back yet.
 
     This post treats it as a **chain of forecasts** instead, and lets
     [ttenet](https://github.com/kylejcaron/ttenet) do the plumbing:
@@ -1132,7 +1129,7 @@ def _(SLATE, TABLE_THEME, ct, data, dataclasses, fitted, np, pd):
             dataclasses.replace(TABLE_THEME, favorable=SLATE, unfavorable=SLATE, inconclusive=SLATE)
         )
     )
-    return (recovery,)
+    return
 
 
 @app.cell(hide_code=True)
@@ -1635,7 +1632,16 @@ def _(AS_OF, mo, np, pd, storm_spans):
 
 
 @app.cell(hide_code=True)
-def _(INK, SLATE, baseline_storm, demand_scale, lingering_storm, mo, swatch, weather):
+def _(
+    INK,
+    SLATE,
+    baseline_storm,
+    demand_scale,
+    lingering_storm,
+    mo,
+    swatch,
+    weather,
+):
     _sales_phrase = {
         0.5: "at half the forecast",
         0.75: "25% below forecast",
@@ -1888,10 +1894,10 @@ def _(
     figure,
     forecast,
     held_out,
-    weekday_avg,
     pd,
     storm_spans,
     swatch,
+    weekday_avg,
 ):
     _frame = fan(forecast.dates, forecast.receipts, "ttenet").assign(
         weekday_avg=weekday_avg.to_numpy(), actual=held_out.receipts.to_numpy()
@@ -1936,7 +1942,7 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(TABLE_THEME, crps, ct, forecast, held_out, weekday_avg, np, pd):
+def _(TABLE_THEME, crps, ct, forecast, held_out, np, pd, weekday_avg):
     _actual = held_out.receipts.to_numpy()
     _model_mean = forecast.receipts.mean(axis=0)
     _storm_week = slice(5, 14)
@@ -1990,8 +1996,7 @@ def _(section):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    Returns forecasting is an old problem. Splitting it into a chain of small forecasts is
-    what makes it convenient:
+    Returns forecasting is an old problem. Splitting it into a chain of small forecasts and leveraging survival analysis helps match the data generating process and make better forecasts:
 
     1. a sales forecast, $\text{sales}_{t,p} \sim \text{Poisson}(\lambda_{t,p})$,
     2. a return-initiation forecast for every sold unit, bounded by the 90-day policy,
