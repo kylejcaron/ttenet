@@ -11,7 +11,7 @@ from jax.nn import log_sigmoid
 from ttenet.data import prepare_history
 from ttenet.dates import date_grid
 from ttenet.event_times import EventLaw, TimingLaw, log1mexp, timing_from_log_masses
-from ttenet.families import EventFamily, FiniteTail, ProperTail, UnknownTail
+from ttenet.families import EventFamily, FiniteTail, ProperTail, UnknownTail, WeibullFamily
 from ttenet.forecast import expected_return_receipts, forecast_events, forecast_returns
 from ttenet.integration import SalesForecast
 from ttenet.models import StageFit
@@ -226,6 +226,45 @@ def test_weibull_family_respects_closures_and_deadlines_in_the_shared_kernel():
     np.testing.assert_array_equal(result.events[:, 3:, 0], 0)  # past the inclusive deadline
     np.testing.assert_array_equal(result.eligible[:, 3:], 0)
     np.testing.assert_array_equal(result.pending[:, 3:], result.pending[:, 2:3].repeat(3, axis=1))
+
+
+def test_forecast_events_refuses_regressor_sites_the_supplied_inputs_never_reach():
+    # Fitted with one timing and one susceptibility regressor, the packaged
+    # Weibull reaches "beta" and "susceptibility_beta" only when the forecast
+    # supplies regressors of those widths. Omitting either would silently drop
+    # a fitted effect, so it is refused; matching widths replay the fit.
+    family = WeibullFamily(scale_prior=dist.LogNormal(1.0, 0.3), susceptibility_logit_prior=0.5)
+    posterior = {
+        "scale": jnp.array([3.0, 4.0]),
+        "beta": jnp.array([[0.5], [-0.5]]),
+        "susceptibility_beta": jnp.array([[1.0], [1.0]]),
+    }
+    fit = _fit(family, posterior, 2)
+    calendar = _calendar()
+    kwargs = dict(
+        origins=[NAT],
+        observed=[NAT],
+        arrivals=_future_arrivals(2, 4, 1, day=1, cohort=0, count=1000),
+        calendar=calendar,
+        as_of=AS_OF,
+        horizon=4,
+    )
+    features = np.zeros((1, calendar.size, 1))
+    susceptibility_features = np.zeros((1, 1))
+    with pytest.raises(ValueError, match="beta"):
+        forecast_events(fit, **kwargs)
+    with pytest.raises(ValueError, match="susceptibility_beta"):
+        forecast_events(fit, features=features, **kwargs)
+    with pytest.raises(ValueError, match="beta"):
+        forecast_events(fit, susceptibility_features=susceptibility_features, **kwargs)
+    result = forecast_events(
+        fit, features=features, susceptibility_features=susceptibility_features, **kwargs
+    )
+    # Zero regressors leave each draw's own law: the age-0 bin fires with
+    # sigmoid(.5) * (1 - exp(-1 / scale**2)) per arriving unit.
+    expected = 1000 * (1 / (1 + np.exp(-0.5))) * -np.expm1(-1.0 / np.array([9.0, 16.0]))
+    assert result.events.shape == (2, 4, 1)
+    np.testing.assert_allclose(result.events[:, 0, 0], expected, atol=4 * np.sqrt(expected.max()))
 
 
 def test_forecast_returns_runs_mixed_families_with_count_draws():

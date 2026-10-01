@@ -432,6 +432,10 @@ No global JAX precision setting is changed; no NumPy event sampler is used.
 Direct `CohortEventTime` callers must supply signed JAX integer pools so
 impossible-path sentinels remain negative. Host integer arrays are range-checked
 and converted to the native signed dtype; local x64 is required for wide pools.
+Whole host floating-point observations are converted to native integers when
+that conversion is exact. Other host floats must be exactly representable at
+the active JAX precision; lossy conversion is refused rather than rounding an
+invalid observation onto the event/count support.
 Integer totals are exact, but floating sampling proposals do not guarantee
 arbitrary-int64 distributional accuracy above `2**53`.
 
@@ -521,6 +525,10 @@ selected-survivor conditioning. Families receive no observed outcomes or
 administrative masks. Re-evaluating a family at a new horizon replays its fitted
 named NumPyro sites; missing posterior sites are errors, not new prior draws.
 `fit_stage(observations, family=family)` uses the same contract.
+Replay must also reach every fitted site: omitting regressors cannot silently
+drop their learned coefficients. Latent fits use NumPyro's feasible initialization,
+not the density of one prior draw, to establish a valid starting point. Fixed
+and parameter-only laws still have their observation density checked before fitting.
 
 Default `StageFit.parameters` remains `StageParameters`. For a custom family
 it is a mapping from local sample/optimized parameter names to arrays with a
@@ -552,6 +560,9 @@ distributions automatically or accept non-monotone survival as a valid law.
 `timing_from_log_masses` adapts discrete masses and a residual tail to the same
 interface. These are nonparametric-compatible seams, not a shipped nonparametric
 prior or estimator.
+Mass grids and residual tails broadcast over their leading axes: `[cohort, age]`
+can share a scalar tail, and `[draw, 1, age]` can pair with `[draw, 1]` tails
+before being evaluated on a `[day, cohort]` age grid.
 
 Run `uv run python examples/event_time_families.py` for sampled Weibull parameters,
 native in-sample predictions and a mixed default → Weibull → default network

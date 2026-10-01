@@ -18,9 +18,22 @@ import pytest
 from numpyro import handlers
 from numpyro.infer.util import log_density
 
-from ttenet.event_times import EventLaw, TimingInputs, TimingLaw, log1mexp
+from ttenet.event_times import (
+    EventLaw,
+    TimingInputs,
+    TimingLaw,
+    log1mexp,
+    timing_from_log_survival,
+)
 from ttenet.families import EventFamily, FiniteTail, ProperTail, UnknownTail, WeibullFamily
-from ttenet.models import StageFit, StageObservations, fit_stage, predict_stage, stage_model
+from ttenet.models import (
+    StageFit,
+    StageObservations,
+    fit_stage,
+    predict_stage,
+    stage_model,
+    timing_inputs,
+)
 from ttenet.processes import EventProcess
 from ttenet.survival import StageParameters
 
@@ -51,6 +64,34 @@ def _weibull_family(*, scale=None, shape=2.0, susceptibility_logit=None, tail=Pr
         )
 
     return EventFamily(model, tail)
+
+
+def _uniform_span_family(*, span=None, optimized=False):
+    """Susceptible delay uniform on ``[0, span)``: ``span`` bounds the law's support.
+
+    ``span`` is sampled from ``Uniform(2, 10)`` unless given; a given value
+    is fixed, or the initial value of an optimized ``numpyro.param`` site.
+    Ages at or past ``span`` have no susceptible mass left.
+    """
+
+    def model(inputs, shared):
+        if span is None:
+            bound = numpyro.sample("span", dist.Uniform(2.0, 10.0))
+        elif optimized:
+            bound = numpyro.param("span", jnp.array(span), constraint=dist.constraints.positive)
+        else:
+            bound = span
+
+        def log_survival(age):
+            inside = age < bound
+            ratio = jnp.where(inside, age / bound, 0.0)
+            return jnp.where(inside, jnp.log1p(-ratio), -jnp.inf)
+
+        ages = jnp.maximum(inputs.ages, 0)
+        timing = timing_from_log_survival(log_survival(ages), log_survival(ages + 1.0))
+        return EventLaw(timing, jnp.full(inputs.ages.shape[-1:], 2.0))
+
+    return EventFamily(model, FiniteTail(last_age=9))
 
 
 def _observations(ages, event_index, **overrides):
@@ -173,12 +214,116 @@ def test_fit_stage_fixed_family_keeps_the_requested_draw_count():
     np.testing.assert_allclose(laws.timing.log_survival_step[:, 0, 0], -1 / 9, rtol=1e-6)
 
 
+@pytest.mark.parametrize("seed", [0, 4])
+def test_fit_stage_latent_support_boundary_is_not_judged_from_one_prior_draw(seed):
+    # Events at ages 1, 3 and 5 plus a unit censored at age 7 are feasible for
+    # every span above 5. A prior draw of span below 5 scores the age-5 event
+    # -inf, but that one draw is not the model: the fit must find feasible
+    # parameters, and every posterior draw must give the age-5 bin mass.
+    observations = _observations(np.broadcast_to(np.arange(8), (4, 8)), [1, 3, 5, -1])
+    fit = fit_stage(
+        observations, family=_uniform_span_family(), num_steps=20, num_samples=5, seed=seed
+    )
+    assert set(fit.parameters) == {"span"} and fit.draws == 5
+    inputs = timing_inputs(observations)
+    laws = jax.vmap(lambda draw: fit.timing(inputs, draw=draw))(jnp.arange(fit.draws))
+    assert np.isfinite(np.asarray(laws.timing.log_hazard)[:, 5, :]).all()
+
+
+@pytest.mark.parametrize("family", [_uniform_span_family(), None])
+def test_fit_stage_refuses_an_event_on_a_closed_day_for_every_parameter(family):
+    # No parameter value gives an event on a closed day positive mass, so the
+    # fit is refused whatever searches for feasible parameters.
+    closed = _observations([[0, 1, 2]], [1], allowed=jnp.array([[True, False, True]]))
+    with pytest.raises((ValueError, RuntimeError)):
+        fit_stage(closed, age_bins=3, family=family, num_steps=5, num_samples=2)
+
+
+@pytest.mark.parametrize("optimized", [False, True])
+def test_fit_stage_refuses_a_latent_free_family_that_gives_the_data_no_density(optimized):
+    # Without a latent site the law is fully determined (fixed, or an
+    # optimized value at its initial point): an event at age 5 under a span
+    # of 4 is simply impossible and must be refused before any optimization.
+    observations = _observations(np.broadcast_to(np.arange(8), (1, 8)), [5])
+    family = _uniform_span_family(span=4.0, optimized=optimized)
+    with pytest.raises(ValueError):
+        fit_stage(observations, family=family, num_steps=5, num_samples=2)
+    feasible = _uniform_span_family(span=8.0, optimized=optimized)
+    fit = fit_stage(observations, family=feasible, num_steps=5, num_samples=2)
+    assert set(fit.parameters) == ({"span"} if optimized else set())
+
+
 def test_custom_fit_timing_refuses_sites_missing_from_its_posterior():
     family = _weibull_family()
     fit = StageFit({"susceptibility": jnp.zeros(3)}, jnp.zeros(0), family=family, num_samples=3)
     inputs = TimingInputs(jnp.array([[0], [1]]), jnp.zeros((2, 1, 0)), jnp.zeros((1, 0)))
     with pytest.raises(ValueError, match="scale"):
         fit.timing(inputs, draw=0)
+
+
+def _regressor_fit():
+    """A packaged Weibull fitted with two timing and one susceptibility regressor."""
+    rng = np.random.default_rng(0)
+    n, t = 12, 6
+    delays = np.floor(3.0 * np.sqrt(-np.log(rng.random(n)))).astype(int)
+    observations = _observations(
+        np.broadcast_to(np.arange(t), (n, t)),
+        np.where(delays < t, delays, -1),
+        features=jnp.asarray(rng.normal(size=(n, t, 2))),
+        susceptibility_features=jnp.asarray(rng.normal(size=(n, 1))),
+    )
+    family = WeibullFamily(scale_prior=dist.LogNormal(1.0, 0.3), susceptibility_logit_prior=0.5)
+    fit = fit_stage(observations, family=family, num_steps=5, num_samples=2, seed=1)
+    assert fit.parameters["beta"].shape == (2, 2)
+    assert fit.parameters["susceptibility_beta"].shape == (2, 1)
+    return fit, observations
+
+
+@pytest.mark.parametrize(
+    "omitted,site",
+    [("features", "beta"), ("susceptibility_features", "susceptibility_beta")],
+)
+def test_custom_fit_timing_refuses_replay_that_never_reaches_a_fitted_site(omitted, site):
+    # The packaged Weibull samples its regressor coefficients only when the
+    # inputs carry regressors. Replaying the fit without them would drop the
+    # fitted effect silently, so a fitted site the family never reaches is
+    # refused exactly like a site it reaches without a fitted value.
+    fit, observations = _regressor_fit()
+    inputs = timing_inputs(observations)
+    width = {"features": inputs.features.shape[:-1] + (0,), "susceptibility_features": (12, 0)}
+    with pytest.raises(ValueError, match=site):
+        fit.timing(inputs._replace(**{omitted: jnp.zeros(width[omitted])}), draw=0)
+
+
+def test_custom_fit_timing_with_the_fitted_regressor_widths_applies_their_coefficients():
+    fit, observations = _regressor_fit()
+    inputs = timing_inputs(observations)
+    law = fit.timing(inputs, draw=1)
+    scale, beta = fit.parameters["scale"][1], fit.parameters["beta"][1]
+    susceptibility_beta = fit.parameters["susceptibility_beta"][1]
+    expected_stay = _weibull_log_stay(inputs.ages, scale, 2.0) * jnp.exp(inputs.features @ beta)
+    np.testing.assert_allclose(law.timing.log_survival_step, expected_stay, rtol=1e-5)
+    np.testing.assert_allclose(
+        law.susceptibility_logits,
+        0.5 + inputs.susceptibility_features @ susceptibility_beta,
+        rtol=1e-6,
+    )
+
+
+def test_custom_fit_timing_accepts_recorded_deterministic_sites_in_its_posterior():
+    # Posterior mappings taken from NumPyro samplers carry deterministic
+    # sites next to the sampled ones; the family reaches them, so they replay.
+    def model(inputs, shared):
+        log_rate = numpyro.sample("log_rate", dist.Normal(0.0, 1.0))
+        rate = numpyro.deterministic("rate", jnp.exp(log_rate))
+        stay = jnp.broadcast_to(-rate, inputs.ages.shape)
+        return EventLaw(TimingLaw(log1mexp(stay), stay), jnp.zeros(inputs.ages.shape[-1:]))
+
+    posterior = {"log_rate": jnp.array([0.0, np.log(2.0)]), "rate": jnp.array([1.0, 2.0])}
+    fit = StageFit(posterior, jnp.zeros(0), family=EventFamily(model, ProperTail()), num_samples=2)
+    inputs = TimingInputs(jnp.array([[0], [1]]), jnp.zeros((2, 1, 0)), jnp.zeros((1, 0)))
+    law = fit.timing(inputs, draw=1)
+    np.testing.assert_allclose(law.timing.log_survival_step, -2.0, rtol=1e-6)
 
 
 def test_stage_fit_validates_draw_metadata_against_its_arrays():

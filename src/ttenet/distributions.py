@@ -58,11 +58,32 @@ def _integer_dtype():
 
 
 def _trajectory_values(value):
-    """Refuse host integer observations that JAX's current dtype would wrap."""
+    """Host observations in the current JAX precision, refusing any it cannot hold exactly.
+
+    Whole host floats are the integers they denote and become the native
+    signed integer dtype; float32 would otherwise round ``2**24 + 1`` onto
+    ``2**24`` and ``1 + 1e-8`` onto a valid event. Other host floats keep
+    their float dtype only when the current precision holds every entry
+    exactly, and host integers only when it holds every entry at all.
+    """
     if isinstance(value, (jax.Array, jax.core.Tracer)):
         return jnp.asarray(value)
     host = np.asarray(value)
-    if host.dtype.kind in "iu" and host.size:
+    if host.dtype.kind == "f":
+        with np.errstate(invalid="ignore"):
+            whole = host.astype(_integer_dtype())
+        # Comparing INT64_MAX with float64 rounds it up to 2**63.
+        upper = np.float64(2 ** (np.iinfo(whole.dtype).bits - 1))
+        if host.max(initial=0) < upper and np.array_equal(whole, host):
+            return jnp.asarray(whole)
+        with np.errstate(over="ignore"):
+            narrowed = host.astype(jax.dtypes.canonicalize_dtype(host.dtype))
+        if not np.array_equal(narrowed, host, equal_nan=True):
+            raise ValueError(
+                f"observations are not exactly representable in {narrowed.dtype}, the current "
+                "JAX precision; use jax.enable_x64(True) for float64 values"
+            )
+    elif host.dtype.kind in "iu" and host.size:
         bounds = np.iinfo(_integer_dtype())
         if int(host.min()) < bounds.min or int(host.max()) > bounds.max:
             raise ValueError(

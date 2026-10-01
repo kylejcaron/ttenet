@@ -217,9 +217,11 @@ class StageFit:
         draw's named values substituted at its sample and ``numpyro.param``
         sites and the draw's resolved shared values passed through; a family
         that reaches a site absent from the fitted mapping is refused rather
-        than silently sampled from its prior. ``key`` seeds that replay (every
-        site is substituted, so it only matters for families with other
-        NumPyro randomness).
+        than silently sampled from its prior, and so is one that never
+        reaches a fitted site (regressor coefficients skipped by zero-width
+        inputs would silently change the law). ``key`` seeds that replay
+        (every site is substituted, so it only matters for families with
+        other NumPyro randomness).
         """
 
         def select(leaf):
@@ -665,7 +667,13 @@ def _validated_law(law: Any, inputs: TimingInputs) -> EventLaw:
 
 
 def _replay_family(family, parameters, shared, inputs, key) -> EventLaw:
-    """Run a family with one draw's named values substituted at its sites."""
+    """Run a family with one draw's named values substituted at its sites.
+
+    The replay must use every fitted value and nothing else: a site the
+    family reaches without a fitted value would be a fresh prior draw, and a
+    fitted site the family never reaches (regressor coefficients skipped by
+    zero-width inputs, say) would silently change the fitted law.
+    """
     key = random.PRNGKey(0) if key is None else key
     model = handlers.substitute(handlers.seed(family.model, key), data=dict(parameters))
     with handlers.trace() as trace:
@@ -679,6 +687,9 @@ def _replay_family(family, parameters, shared, inputs, key) -> EventLaw:
     )
     if missing:
         raise ValueError(f"family reaches sites absent from the fitted posterior: {missing}")
+    unreached = sorted(name for name in parameters if name not in trace)
+    if unreached:
+        raise ValueError(f"family never reaches fitted posterior sites: {unreached}")
     return _validated_law(law, inputs)
 
 
@@ -814,17 +825,25 @@ def _run_svi(
 
 
 def _validated_fit_trace(program, key):
-    """Reject impossible model data before fitting and identify real inference sites."""
+    """Identify real inference sites and refuse data a latent-free model cannot score.
+
+    Without a latent site the law is fully determined (fixed values, or
+    ``numpyro.param`` sites at their initial values), so one trace scores the
+    observations exactly. With latent sites one prior draw says nothing about
+    feasibility -- a latent support boundary can exclude the data at one draw
+    and admit it at another -- so feasibility is left to the guide's own
+    initialization, which searches for finite-density parameters and raises
+    when none exist.
+    """
     trace = handlers.trace(handlers.seed(program, key)).get_trace()
-    latent = False
-    for site in trace.values():
-        if site["type"] != "sample":
-            continue
-        if not np.isfinite(site["fn"].log_prob(site["value"])).all():
-            raise ValueError(
-                "model gives nonfinite density to the observations; check closures and priors"
-            )
-        latent |= not site["is_observed"] and np.size(site["value"]) > 0
+    sites = [site for site in trace.values() if site["type"] == "sample"]
+    latent = any(not site["is_observed"] and np.size(site["value"]) > 0 for site in sites)
+    if not latent and any(
+        not np.isfinite(site["fn"].log_prob(site["value"])).all() for site in sites
+    ):
+        raise ValueError(
+            "model gives nonfinite density to the observations; check closures and priors"
+        )
     parameter_names = [name for name, site in trace.items() if site["type"] == "param"]
     return trace, latent, parameter_names
 
@@ -914,7 +933,10 @@ def fit_stage(
     leading draw axis. With ``family`` its own sample sites and optimized
     ``numpyro.param`` values form the named posterior mapping instead, and
     the family itself is kept for replay. A family
-    with nothing to fit still records ``num_samples`` draws. Advanced users
+    with nothing to fit still records ``num_samples`` draws. Observations no
+    parameter value can score are refused: the guide's initialization raises
+    when it finds no finite-density parameters, and a latent-free model is
+    scored once before anything runs. Advanced users
     can call ``stage_model`` directly with any NumPyro inference algorithm
     (e.g. MCMC) instead of this convenience.
     """

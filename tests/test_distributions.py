@@ -894,3 +894,62 @@ def test_host_observations_never_wrap_into_feasible_trajectories(quantity):
             prefix_condition(law, observed[:1])
         with jax.enable_x64():
             assert bool(jnp.isneginf(law.log_prob(observed)))
+
+
+def test_host_floats_keep_whole_values_and_refuse_what_the_precision_cannot_hold():
+    # A whole host float is the integer it denotes whatever the float precision:
+    # 2**24 + 1 overflows a pool of 2**24 and exactly fills a pool of 2**24 + 1,
+    # although float32 would round it onto 2**24. Fractional host floats that
+    # float32 would round onto a whole number (2**24 + 0.5, 3 + 1e-8, 1 + 1e-8)
+    # are refused rather than converted; at 64-bit precision they score off the
+    # support, on the host and under tracing alike.
+    one_more = np.array([[2.0**24 + 1]])
+    pool = CohortEventTime(jnp.zeros((1, 1)), jnp.array([-jnp.inf]), np.array([2**24]))
+    larger = CohortEventTime(jnp.zeros((1, 1)), jnp.array([-jnp.inf]), np.array([2**24 + 1]))
+    assert pool.log_prob(one_more) == -jnp.inf
+    assert larger.log_prob(one_more) == 0.0
+    assert int(prefix_condition(larger, one_more).total_count[0]) == 0
+    with pytest.raises(ValueError):
+        prefix_condition(pool, one_more)
+    counted = _pool_law([0.2, 0.3, 0.5], 7)
+    unit = _explicit([[0.2]], [0.8])
+    lossy = [
+        (pool, np.array([[2.0**24 + 0.5]])),
+        (counted, np.array([[3.0 + 1e-8], [0.0]])),
+        (unit, np.array([[1.0 + 1e-8]])),
+    ]
+    for law, observed in lossy:
+        with pytest.raises(ValueError):
+            law.log_prob(observed)
+        with pytest.raises(ValueError):
+            prefix_condition(law, observed)
+        with jax.enable_x64():
+            assert law.log_prob(observed) == -jnp.inf
+            assert jax.jit(law.log_prob)(jnp.asarray(observed)) == -jnp.inf
+            with pytest.raises(ValueError):
+                prefix_condition(law, observed)
+    np.testing.assert_allclose(
+        counted.log_prob(np.array([[3.0], [0.0]])),
+        _multinomial_log_pmf([3, 0], 7, [0.2, 0.3, 0.5]),
+        rtol=2e-5,
+    )
+    np.testing.assert_allclose(unit.log_prob(np.array([[1.0]])), math.log(0.2), rtol=1e-6)
+    assert pool.log_prob(np.array([[-1.0]])) == -jnp.inf
+    assert pool.log_prob(np.array([[2.0**40]])) == -jnp.inf
+    assert pool.log_prob(np.array([[np.inf]])) == -jnp.inf
+    assert unit.log_prob(np.array([[np.nan]])) == -jnp.inf
+    with pytest.raises(ValueError):
+        pool.log_prob(np.array([[1e300]]))
+
+
+def test_host_float_at_int64_upper_boundary_never_saturates_into_the_pool():
+    with jax.enable_x64():
+        maximum = np.iinfo(np.int64).max
+        law = _pool_law([0.5, 0.5], maximum)
+        outside = np.array([[2.0**63]])
+        assert law.log_prob(outside) == -jnp.inf
+        with pytest.raises(ValueError):
+            prefix_condition(law, outside)
+        inside = np.array([[np.nextafter(2.0**63, 0.0)]])
+        conditioned = prefix_condition(law, inside)
+        assert int(conditioned.total_count[0]) == maximum - int(inside[0, 0])

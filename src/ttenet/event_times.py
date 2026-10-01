@@ -213,7 +213,14 @@ def timing_from_log_masses(log_mass: Any, log_tail: Any, ages: Any) -> TimingLaw
     log_tail = jnp.asarray(log_tail)
     ages = jnp.asarray(ages)
     support = log_mass.shape[-1]
-    grid = jnp.concatenate([log_mass, log_tail[..., None]], axis=-1)
+    batch = jnp.broadcast_shapes(log_mass.shape[:-1], log_tail.shape)
+    grid = jnp.concatenate(
+        [
+            jnp.broadcast_to(log_mass, batch + (support,)),
+            jnp.broadcast_to(log_tail, batch)[..., None],
+        ],
+        axis=-1,
+    )
     remaining = _log_suffix_sums(grid)
     here, after = remaining[..., :-1], remaining[..., 1:]
     reachable = ~jnp.isneginf(here)

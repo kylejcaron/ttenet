@@ -608,3 +608,88 @@ def test_mass_adapter_distinguishes_per_draw_from_per_cohort_grids():
         [[[0.2, 0.2], [0.375, 0.375]], [[0.6, 0.6], [0.25, 0.25]]],
         rtol=1e-6,
     )
+
+
+def test_mass_adapter_broadcasts_per_cohort_grids_against_a_shared_atom():
+    # Per-cohort grids [C, A] with one scalar beyond-grid atom; cohort 1 has a
+    # structural zero at age 1. On the grid, hazard is m[a] / R[a] and stay is
+    # R[a + 1] / R[a] with R the suffix mass including the atom; past the grid
+    # hazard is zero and stay one. In the log weights w (the atom last), every
+    # finite cell has d log h[a] / d w[b] = delta[a, b] - m[b] / R[a] and
+    # d log s[a] / d w[b] = m[b] / R[a + 1] - m[b] / R[a], each share present
+    # only where b lies in that suffix.
+    masses = np.array([[0.2, 0.3, 0.1], [0.5, 0.0, 0.2]])
+    atom = 0.4
+    ages = np.array([[-1, 0], [0, 1], [1, 2], [2, 3], [3, 4]])
+    log_masses = jnp.log(jnp.asarray(masses))
+    log_atom = jnp.log(jnp.asarray(atom))
+
+    def law(log_masses, log_atom):
+        timing = timing_from_log_masses(log_masses, log_atom, jnp.asarray(ages))
+        return timing.log_hazard, timing.log_survival_step
+
+    log_hazard, log_stay = law(log_masses, log_atom)
+    weights = np.concatenate([masses, np.full((2, 1), atom)], axis=1)
+    remaining = np.cumsum(weights[:, ::-1], axis=1)[:, ::-1]
+    cohort = np.arange(2)[None, :]
+    on_grid = np.clip(ages, 0, 2)
+    beyond = ages >= 3
+    np.testing.assert_allclose(
+        _probabilities(log_hazard),
+        np.where(beyond, 0.0, masses[cohort, on_grid] / remaining[cohort, on_grid]),
+        rtol=1e-6,
+        atol=1e-8,
+    )
+    np.testing.assert_allclose(
+        _probabilities(log_stay),
+        np.where(beyond, 1.0, remaining[cohort, on_grid + 1] / remaining[cohort, on_grid]),
+        rtol=1e-6,
+        atol=1e-8,
+    )
+    (hazard_mass, hazard_atom), (stay_mass, stay_atom) = jax.jacobian(law, argnums=(0, 1))(
+        log_masses, log_atom
+    )
+    index = np.arange(4)
+    for (t, c), age in np.ndenumerate(ages):
+        if age < 3:
+            a = max(int(age), 0)
+            share = np.where(index >= a, weights[c] / remaining[c, a], 0.0)
+            after = np.where(index > a, weights[c] / remaining[c, a + 1], 0.0)
+            rows = {"hazard": np.eye(4)[a] - share, "stay": after - share}
+        else:
+            rows = {"hazard": np.zeros(4), "stay": np.zeros(4)}
+        cells = (
+            ("hazard", log_hazard, hazard_mass, hazard_atom),
+            ("stay", log_stay, stay_mass, stay_atom),
+        )
+        for name, output, mass_jacobian, atom_jacobian in cells:
+            if not np.isfinite(float(output[t, c])):
+                continue
+            expected = np.zeros((2, 3))
+            expected[c] = rows[name][:3]
+            np.testing.assert_allclose(np.array(mass_jacobian[t, c]), expected, atol=1e-6)
+            np.testing.assert_allclose(float(atom_jacobian[t, c]), rows[name][3], atol=1e-6)
+
+
+def test_mass_adapter_broadcasts_per_draw_grids_and_atoms_over_cohorts():
+    # Per-draw grids [D, 1, A] with one scalar atom give every cohort of draw d
+    # the law of that draw's grid alone.
+    draws = jnp.array([[0.2, 0.3], [0.6, 0.1], [0.4, 0.4]])
+    ages = jnp.array([[0, 0], [1, 1]])
+    per_draw = timing_from_log_masses(jnp.log(draws[:, None, :]), jnp.log(0.5), ages)
+    assert per_draw.log_hazard.shape == (3, 2, 2)
+    for draw in range(3):
+        single = timing_from_log_masses(jnp.log(draws[draw]), jnp.log(0.5), ages)
+        for broadcast, alone in zip(per_draw, single, strict=True):
+            np.testing.assert_allclose(np.array(broadcast[draw]), np.array(alone), rtol=1e-6)
+    # Per-cohort grids [C, A] against per-draw atoms [D, 1]: draw 0 pairs every
+    # cohort with atom .5, draw 1 with atom .3.
+    masses = jnp.array([[0.2, 0.3], [0.6, 0.1]])
+    atoms = jnp.array([[0.5], [0.3]])
+    mixed = timing_from_log_masses(jnp.log(masses), jnp.log(atoms), ages)
+    assert mixed.log_hazard.shape == (2, 2, 2)
+    np.testing.assert_allclose(
+        _probabilities(mixed.log_hazard),
+        [[[0.2, 0.6 / 1.2], [0.3 / 0.8, 0.1 / 0.6]], [[0.2 / 0.8, 0.6], [0.3 / 0.6, 0.1 / 0.4]]],
+        rtol=1e-6,
+    )
