@@ -33,8 +33,8 @@ def _no_sales():
 
 def test_refitting_configuration_does_not_change_an_existing_forecast():
     model = ttenet.RetailReturnModel(
-        initiation=ttenet.CureProcess(age_bins=2, deadline_days=3),
-        receipt=ttenet.CureProcess(age_bins=2),
+        initiation=ttenet.EventProcess(age_bins=2, deadline_days=3),
+        receipt=ttenet.EventProcess(age_bins=2),
     )
     data = _data(_sales())
     first = model.fit(data, num_steps=3, num_samples=8, seed=2)
@@ -69,8 +69,8 @@ def test_future_cohort_closures_and_uncertain_counts_stay_aligned():
         }
 
     model = ttenet.RetailReturnModel(
-        initiation=ttenet.CureProcess(age_bins=1, deadline_days=3, parameter_model=_certain),
-        receipt=ttenet.CureProcess(age_bins=1, parameter_model=_certain),
+        initiation=ttenet.EventProcess(age_bins=1, deadline_days=3, parameter_model=_certain),
+        receipt=ttenet.EventProcess(age_bins=1, parameter_model=_certain),
     )
     data = _data(
         pd.DataFrame(
@@ -115,7 +115,7 @@ def test_invalid_covariate_provider_cannot_silently_disable_closures():
 
 def test_policy_days_cannot_be_silently_truncated():
     with pytest.raises(ValueError):
-        ttenet.CureProcess(deadline_days=3.5)
+        ttenet.EventProcess(deadline_days=3.5)
 
 
 def test_custom_receipt_family_preserves_eventual_outstanding_expectation():
@@ -135,10 +135,10 @@ def test_custom_receipt_family_preserves_eventual_outstanding_expectation():
 
     receipt_family = ttenet.EventFamily(receipt_model, ttenet.ProperTail())
     model = ttenet.RetailReturnModel(
-        initiation=ttenet.CureProcess(
+        initiation=ttenet.EventProcess(
             age_bins=1, deadline_days=3, parameter_model=fixed_initiation
         ),
-        receipt=ttenet.CureProcess(family=receipt_family),
+        receipt=ttenet.EventProcess(family=receipt_family),
     )
     units = pd.DataFrame(
         {
@@ -171,8 +171,8 @@ def test_finite_initiation_support_extends_eventual_retail_covariates():
         return ttenet.StageParameters(jnp.zeros(1), jnp.empty(0), np.log(0.4 / 0.6), jnp.empty(0))
 
     model = ttenet.RetailReturnModel(
-        initiation=ttenet.CureProcess(family=initiation_family),
-        receipt=ttenet.CureProcess(age_bins=1, parameter_model=receipt_parameters),
+        initiation=ttenet.EventProcess(family=initiation_family),
+        receipt=ttenet.EventProcess(age_bins=1, parameter_model=receipt_parameters),
     )
     units = pd.DataFrame({"item_id": ["sold"], "sale_date": ["2026-01-04"]})
     fitted = model.fit(_data(units), num_steps=1, num_samples=3)

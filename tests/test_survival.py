@@ -42,16 +42,18 @@ class _History:
 
 
 def _constant_hazard_params(
-    hazard: float, cure_probability: float, num_bins: int = 3
+    hazard: float, susceptibility_probability: float, num_bins: int = 3
 ) -> StageParameters:
-    """StageParameters producing a flat hazard and a flat cure probability."""
+    """StageParameters producing a flat hazard and a flat susceptibility probability."""
     logit = float(np.log(hazard / (1 - hazard)))
-    cure_logit = float(np.log(cure_probability / (1 - cure_probability)))
+    susceptibility_logit = float(
+        np.log(susceptibility_probability / (1 - susceptibility_probability))
+    )
     return StageParameters(
         age_logits=jnp.full((num_bins,), logit),
         beta=jnp.zeros(0),
-        cure_intercept=jnp.array(cure_logit),
-        cure_beta=jnp.zeros(0),
+        susceptibility_intercept=jnp.array(susceptibility_logit),
+        susceptibility_beta=jnp.zeros(0),
     )
 
 
@@ -67,7 +69,7 @@ def _observations(
     return StageObservations(
         ages=ages,
         features=jnp.zeros((n, t, num_features)),
-        cure_features=jnp.zeros((n, 0)),
+        susceptibility_features=jnp.zeros((n, 0)),
         at_risk=jnp.asarray(at_risk),
         allowed=jnp.asarray(allowed),
         event_index=jnp.asarray(event_index),
@@ -80,7 +82,7 @@ def _observations(
 def test_stage_log_likelihood_matches_analytical_probabilities():
     # h=.5 constant, pi=.4. Event on second exposed day (index 1): .4*.5*.5=.1.
     # Censor after two exposed days: .6+.4*.25=.7.
-    params = _constant_hazard_params(hazard=0.5, cure_probability=0.4)
+    params = _constant_hazard_params(hazard=0.5, susceptibility_probability=0.4)
     observations = _observations(ages=[[0, 1], [0, 1]], event_index=[1, -1])
     log_likelihood = stage_log_likelihood(params, observations)
     np.testing.assert_allclose(np.exp(np.array(log_likelihood)), [0.1, 0.7], rtol=1e-6)
@@ -108,7 +110,7 @@ def test_conditional_susceptibility_boundary_invariants():
 
 
 def test_observed_event_on_closed_day_is_negative_infinite_not_clipped():
-    params = _constant_hazard_params(hazard=0.5, cure_probability=0.4)
+    params = _constant_hazard_params(hazard=0.5, susceptibility_probability=0.4)
     observations = _observations(
         ages=[[0, 1]],
         event_index=[1],
@@ -122,7 +124,7 @@ def test_closed_day_does_not_count_as_a_cure_or_decay_survival():
     # A censored unit with one open day (h=.5) and one closed day in between
     # should get the same likelihood as if the closed day were simply absent:
     # survival only decays on the open day.
-    params = _constant_hazard_params(hazard=0.5, cure_probability=0.4)
+    params = _constant_hazard_params(hazard=0.5, susceptibility_probability=0.4)
     with_closure = _observations(ages=[[0, 1, 2]], event_index=[-1], allowed=[[True, False, True]])
     without_closure = _observations(ages=[[0, 2]], event_index=[-1], allowed=[[True, True]])
     ll_with = stage_log_likelihood(params, with_closure)
@@ -132,14 +134,16 @@ def test_closed_day_does_not_count_as_a_cure_or_decay_survival():
 
 def test_same_day_event_uses_age_zero_hazard():
     # An event on the origin day itself (age 0) has probability pi*h0.
-    params = _constant_hazard_params(hazard=0.3, cure_probability=0.7)
+    params = _constant_hazard_params(hazard=0.3, susceptibility_probability=0.7)
     observations = _observations(ages=[[0, 1, 2]], event_index=[0])
     log_likelihood = stage_log_likelihood(params, observations)
     np.testing.assert_allclose(np.exp(np.array(log_likelihood)), [0.7 * 0.3], rtol=1e-6)
 
 
 def test_negative_ages_have_zero_hazard_and_do_not_accumulate_survival():
-    params = _constant_hazard_params(hazard=0.9, cure_probability=0.5)  # aggressive hazard
+    params = _constant_hazard_params(
+        hazard=0.9, susceptibility_probability=0.5
+    )  # aggressive hazard
     ages = jnp.array([[-3, -2, -1, 0, 1]])
     hazard = stage_hazard(params, ages, jnp.zeros((1, 5, 0)))
     np.testing.assert_array_equal(np.array(hazard[0, :3]), np.zeros(3))
@@ -163,8 +167,8 @@ def test_stage_hazard_clips_tail_age_to_final_baseline_bin():
     params = StageParameters(
         age_logits=age_logits,
         beta=jnp.zeros(0),
-        cure_intercept=jnp.array(0.0),
-        cure_beta=jnp.zeros(0),
+        susceptibility_intercept=jnp.array(0.0),
+        susceptibility_beta=jnp.zeros(0),
     )
     ages = jnp.array([[0, 1, 2, 5, 1000]])
     hazard = stage_hazard(params, ages, jnp.zeros((1, 5, 0)))
@@ -174,15 +178,15 @@ def test_stage_hazard_clips_tail_age_to_final_baseline_bin():
     np.testing.assert_allclose(float(hazard[0, 4]), float(expected_tail), rtol=1e-6)
 
 
-def test_susceptibility_uses_static_cure_regressors():
+def test_susceptibility_uses_static_regressors():
     params = StageParameters(
         age_logits=jnp.zeros(2),
         beta=jnp.zeros(0),
-        cure_intercept=jnp.array(0.0),
-        cure_beta=jnp.array([1.5, -0.5]),
+        susceptibility_intercept=jnp.array(0.0),
+        susceptibility_beta=jnp.array([1.5, -0.5]),
     )
-    cure_features = jnp.array([[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]])
-    result = susceptibility(params, cure_features)
+    susceptibility_features = jnp.array([[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]])
+    result = susceptibility(params, susceptibility_features)
     expected = jax.nn.sigmoid(jnp.array([1.5, -0.5, 0.0]))
     np.testing.assert_allclose(np.array(result), np.array(expected), rtol=1e-6)
 
@@ -195,19 +199,19 @@ def test_gradients_are_finite_for_ordinary_valid_inputs():
     n, t, p, q = 6, 8, 2, 1
     ages = jnp.array(np.tile(np.arange(t), (n, 1)) - rng.integers(0, 3, size=(n, 1)))
     features = jnp.array(rng.normal(size=(n, t, p)).astype(np.float32))
-    cure_features = jnp.array(rng.normal(size=(n, q)).astype(np.float32))
+    susceptibility_features = jnp.array(rng.normal(size=(n, q)).astype(np.float32))
     event_index = jnp.array([3, -1, 5, -1, 0, 7])
     observations = StageObservations(
         ages=ages,
         features=features,
-        cure_features=cure_features,
+        susceptibility_features=susceptibility_features,
         at_risk=jnp.ones((n, t), dtype=bool),
         allowed=jnp.ones((n, t), dtype=bool),
         event_index=event_index,
     )
 
-    def total_log_likelihood(age_logits, beta, cure_intercept, cure_beta):
-        params = StageParameters(age_logits, beta, cure_intercept, cure_beta)
+    def total_log_likelihood(age_logits, beta, susceptibility_intercept, susceptibility_beta):
+        params = StageParameters(age_logits, beta, susceptibility_intercept, susceptibility_beta)
         return jnp.sum(stage_log_likelihood(params, observations))
 
     grads = jax.grad(total_log_likelihood, argnums=(0, 1, 2, 3))(
@@ -317,14 +321,14 @@ def test_receipt_likelihood_keeps_each_items_regressors_and_closures():
     )
     calendar = date_grid("2026-01-01", "2026-01-03")
     features = np.broadcast_to(np.array([0.0, 99.0, np.log(3)])[:, None, None], (3, 3, 1))
-    cure_features = np.array([[np.log(2 / 3)], [99.0], [np.log(4)]])
+    susceptibility_features = np.array([[np.log(2 / 3)], [99.0], [np.log(4)]])
     allowed = np.array([[True, True, True], [False, False, False], [False, False, True]])
     observations = make_observations(
         history,
         "receipt",
         calendar,
         features=features,
-        cure_features=cure_features,
+        susceptibility_features=susceptibility_features,
         allowed=allowed,
     )
     parameters = StageParameters(jnp.zeros(1), jnp.ones(1), 0.0, jnp.ones(1))
@@ -334,7 +338,7 @@ def test_receipt_likelihood_keeps_each_items_regressors_and_closures():
     )
 
 
-def test_cure_regression_rejects_an_ambiguous_one_dimensional_vector():
+def test_susceptibility_regression_rejects_an_ambiguous_one_dimensional_vector():
     history = _history(
         item_id=["a", "b"],
         sale_date=pd.to_datetime(["2026-01-01"] * 2),
@@ -346,7 +350,7 @@ def test_cure_regression_rejects_an_ambiguous_one_dimensional_vector():
             history,
             "initiation",
             date_grid("2026-01-01", "2026-02-01"),
-            cure_features=np.array([1.0, 2.0]),
+            susceptibility_features=np.array([1.0, 2.0]),
         )
 
 
@@ -395,17 +399,17 @@ def test_make_observations_future_calendar_days_are_not_at_risk():
 # --- Conditional-entry likelihood (pre_entry) -------------------------------
 
 
-def test_pre_entry_conditions_cure_logit_on_known_prior_survival():
+def test_pre_entry_conditions_susceptibility_logit_on_known_prior_survival():
     # h=.5 constant, pi=.4. Two known event-free pre-entry days (S_pre=.25),
     # then censored through two more post-entry at-risk days (S_post=.25).
     # The conditional-entry likelihood must equal the exact Bayes identity
     # for "survive all 4 days given already known to survive the first 2":
     # ((1-pi) + pi*S_pre*S_post) / ((1-pi) + pi*S_pre) = 0.625 / 0.7.
-    params = _constant_hazard_params(hazard=0.5, cure_probability=0.4)
+    params = _constant_hazard_params(hazard=0.5, susceptibility_probability=0.4)
     observations = StageObservations(
         ages=jnp.array([[0, 1, 2, 3]]),
         features=jnp.zeros((1, 4, 0)),
-        cure_features=jnp.zeros((1, 0)),
+        susceptibility_features=jnp.zeros((1, 0)),
         at_risk=jnp.array([[False, False, True, True]]),
         allowed=jnp.ones((1, 4), dtype=bool),
         event_index=jnp.array([-1]),
@@ -534,7 +538,7 @@ def test_entry_before_parent_starts_exposure_at_parent_event():
         calendar=date_grid("2026-01-01", "2026-01-10"),
         entry_dates=["2026-01-01"],
     )
-    parameters = _constant_hazard_params(hazard=0.5, cure_probability=0.4)
+    parameters = _constant_hazard_params(hazard=0.5, susceptibility_probability=0.4)
     # Parent day zero survives, then the event happens at age one: .4*.5*.5.
     np.testing.assert_allclose(
         np.exp(stage_log_likelihood(parameters, observations)), [0.1], rtol=1e-6
@@ -544,18 +548,27 @@ def test_entry_before_parent_starts_exposure_at_parent_event():
 # --- Native observation: log joint, exposure and posterior predictive ---------
 
 
-_PRIOR_SITES = ("age_scale", "age_init", "age_steps", "beta", "cure_intercept", "cure_beta")
+_PRIOR_SITES = (
+    "age_scale",
+    "age_init",
+    "age_steps",
+    "beta",
+    "susceptibility_intercept",
+    "susceptibility_beta",
+)
 
 
-def _constant_sites(hazard, cure_probability):
-    """Default-model sample-site values giving one flat hazard bin and a flat cure."""
+def _constant_sites(hazard, susceptibility_probability):
+    """Default-model sample-site values giving one flat hazard bin and a flat susceptibility."""
     return {
         "age_scale": jnp.array(1.0),
         "age_init": jnp.array(float(np.log(hazard / (1 - hazard)))),
         "age_steps": jnp.zeros(0),
         "beta": jnp.zeros(0),
-        "cure_intercept": jnp.array(float(np.log(cure_probability / (1 - cure_probability)))),
-        "cure_beta": jnp.zeros(0),
+        "susceptibility_intercept": jnp.array(
+            float(np.log(susceptibility_probability / (1 - susceptibility_probability)))
+        ),
+        "susceptibility_beta": jnp.zeros(0),
     }
 
 
@@ -572,13 +585,13 @@ def test_native_log_joint_matches_analytic_probabilities_and_gradients():
     # after two exposed days is .6+.4*.25=.7. The observation site of the
     # NumPyro model carries exactly that likelihood, and its gradients are the
     # closed forms d/d(age_init) = (1-2h) + .4*2(1-h)(-h(1-h))/.7 = -1/7 and
-    # d/d(cure_intercept) = (1-pi) + (-pi(1-pi) + pi(1-pi)*.25)/.7 = 12/35.
+    # d/d(susceptibility_intercept) = (1-pi) + (-pi(1-pi) + pi(1-pi)*.25)/.7 = 12/35.
     observations = _observations(ages=[[0, 1], [0, 1]], event_index=[1, -1])
     sites = _constant_sites(0.5, 0.4)
     value, gradients = jax.value_and_grad(_observation_log_density)(sites, observations)
     np.testing.assert_allclose(float(value), np.log(0.1) + np.log(0.7), rtol=1e-6)
     np.testing.assert_allclose(float(gradients["age_init"]), -1 / 7, rtol=1e-5)
-    np.testing.assert_allclose(float(gradients["cure_intercept"]), 12 / 35, rtol=1e-5)
+    np.testing.assert_allclose(float(gradients["susceptibility_intercept"]), 12 / 35, rtol=1e-5)
     assert all(np.isfinite(np.asarray(value)).all() for value in gradients.values())
 
 
@@ -589,16 +602,16 @@ def test_native_log_joint_conditions_delayed_entry_like_the_public_helper():
     observations = StageObservations(
         ages=jnp.array([[0, 1, 2, 3]]),
         features=jnp.zeros((1, 4, 0)),
-        cure_features=jnp.zeros((1, 0)),
+        susceptibility_features=jnp.zeros((1, 0)),
         at_risk=jnp.array([[False, False, True, True]]),
         allowed=jnp.ones((1, 4), dtype=bool),
         event_index=jnp.array([-1]),
         pre_entry=jnp.array([[True, True, False, False]]),
     )
 
-    def oracle(age_init, cure_intercept):
+    def oracle(age_init, susceptibility_intercept):
         hazard = 1 / (1 + np.exp(-age_init))
-        pi = 1 / (1 + np.exp(-cure_intercept))
+        pi = 1 / (1 + np.exp(-susceptibility_intercept))
         survive = (1 - hazard) ** 2
         return np.log(((1 - pi) + pi * survive * survive) / ((1 - pi) + pi * survive))
 
@@ -606,11 +619,17 @@ def test_native_log_joint_conditions_delayed_entry_like_the_public_helper():
     value, gradients = jax.value_and_grad(_observation_log_density)(sites, observations)
     np.testing.assert_allclose(float(value), np.log(0.625 / 0.7), rtol=1e-6)
     step = 1e-6
-    theta, cure = float(sites["age_init"]), float(sites["cure_intercept"])
-    expected_theta = (oracle(theta + step, cure) - oracle(theta - step, cure)) / (2 * step)
-    expected_cure = (oracle(theta, cure + step) - oracle(theta, cure - step)) / (2 * step)
+    theta, susceptibility_logit = float(sites["age_init"]), float(sites["susceptibility_intercept"])
+    expected_theta = (
+        oracle(theta + step, susceptibility_logit) - oracle(theta - step, susceptibility_logit)
+    ) / (2 * step)
+    expected_susceptibility = (
+        oracle(theta, susceptibility_logit + step) - oracle(theta, susceptibility_logit - step)
+    ) / (2 * step)
     np.testing.assert_allclose(float(gradients["age_init"]), expected_theta, rtol=1e-4)
-    np.testing.assert_allclose(float(gradients["cure_intercept"]), expected_cure, rtol=1e-4)
+    np.testing.assert_allclose(
+        float(gradients["susceptibility_intercept"]), expected_susceptibility, rtol=1e-4
+    )
 
 
 def test_builder_exposure_is_administrative_and_stops_at_as_of():
@@ -663,7 +682,7 @@ def test_manual_observations_without_exposure_keep_their_event_window():
     # Legacy hand-built observations carry only at_risk. An event on a day
     # outside that window stays impossible, and censoring still sums survival
     # over exactly the at_risk days.
-    params = _constant_hazard_params(hazard=0.5, cure_probability=0.4)
+    params = _constant_hazard_params(hazard=0.5, susceptibility_probability=0.4)
     outside = _observations(ages=[[0, 1, 2]], event_index=[2], at_risk=[[True, True, False]])
     assert float(stage_log_likelihood(params, outside)[0]) == -np.inf
     censored = _observations(
@@ -672,8 +691,8 @@ def test_manual_observations_without_exposure_keep_their_event_window():
     np.testing.assert_allclose(np.exp(stage_log_likelihood(params, censored)), [0.7], rtol=1e-6)
 
 
-def _constant_fit(hazard, cure_probability, draws):
-    single = _constant_hazard_params(hazard, cure_probability, num_bins=1)
+def _constant_fit(hazard, susceptibility_probability, draws):
+    single = _constant_hazard_params(hazard, susceptibility_probability, num_bins=1)
     parameters = jax.tree_util.tree_map(
         lambda leaf: jnp.broadcast_to(leaf, (draws,) + leaf.shape), single
     )
@@ -689,7 +708,7 @@ def test_predict_stage_draws_the_fitted_law_not_the_stored_observations():
     observations = StageObservations(
         ages=jnp.array([[0, 1, 2, 3, 4]] * 2),
         features=jnp.zeros((2, 5, 0)),
-        cure_features=jnp.zeros((2, 0)),
+        susceptibility_features=jnp.zeros((2, 0)),
         at_risk=jnp.array([[True, True, False, False, False], [True] * 5]),
         allowed=jnp.array([[True, True, True, False, True]] * 2),
         event_index=jnp.array([1, -1]),
@@ -731,13 +750,16 @@ def test_fit_stage_default_family_keeps_stage_parameters_with_draw_axes():
     assert fit.family is None and fit.shared is None
     assert fit.num_samples == 7 and fit.draws == 7
     assert fit.parameters.age_logits.shape == (7, 4)
-    assert fit.parameters.cure_intercept.shape == (7,)
-    assert fit.parameters.beta.shape == (7, 0) and fit.parameters.cure_beta.shape == (7, 0)
+    assert fit.parameters.susceptibility_intercept.shape == (7,)
+    assert fit.parameters.beta.shape == (7, 0) and fit.parameters.susceptibility_beta.shape == (
+        7,
+        0,
+    )
     assert np.isfinite(fit.losses).all() and fit.losses.shape == (30,)
     inputs = TimingInputs(
         ages=jnp.array([[0, 5], [1, 6], [2, 7]]),
         features=jnp.zeros((3, 2, 0)),
-        cure_features=jnp.zeros((2, 0)),
+        susceptibility_features=jnp.zeros((2, 0)),
     )
     timing, logits = fit.timing(inputs, draw=2)
     assert isinstance(timing, TimingLaw)

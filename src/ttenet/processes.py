@@ -32,7 +32,7 @@ class CountProcess:
 
 
 @dataclass(frozen=True)
-class CureProcess:
+class EventProcess:
     """One event per source unit, with its own age clock and possible non-occurrence.
 
     A deadline is inclusive and relative to the immediate source event, not
@@ -44,7 +44,7 @@ class CureProcess:
     receives ``TimingInputs`` (ages and regressors only), samples its own named
     NumPyro sites and returns an :class:`~ttenet.event_times.EventLaw`, and a
     typed ``tail`` declaration (see :mod:`ttenet.families`). Exposure,
-    closures, cure marginalization and entry conditioning stay in the shared
+    closures, susceptibility marginalization and entry conditioning stay in the shared
     core. ``family`` and ``parameter_model`` are alternatives, never combined.
     """
 
@@ -95,7 +95,7 @@ class CountNode:
 
 @dataclass(frozen=True)
 class EventNode:
-    """A cure-capable child event, preserving its source's root cohort identity.
+    """A susceptibility-capable child event, preserving its source's root cohort identity.
 
     Multiple children of one source are distinct events, not competing risks.
     ``event_column`` defaults to the node's entry in ``RetailData.event_columns``.
@@ -103,12 +103,12 @@ class EventNode:
 
     name: str
     source: CountNode | EventNode | str
-    process: CureProcess
+    process: EventProcess
     event_column: str | None = None
 
     def __post_init__(self):
-        if not isinstance(self.process, CureProcess):
-            raise TypeError("an EventNode process must be a CureProcess")
+        if not isinstance(self.process, EventProcess):
+            raise TypeError("an EventNode process must be an EventProcess")
 
     @property
     def source_name(self):

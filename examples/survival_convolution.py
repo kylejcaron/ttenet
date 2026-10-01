@@ -50,7 +50,7 @@ def kernel(case, theta, x, origin, *, entry=None, deadline=None):
         exposed = exposed & ~pre_entry
     timing, logits = default_timing(
         parameters(theta),
-        TimingInputs(ages, inputs[..., :-1], jnp.asarray(case.cure_features)),
+        TimingInputs(ages, inputs[..., :-1], jnp.asarray(case.susceptibility_features)),
     )
     return EventTime.from_kernel(
         survival_kernel(
@@ -211,7 +211,7 @@ def chain_experiment(case, x, steps, draws):
     receipt_obs = StageObservations(
         ages=day - origin[:, None],
         features=jnp.asarray(case.features[:, :stop]),
-        cure_features=jnp.asarray(case.cure_features),
+        susceptibility_features=jnp.asarray(case.susceptibility_features),
         allowed=jnp.asarray(case.allowed[:, :stop]),
         at_risk=(day >= origin[:, None]) & (day <= jnp.where(event >= 0, event, stop - 1)[:, None]),
         event_index=event,

@@ -5,7 +5,7 @@ Calendar-aware count and time-to-event forecasting with JAX and NumPyro.
 **Sale → return initiated → return received**
 
 Some purchases never initiate a return; some initiated returns never arrive.
-TTENet fits these cure-capable processes from censored unit histories and
+TTENet fits these event processes from censored unit histories and
 propagates dated cohorts through the network. Sales can be fitted jointly or
 supplied as one external forecast value. Existing items retain their original
 clocks, including items sold before the sales observation window.
@@ -42,7 +42,7 @@ uv run marimo run examples/retail_returns_blog.py   # or `marimo edit` to see th
 
 ### Native survival convolutions
 
-This focused example expresses cure-capable return stages through
+This focused example expresses susceptibility-capable return stages through
 [`numpyro_forecast`](https://github.com/juanitorduz/numpyro_forecast)'s native
 `Horizon`, `predict`, `draw_posterior`, `forecast`, and `predict_in_sample` APIs:
 
@@ -84,7 +84,7 @@ import numpyro
 import numpyro.distributions as dist
 import pandas as pd
 from numpyro_forecast import Horizon, predict
-from ttenet import CountProcess, CureProcess, RetailData, RetailReturnModel, date_grid
+from ttenet import CountProcess, EventProcess, RetailData, RetailReturnModel, date_grid
 
 
 def sales_model(covariates, data=None):
@@ -95,7 +95,7 @@ def sales_model(covariates, data=None):
 
 
 def initiation_covariates(frame, days):
-    return {"cure_features": frame["product"].to_numpy(float)[:, None]}
+    return {"susceptibility_features": frame["product"].to_numpy(float)[:, None]}
 
 
 unit_history = pd.DataFrame(
@@ -115,8 +115,8 @@ observed = RetailData.from_units(
 )
 model = RetailReturnModel(
     sales=CountProcess(model=sales_model),
-    initiation=CureProcess(age_bins=16, deadline_days=90),
-    receipt=CureProcess(age_bins=16, allowed_weekdays=range(5)),
+    initiation=EventProcess(age_bins=16, deadline_days=90),
+    receipt=EventProcess(age_bins=16, allowed_weekdays=range(5)),
 )
 fitted = model.fit(
     observed,
@@ -213,7 +213,7 @@ columns. There is no separate public count-array argument.
 | Event key | Shape | Meaning |
 | --- | --- | --- |
 | `features` | `[rows, days, P]` | Time-varying timing regressors |
-| `cure_features` | `[rows, Q]` | Static susceptibility regressors |
+| `susceptibility_features` | `[rows, Q]` | Static susceptibility regressors |
 | `allowed` | `[days]` or `[rows, days]` | Boolean hard-open mask |
 
 During fitting, event providers receive historical unit rows and the calendar
@@ -224,14 +224,14 @@ callable can be reused for future dates; an explicit array mapping needs a
 future mapping. Product attributes are carried into generated sale cohorts.
 
 Feature order, encoding, and learned scaling must stay fixed. Historical
-`cure_features` cannot change in a scenario: they describe susceptibility at
+`susceptibility_features` cannot change in a scenario: they describe susceptibility at
 stage entry. Missing data during risk exposure is an error, not zero-filled
 weather. Only inactive pre-birth padding is filled. Unknown node/feature keys
 and non-mapping provider results fail rather than silently removing closures.
 
-`CureProcess.allowed_weekdays` and the supplied `allowed` mask are ANDed.
+`EventProcess.allowed_weekdays` and the supplied `allowed` mask are ANDed.
 Each stage has its own mask. A closed warehouse does not stop online return
-initiations, and a closure does not mark a unit as cured.
+initiations, and a closure does not make a unit non-susceptible.
 
 For retail's **eventual historical receipt expectation**, future event
 covariates must extend through the latest still-eligible historical sale's
@@ -314,11 +314,11 @@ For genuine coupling, supply `shared_model()` to the network or retail model.
 It samples and returns shared latent values under the `shared` scope:
 
 - The count callable receives an additional `shared=values` keyword.
-- A custom `CureProcess(parameter_model=...)` callback receives
+- A custom `EventProcess(parameter_model=...)` callback receives
   `(observations, shared)` and returns one `StageParameters` value. It may
   sample conditional NumPyro priors or use `sample_stage_parameters` and
   transform those parameters with shared values.
-- A custom `CureProcess(family=...)` calls `family.model(inputs, shared)` with
+- A custom `EventProcess(family=...)` calls `family.model(inputs, shared)` with
   `TimingInputs` and receives a named `EventLaw(timing, susceptibility_logits)`;
   its real named sample and optimized parameter sites are replayed per draw.
 - The same shared posterior draw reaches every process during prediction.
@@ -410,7 +410,7 @@ result = forecast_returns(history, a, b, calendar=calendar, horizon=28)
 
 Those two `fit_stage` calls are independent, not joint fitting. Optional
 `future_sales` is one `SalesForecast` or a deterministic quantity frame.
-Explicit `initiation_features`, `receipt_features`, static cure features,
+Explicit `initiation_features`, `receipt_features`, static susceptibility features,
 and allowed masks use **historical rows followed by future cohorts**. Missing
 features for fitted nonzero-width coefficients are errors. The calendar
 covers original clocks, the output horizon, and historical initiation deadlines
@@ -445,13 +445,13 @@ import math
 
 import numpyro.distributions as dist
 
-from ttenet import CureProcess, WeibullFamily
+from ttenet import EventProcess, WeibullFamily
 
-receipt = CureProcess(
+receipt = EventProcess(
     family=WeibullFamily(
         scale_prior=dist.LogNormal(math.log(6.0), 0.3),
         shape_prior=dist.LogNormal(math.log(2.0), 0.2),
-        susceptibility_prior=dist.Normal(1.0, 1.0),
+        susceptibility_logit_prior=dist.Normal(1.0, 1.0),
     ),
     allowed_weekdays=(0, 1, 2, 3, 4),
 )
@@ -459,11 +459,22 @@ receipt = CureProcess(
 
 `WeibullFamily` discretizes susceptible survival at daily bin boundaries. Its
 priors can also be fixed real scalars; scale and shape must be positive. Named
-sites are `scale`, `shape`, `cure_intercept`, and, when regressors are present,
-`beta` and `cure_beta`. Fixed parameters create no sample sites. Distribution
+sites are `scale`, `shape`, `susceptibility_intercept`, and, when regressors are present,
+`beta` and `susceptibility_beta`. Fixed parameters create no sample sites. Distribution
 priors must be scalar and have suitable support. `family=None` retains the default regularized
 random-walk hazard; its `parameter_model` callback still customizes those priors.
 Combining `family` with `parameter_model` is ambiguous and rejected.
+
+**Migration.** `CureProcess` is now `EventProcess`, and every name that
+denotes the susceptibility logit or its regressors moved from `cure_*` to
+`susceptibility_*`: the `StageParameters` fields `susceptibility_intercept` and
+`susceptibility_beta`, the `susceptibility_features` inputs (including the
+prefixed `initiation_`/`receipt_` keyword arguments and provider-dictionary
+key), the `susceptibility_intercept`/`susceptibility_beta` sample sites, and
+`WeibullFamily(susceptibility_prior=...)`, now `susceptibility_logit_prior`
+because it is a prior on the logit intercept. There are no aliases: update
+callers, saved posterior-site dictionaries, and custom `parameter_model`
+callbacks. Mixture-cure mathematics, and never-event wording, is unchanged.
 
 Custom plain NumPyro functions use the frozen `EventFamily` wrapper:
 
@@ -473,7 +484,7 @@ import numpyro
 import numpyro.distributions as dist
 
 from ttenet import (
-    CureProcess,
+    EventProcess,
     EventFamily,
     EventLaw,
     ProperTail,
@@ -492,7 +503,7 @@ def exponential_delay(inputs, shared):
 
 
 family = EventFamily(model=exponential_delay, tail=ProperTail())
-custom_receipt = CureProcess(family=family, allowed_weekdays=(0, 1, 2, 3, 4))
+custom_receipt = EventProcess(family=family, allowed_weekdays=(0, 1, 2, 3, 4))
 ```
 
 `family.model(inputs, shared)` receives only ages and regressors:
@@ -501,11 +512,11 @@ custom_receipt = CureProcess(family=family, allowed_weekdays=(0, 1, 2, 3, 4))
 | --- | --- |
 | `inputs.ages` | `[day, cohort]`, elapsed days from the immediate parent |
 | `inputs.features` | `[day, cohort, feature]`, time-varying regressors |
-| `inputs.cure_features` | `[cohort, feature]`, static susceptibility regressors |
+| `inputs.susceptibility_features` | `[cohort, feature]`, static susceptibility regressors |
 
 It returns `EventLaw(timing=TimingLaw(log_hazard, log_survival_step),
 susceptibility_logits=...)`, with susceptibility logits `[cohort]`. The common
-kernel applies cure, administrative exposure, elapsed-age closures and
+kernel applies susceptibility marginalization, administrative exposure, elapsed-age closures and
 selected-survivor conditioning. Families receive no observed outcomes or
 administrative masks. Re-evaluating a family at a new horizon replays its fitted
 named NumPyro sites; missing posterior sites are errors, not new prior draws.

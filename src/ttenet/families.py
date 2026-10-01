@@ -4,7 +4,7 @@ A family is any object with a NumPyro ``model(inputs, shared) -> EventLaw``
 and a static ``tail`` declaration. The model sees :class:`TimingInputs` only
 -- elapsed ages and regressors, never realized outcomes, calendars or
 exposure -- samples its own named sites and returns the susceptible timing
-law with the susceptibility logits. Exposure, closures, cure
+law with the susceptibility logits. Exposure, closures, susceptibility
 marginalization, entry conditioning, native observation and count
 propagation stay in the shared core, so swapping the family never touches
 fitting, the native distributions or the network.
@@ -192,12 +192,13 @@ class WeibullFamily:
 
     ``scale_prior`` and ``shape_prior`` are scalar NumPyro distributions sampled at
     the sites ``"scale"`` and ``"shape"``, or fixed positive numbers with no
-    site; ``susceptibility_prior`` is the susceptibility logit intercept,
-    likewise sampled at ``"cure_intercept"`` or fixed. Time-varying
-    regressors scale each day's cumulative-hazard increment by
-    ``exp(x_t @ beta)`` (``beta ~ Normal(0, 1)`` at ``"beta"``) and static
-    regressors shift the logit by ``z @ cure_beta`` (``cure_beta ~ Normal(0,
-    1)`` at ``"cure_beta"``); both sites exist only when regressors are
+    site; ``susceptibility_logit_prior`` is the prior on the susceptibility
+    logit intercept (default ``Normal(0, 2)``), likewise sampled at
+    ``"susceptibility_intercept"`` or fixed. Time-varying regressors scale
+    each day's cumulative-hazard increment by ``exp(x_t @ beta)`` (``beta ~
+    Normal(0, 1)`` at ``"beta"``) and static regressors shift the logit by
+    ``z @ susceptibility_beta`` (``susceptibility_beta ~ Normal(0, 1)`` at
+    ``"susceptibility_beta"``); both sites exist only when regressors are
     supplied. The tail is proper: under continuing exposure every
     susceptible unit eventually fires.
 
@@ -209,7 +210,7 @@ class WeibullFamily:
 
     scale_prior: dist.Distribution | float
     shape_prior: dist.Distribution | float = 2.0
-    susceptibility_prior: dist.Distribution | float = dist.Normal(0.0, 2.0)
+    susceptibility_logit_prior: dist.Distribution | float = dist.Normal(0.0, 2.0)
 
     tail: ClassVar[TailBehavior] = ProperTail()
 
@@ -217,7 +218,7 @@ class WeibullFamily:
         for name, positive in (
             ("scale_prior", True),
             ("shape_prior", True),
-            ("susceptibility_prior", False),
+            ("susceptibility_logit_prior", False),
         ):
             value = _fixed_or_distribution(name, getattr(self, name), positive=positive)
             object.__setattr__(self, name, value)
@@ -233,12 +234,13 @@ class WeibullFamily:
         if width:
             beta = numpyro.sample("beta", dist.Normal(0.0, 1.0).expand([width]).to_event(1))
             log_increment = log_increment + _regressor_effect(inputs.features, beta)
-        logits = _site("cure_intercept", self.susceptibility_prior)
-        cure_width = inputs.cure_features.shape[-1]
-        if cure_width:
-            cure_beta = numpyro.sample(
-                "cure_beta", dist.Normal(0.0, 1.0).expand([cure_width]).to_event(1)
+        logits = _site("susceptibility_intercept", self.susceptibility_logit_prior)
+        susceptibility_width = inputs.susceptibility_features.shape[-1]
+        if susceptibility_width:
+            susceptibility_beta = numpyro.sample(
+                "susceptibility_beta",
+                dist.Normal(0.0, 1.0).expand([susceptibility_width]).to_event(1),
             )
-            logits = logits + _regressor_effect(inputs.cure_features, cure_beta)
+            logits = logits + _regressor_effect(inputs.susceptibility_features, susceptibility_beta)
         units = ages.shape[:-2] + ages.shape[-1:]
         return EventLaw(_timing_from_log_increment(log_increment), jnp.broadcast_to(logits, units))

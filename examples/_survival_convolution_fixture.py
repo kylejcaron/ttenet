@@ -37,7 +37,7 @@ class CalendarCase:
     entry: np.ndarray
     deadline: int
     features: np.ndarray  # [unit, day, feature]
-    cure_features: np.ndarray
+    susceptibility_features: np.ndarray
     allowed: np.ndarray  # [unit, day]
     data: np.ndarray  # [day, unit], full truth; only prefix reaches fitting
     t_obs: int
@@ -60,7 +60,7 @@ class CalendarCase:
             deadline_days=self.deadline,
             entry_dates=self.calendar[self.entry],
             features=self.features[:, :stop],
-            cure_features=self.cure_features,
+            susceptibility_features=self.susceptibility_features,
             allowed=self.allowed[:, :stop],
         )
         return stage_log_likelihood(parameters(theta), obs)
@@ -108,7 +108,7 @@ def make_case():
     pre_entry = valid & (day[:, None] < entry[None, :])
     timing, logits = default_timing(
         parameters(jnp.asarray(TRUTH)),
-        TimingInputs(ages, features.transpose(1, 0, 2), case.cure_features),
+        TimingInputs(ages, features.transpose(1, 0, 2), case.susceptibility_features),
     )
     law = EventTime.from_kernel(
         survival_kernel(

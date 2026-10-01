@@ -2,7 +2,7 @@
 
 Every function here operates on a *single* posterior draw: the fields of
 ``StageParameters`` are un-batched (``age_logits`` is ``[K]``, ``beta`` is
-``[P]``, ``cure_intercept`` is a scalar, ``cure_beta`` is ``[Q]``). Callers
+``[P]``, ``susceptibility_intercept`` is a scalar, ``susceptibility_beta`` is ``[Q]``). Callers
 that hold a leading posterior-draw axis (e.g. the output of
 ``models.fit_stage``) are responsible for ``jax.vmap``-ing these primitives
 over that axis, or for indexing a single draw before calling them.
@@ -13,7 +13,7 @@ convert traced values to concrete NumPy arrays; shape/shape-compatibility
 checks that require concrete inspection belong to host-side callers
 (``models.make_observations``, ``models.fit_stage``).
 
-``event_times`` composes the private ``_hazard_logits``/``_cure_logits``
+``event_times`` composes the private ``_hazard_logits``/``_susceptibility_logits``
 primitives into the shared mixture-cure kernel; the hazard and
 susceptibility formulas are defined once, here.
 """
@@ -31,8 +31,8 @@ class StageParameters(NamedTuple):
 
     age_logits: ``[K]`` flexible age-baseline logits, one per age bin.
     beta: ``[P]`` linear effects for time-varying hazard regressors.
-    cure_intercept: scalar susceptibility intercept.
-    cure_beta: ``[Q]`` linear effects for static susceptibility regressors.
+    susceptibility_intercept: scalar susceptibility intercept.
+    susceptibility_beta: ``[Q]`` linear effects for static susceptibility regressors.
 
     A leading posterior-draw axis (``[draw, K]``, ``[draw, P]``, ``[draw]``,
     ``[draw, Q]``) is valid wherever a *batch* of draws is being carried
@@ -42,8 +42,8 @@ class StageParameters(NamedTuple):
 
     age_logits: Any
     beta: Any
-    cure_intercept: Any
-    cure_beta: Any
+    susceptibility_intercept: Any
+    susceptibility_beta: Any
 
 
 def _linear_effect(features: Any, weights: Any) -> Any:
@@ -61,8 +61,10 @@ def _hazard_logits(parameters: StageParameters, ages: Any, features: Any) -> Any
     return parameters.age_logits[age_index] + _linear_effect(features, parameters.beta)
 
 
-def _cure_logits(parameters: StageParameters, cure_features: Any) -> Any:
-    return parameters.cure_intercept + _linear_effect(cure_features, parameters.cure_beta)
+def _susceptibility_logits(parameters: StageParameters, susceptibility_features: Any) -> Any:
+    return parameters.susceptibility_intercept + _linear_effect(
+        susceptibility_features, parameters.susceptibility_beta
+    )
 
 
 def stage_hazard(
@@ -90,15 +92,15 @@ def stage_hazard(
     return jnp.where(valid, sigmoid(logits), 0.0)
 
 
-def susceptibility(parameters: StageParameters, cure_features: Any) -> Any:
-    """Susceptibility probability ``pi = sigmoid(cure_intercept + z @ cure_beta)``.
+def susceptibility(parameters: StageParameters, susceptibility_features: Any) -> Any:
+    """Susceptibility probability ``pi = sigmoid(susceptibility_intercept + z @ susceptibility_beta)``.
 
-    ``cure_features`` is static at stage entry (``[..., Q]``); the result
+    ``susceptibility_features`` is static at stage entry (``[..., Q]``); the result
     broadcasts over its leading axes. This is latent susceptibility, not a
     realized event probability: a susceptible unit can still miss a finite
     observation/policy window.
     """
-    logits = _cure_logits(parameters, cure_features)
+    logits = _susceptibility_logits(parameters, susceptibility_features)
     return sigmoid(logits)
 
 

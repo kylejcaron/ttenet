@@ -25,8 +25,13 @@ def _logit(p):
     return float(np.log(p / (1.0 - p)))
 
 
-def _params(k=5, hazard=0.5, cure=0.5, draws=None):
-    fields = (np.full(k, _logit(hazard)), np.zeros(0), np.array(_logit(cure)), np.zeros(0))
+def _params(k=5, hazard=0.5, susceptibility=0.5, draws=None):
+    fields = (
+        np.full(k, _logit(hazard)),
+        np.zeros(0),
+        np.array(_logit(susceptibility)),
+        np.zeros(0),
+    )
     if draws is not None:
         fields = tuple(np.broadcast_to(f, (draws,) + f.shape) for f in fields)
     return StageParameters(*fields)
@@ -47,45 +52,47 @@ def _fit(family, parameters, draws):
 def _constant_model(inputs, shared):
     """Constant-hazard family whose named sites are replayed from the fit."""
     hazard_logit = numpyro.sample("hazard_logit", dist.Normal(0.0, 1.0))
-    cure_logit = numpyro.sample("cure_logit", dist.Normal(0.0, 1.0))
+    susceptibility_logit = numpyro.sample("susceptibility_logit", dist.Normal(0.0, 1.0))
     logits = jnp.broadcast_to(hazard_logit, inputs.ages.shape)
     timing = TimingLaw(log_sigmoid(logits), log_sigmoid(-logits))
-    return EventLaw(timing, jnp.broadcast_to(cure_logit, inputs.ages.shape[-1:]))
+    return EventLaw(timing, jnp.broadcast_to(susceptibility_logit, inputs.ages.shape[-1:]))
 
 
 _constant_family = EventFamily(_constant_model, ProperTail())
 
 
-def _fixed_constant_family(hazard, cure):
+def _fixed_constant_family(hazard, susceptibility):
     """Zero-latent constant-hazard family: no sample or param sites at all."""
 
     def model(inputs, shared):
         logits = jnp.full(inputs.ages.shape, _logit(hazard))
         timing = TimingLaw(log_sigmoid(logits), log_sigmoid(-logits))
-        return EventLaw(timing, jnp.full(inputs.ages.shape[-1:], _logit(cure)))
+        return EventLaw(timing, jnp.full(inputs.ages.shape[-1:], _logit(susceptibility)))
 
     return EventFamily(model, ProperTail())
 
 
-def _weibull_family(scale, shape, cure):
+def _weibull_family(scale, shape, susceptibility):
     """Discretized Weibull: log S(a) = -(a / scale) ** shape on the [a, a + 1) bins."""
 
     def model(inputs, shared):
         ages = jnp.maximum(inputs.ages, 0).astype(jnp.float64)
         stay = -(((ages + 1.0) / scale) ** shape) + (ages / scale) ** shape
-        return EventLaw(TimingLaw(log1mexp(stay), stay), jnp.full(ages.shape[-1:], _logit(cure)))
+        return EventLaw(
+            TimingLaw(log1mexp(stay), stay), jnp.full(ages.shape[-1:], _logit(susceptibility))
+        )
 
     return EventFamily(model, ProperTail())
 
 
-def _grid_family(masses, atom, cure, tail):
+def _grid_family(masses, atom, susceptibility, tail):
     """Discrete susceptible masses on ages 0..A-1 plus a beyond-grid atom."""
 
     def model(inputs, shared):
         timing = timing_from_log_masses(
             jnp.log(jnp.asarray(masses, dtype=jnp.float64)), jnp.log(jnp.float64(atom)), inputs.ages
         )
-        return EventLaw(timing, jnp.full(inputs.ages.shape[-1:], _logit(cure)))
+        return EventLaw(timing, jnp.full(inputs.ages.shape[-1:], _logit(susceptibility)))
 
     return EventFamily(model, tail)
 
@@ -103,7 +110,7 @@ def _future_arrivals(draws, horizon, cohorts, day, cohort, count):
 
 def test_default_stage_fit_replays_identically_to_stage_parameters():
     draws = 3
-    parameters = _params(hazard=0.3, cure=0.7, draws=draws)
+    parameters = _params(hazard=0.3, susceptibility=0.7, draws=draws)
     fit = StageFit(parameters=parameters, losses=np.zeros(5))
     kwargs = dict(
         origins=[AS_OF - np.timedelta64(2, "D"), NAT],
@@ -128,7 +135,7 @@ def test_custom_family_replays_each_draws_named_sites():
     # day in draw 0 only, so each draw sees exactly its own posterior row.
     posterior = {
         "hazard_logit": jnp.array([50.0, -50.0, 50.0]),
-        "cure_logit": jnp.array([50.0, 50.0, -50.0]),
+        "susceptibility_logit": jnp.array([50.0, 50.0, -50.0]),
     }
     fit = _fit(_constant_family, posterior, 3)
     result = forecast_events(
@@ -149,7 +156,7 @@ def test_custom_family_replays_each_draws_named_sites():
 
 
 def test_zero_latent_family_replays_the_requested_draw_count_and_seed():
-    fit = _fit(_weibull_family(scale=3.0, shape=2.0, cure=0.8), {}, 4)
+    fit = _fit(_weibull_family(scale=3.0, shape=2.0, susceptibility=0.8), {}, 4)
     kwargs = dict(
         origins=[NAT],
         observed=[NAT],
@@ -197,7 +204,7 @@ def test_mass_grid_family_conditions_history_and_times_future_events():
 
 
 def test_weibull_family_respects_closures_and_deadlines_in_the_shared_kernel():
-    fit = _fit(_weibull_family(scale=2.0, shape=2.0, cure=1 - 1e-9), {}, 2)
+    fit = _fit(_weibull_family(scale=2.0, shape=2.0, susceptibility=1 - 1e-9), {}, 2)
     calendar = _calendar()
     allowed = np.ones(calendar.size, dtype=bool)
     allowed[int(np.flatnonzero(calendar == AS_OF + np.timedelta64(2, "D"))[0])] = False
@@ -230,7 +237,7 @@ def test_forecast_returns_runs_mixed_families_with_count_draws():
             "receipt_date": [None, None],
         }
     )
-    receipt = _fit(_weibull_family(scale=4.0, shape=2.0, cure=0.6), {}, 3)
+    receipt = _fit(_weibull_family(scale=4.0, shape=2.0, susceptibility=0.6), {}, 3)
     future = SalesForecast(
         cohorts=pd.DataFrame(
             {"item_id": ["f"], "sale_date": [str(AS_OF + np.timedelta64(1, "D"))]}
@@ -239,7 +246,7 @@ def test_forecast_returns_runs_mixed_families_with_count_draws():
     )
     result = forecast_returns(
         history,
-        _params(hazard=0.4, cure=0.9),
+        _params(hazard=0.4, susceptibility=0.9),
         receipt,
         calendar=_calendar(),
         horizon=12,
@@ -272,7 +279,7 @@ def test_custom_proper_receipt_open_return_uses_conditional_susceptibility():
             "receipt_date": [None],
         }
     )
-    receipt = _fit(_fixed_constant_family(hazard=0.5, cure=0.4), {}, 3)
+    receipt = _fit(_fixed_constant_family(hazard=0.5, susceptibility=0.4), {}, 3)
     uninitiated, open_receipts = expected_return_receipts(
         history, _params(), receipt, calendar=_calendar()
     )
@@ -331,14 +338,14 @@ def test_finite_initiation_family_bounds_an_unbounded_policy_window():
     initiation = _fit(_grid_family([0.5, 0.5], 0.0, 1 - 1e-12, FiniteTail(last_age=1)), {}, 1)
     calendar = _calendar()
     uninitiated, _ = expected_return_receipts(
-        history, initiation, _params(cure=0.5), calendar=calendar
+        history, initiation, _params(susceptibility=0.5), calendar=calendar
     )
     np.testing.assert_allclose(uninitiated, [0.5], rtol=1e-9)
     # Known finite initiation support still needs the calendar's actual
     # future closures and features through its last age.
     with pytest.raises(ValueError, match="calendar"):
         expected_return_receipts(
-            history, initiation, _params(cure=0.5), calendar=_calendar(horizon=0)
+            history, initiation, _params(susceptibility=0.5), calendar=_calendar(horizon=0)
         )
 
 
@@ -443,8 +450,8 @@ def test_singleton_fits_expand_expectations_to_sales_scenario_draws(has_history)
     )
     result = forecast_returns(
         history,
-        _params(cure=0.4),
-        _params(cure=0.4),
+        _params(susceptibility=0.4),
+        _params(susceptibility=0.4),
         future_sales=future,
         calendar=_calendar(),
         horizon=2,
@@ -457,7 +464,9 @@ def test_singleton_fits_expand_expectations_to_sales_scenario_draws(has_history)
 
 def test_one_unit_pools_absorb_absent_draws_and_keep_multiple_parent_dates():
     fit = _fit(
-        _constant_family, {"hazard_logit": jnp.full(3, 50.0), "cure_logit": jnp.full(3, 50.0)}, 3
+        _constant_family,
+        {"hazard_logit": jnp.full(3, 50.0), "susceptibility_logit": jnp.full(3, 50.0)},
+        3,
     )
     arrivals = np.array([[[1], [1], [0]], [[0], [0], [0]], [[0], [0], [1]]])
     result = forecast_events(

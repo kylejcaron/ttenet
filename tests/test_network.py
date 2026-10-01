@@ -16,7 +16,7 @@ def _certain_parameters(observations, shared):
 
 
 def _certain_process(**kwargs):
-    return ttenet.CureProcess(age_bins=1, parameter_model=_certain_parameters, **kwargs)
+    return ttenet.EventProcess(age_bins=1, parameter_model=_certain_parameters, **kwargs)
 
 
 def _empty_future():
@@ -105,7 +105,7 @@ def test_return_observations_update_shared_sales_posterior():
     child = ttenet.EventNode(
         "initiations",
         root,
-        ttenet.CureProcess(age_bins=1, deadline_days=0, parameter_model=_shared_event),
+        ttenet.EventProcess(age_bins=1, deadline_days=0, parameter_model=_shared_event),
     )
     model = ttenet.ForecastNetwork([root, child], shared_model=_shared_model)
     base = pd.DataFrame({"item_id": range(20), "sale_date": ["2026-01-01"] * 20})
@@ -234,7 +234,7 @@ def test_optimized_event_parameters_are_resolved_before_simulating():
     child = ttenet.EventNode(
         "initiations",
         root,
-        ttenet.CureProcess(age_bins=1, deadline_days=0, parameter_model=event_prior),
+        ttenet.EventProcess(age_bins=1, deadline_days=0, parameter_model=event_prior),
     )
     fitted = ttenet.ForecastNetwork([root, child]).fit(
         data,
@@ -266,7 +266,9 @@ def test_mixed_family_network_propagates_through_the_custom_stage():
     """Default -> Weibull -> default: the custom stage keeps its own named posterior."""
     root = ttenet.CountNode("sales")
     initiation = ttenet.EventNode("initiations", root, _certain_process(deadline_days=1))
-    receipt = ttenet.EventNode("receipts", initiation, ttenet.CureProcess(family=_weibull_receipts))
+    receipt = ttenet.EventNode(
+        "receipts", initiation, ttenet.EventProcess(family=_weibull_receipts)
+    )
     inspection = ttenet.EventNode(
         "inspections", receipt, _certain_process(deadline_days=1), event_column="inspection_date"
     )
@@ -296,7 +298,7 @@ def test_mixed_family_network_propagates_through_the_custom_stage():
     inputs = ttenet.TimingInputs(
         ages=jnp.array([[0, 3], [1, 4]]),
         features=jnp.zeros((2, 2, 0)),
-        cure_features=jnp.zeros((2, 0)),
+        susceptibility_features=jnp.zeros((2, 0)),
     )
     timing, logits = fit.timing(inputs, draw=1)
     scale = fit.parameters["scale"][1]
@@ -344,7 +346,7 @@ def test_custom_family_fit_records_the_shared_models_derived_values_per_draw():
     child = ttenet.EventNode(
         "initiations",
         root,
-        ttenet.CureProcess(deadline_days=3, family=_shared_rate_family),
+        ttenet.EventProcess(deadline_days=3, family=_shared_rate_family),
     )
     model = ttenet.ForecastNetwork([root, child], shared_model=_derived_shared_model)
     units = pd.DataFrame(
@@ -367,7 +369,7 @@ def test_custom_family_fit_records_the_shared_models_derived_values_per_draw():
     inputs = ttenet.TimingInputs(
         ages=jnp.array([[0, 2], [1, 3]]),
         features=jnp.zeros((2, 2, 0)),
-        cure_features=jnp.zeros((2, 0)),
+        susceptibility_features=jnp.zeros((2, 0)),
     )
     for draw in range(6):
         timing, _ = fit.timing(inputs, draw=draw)

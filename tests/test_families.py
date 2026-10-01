@@ -26,15 +26,17 @@ from ttenet.families import (
 )
 
 
-def _inputs(ages, features=None, cure_features=None) -> TimingInputs:
+def _inputs(ages, features=None, susceptibility_features=None) -> TimingInputs:
     ages = jnp.asarray(ages)
     days, cohorts = ages.shape
     if features is None:
         features = jnp.zeros((days, cohorts, 0))
-    if cure_features is None:
-        cure_features = jnp.zeros((cohorts, 0))
+    if susceptibility_features is None:
+        susceptibility_features = jnp.zeros((cohorts, 0))
     return TimingInputs(
-        ages=ages, features=jnp.asarray(features), cure_features=jnp.asarray(cure_features)
+        ages=ages,
+        features=jnp.asarray(features),
+        susceptibility_features=jnp.asarray(susceptibility_features),
     )
 
 
@@ -61,7 +63,7 @@ def test_weibull_fixed_parameters_have_no_sites_and_match_the_analytic_discrete_
     # Scale 6, shape 2, fixed logit .3: no NumPyro site is created, each cell
     # is the bin [a, a+1) of the continuous survival, and a negative age
     # evaluates age zero (the core masks it).
-    family = WeibullFamily(scale_prior=6.0, shape_prior=2.0, susceptibility_prior=0.3)
+    family = WeibullFamily(scale_prior=6.0, shape_prior=2.0, susceptibility_logit_prior=0.3)
     ages = np.array([[0, -1], [1, 2], [2, 3], [3, 4], [4, 5]])
     inputs = _inputs(ages)
     trace = handlers.trace(family.model).get_trace(inputs, None)
@@ -80,31 +82,39 @@ def test_weibull_fixed_parameters_have_no_sites_and_match_the_analytic_discrete_
 def test_weibull_prior_sites_and_regressor_semantics():
     # Distribution priors create exactly the named sites; regressors scale the
     # bin's cumulative-hazard increment by exp(x_t @ beta) and shift the
-    # susceptibility logit by z @ cure_beta.
+    # susceptibility logit by z @ susceptibility_beta.
     family = WeibullFamily(
         scale_prior=dist.LogNormal(np.log(5.0), 0.5), shape_prior=dist.LogNormal(np.log(2.0), 0.3)
     )
     rng = np.random.default_rng(5)
     ages = np.arange(4)[:, None] + np.array([[0, 3]])
     features = rng.normal(size=(4, 2, 2))
-    cure_features = rng.normal(size=(2, 1))
-    inputs = _inputs(ages, features, cure_features)
+    susceptibility_features = rng.normal(size=(2, 1))
+    inputs = _inputs(ages, features, susceptibility_features)
     trace = handlers.trace(handlers.seed(family.model, 1)).get_trace(inputs, None)
-    assert set(trace) == {"scale", "shape", "cure_intercept", "beta", "cure_beta"}
+    assert set(trace) == {
+        "scale",
+        "shape",
+        "susceptibility_intercept",
+        "beta",
+        "susceptibility_beta",
+    }
     assert all(site["type"] == "sample" for site in trace.values())
-    assert trace["beta"]["value"].shape == (2,) and trace["cure_beta"]["value"].shape == (1,)
+    assert trace["beta"]["value"].shape == (2,) and trace["susceptibility_beta"]["value"].shape == (
+        1,
+    )
     assert trace["scale"]["value"].shape == () and trace["shape"]["value"].shape == ()
 
-    beta, cure_beta = np.array([0.2, -0.4]), np.array([0.5])
+    beta, susceptibility_beta = np.array([0.2, -0.4]), np.array([0.5])
     law = _law(
         family,
         inputs,
         data={
             "scale": 6.0,
             "shape": 2.0,
-            "cure_intercept": 0.3,
+            "susceptibility_intercept": 0.3,
             "beta": beta,
-            "cure_beta": cure_beta,
+            "susceptibility_beta": susceptibility_beta,
         },
     )
     log_stay = _bin_log_stay(ages, 6.0, 2.0) * np.exp(features @ beta)
@@ -113,11 +123,13 @@ def test_weibull_prior_sites_and_regressor_semantics():
         np.exp(np.array(law.timing.log_hazard)), 1 - np.exp(log_stay), rtol=1e-5
     )
     np.testing.assert_allclose(
-        np.array(law.susceptibility_logits), 0.3 + cure_features @ cure_beta, rtol=1e-6
+        np.array(law.susceptibility_logits),
+        0.3 + susceptibility_features @ susceptibility_beta,
+        rtol=1e-6,
     )
 
     fixed_sites = handlers.trace(handlers.seed(WeibullFamily(6.0).model, 2)).get_trace(inputs, None)
-    assert set(fixed_sites) == {"cure_intercept", "beta", "cure_beta"}
+    assert set(fixed_sites) == {"susceptibility_intercept", "beta", "susceptibility_beta"}
 
 
 def test_weibull_masses_match_simulated_floor_of_continuous_weibull():
@@ -183,7 +195,7 @@ def test_weibull_family_is_static_jit_data_for_fixed_jax_values_and_prior_replay
     prior = WeibullFamily(dist.LogNormal(0.0, 1.0), dist.LogNormal(0.0, 1.0), dist.Normal(0.0, 2.0))
 
     def replay(family, inputs, scale, shape, intercept):
-        data = {"scale": scale, "shape": shape, "cure_intercept": intercept}
+        data = {"scale": scale, "shape": shape, "susceptibility_intercept": intercept}
         return handlers.substitute(family.model, data=data)(inputs, None)
 
     compiled = jax.jit(replay, static_argnums=0)
@@ -201,12 +213,12 @@ def test_weibull_family_is_static_jit_data_for_fixed_jax_values_and_prior_replay
         ({"scale_prior": -6.0}, ValueError),
         ({"scale_prior": np.inf}, ValueError),
         ({"scale_prior": 6.0, "shape_prior": 0.0}, ValueError),
-        ({"scale_prior": 6.0, "susceptibility_prior": np.nan}, ValueError),
+        ({"scale_prior": 6.0, "susceptibility_logit_prior": np.nan}, ValueError),
         ({"scale_prior": True}, TypeError),
         ({"scale_prior": "6"}, TypeError),
         ({"scale_prior": [6.0]}, TypeError),
         ({"scale_prior": 6.0, "shape_prior": np.array([2.0, 2.0])}, TypeError),
-        ({"scale_prior": 6.0, "susceptibility_prior": None}, TypeError),
+        ({"scale_prior": 6.0, "susceptibility_logit_prior": None}, TypeError),
     ],
 )
 def test_weibull_rejects_fixed_values_outside_its_domain(kwargs, error):

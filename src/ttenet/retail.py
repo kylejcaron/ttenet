@@ -14,8 +14,8 @@ from .network import FittedNetwork, ForecastNetwork
 from .processes import (
     CountNode,
     CountProcess,
-    CureProcess,
     EventNode,
+    EventProcess,
     _positive_integer,
 )
 
@@ -30,15 +30,15 @@ class RetailReturnModel:
     """
 
     sales: CountProcess | None = None
-    initiation: CureProcess = field(default_factory=lambda: CureProcess(deadline_days=90))
-    receipt: CureProcess = field(default_factory=CureProcess)
+    initiation: EventProcess = field(default_factory=lambda: EventProcess(deadline_days=90))
+    receipt: EventProcess = field(default_factory=EventProcess)
     shared_model: Callable | None = None
 
     def __post_init__(self):
-        if not isinstance(self.initiation, CureProcess) or not isinstance(
-            self.receipt, CureProcess
+        if not isinstance(self.initiation, EventProcess) or not isinstance(
+            self.receipt, EventProcess
         ):
-            raise TypeError("initiation and receipt must be CureProcess values")
+            raise TypeError("initiation and receipt must be EventProcess values")
         if self.receipt.deadline_days is not None:
             raise ValueError(
                 "retail receipts have no deadline; use ForecastNetwork for other event policies"
@@ -145,8 +145,8 @@ class FittedRetailReturnModel:
                 calendar=context.calendar,
                 initiation_features=initiation.features[:n],
                 receipt_features=receipt.features[:n],
-                initiation_cure_features=initiation.cure_features[:n],
-                receipt_cure_features=receipt.cure_features[:n],
+                initiation_susceptibility_features=initiation.susceptibility_features[:n],
+                receipt_susceptibility_features=receipt.susceptibility_features[:n],
                 initiation_allowed=initiation.allowed[:n],
                 receipt_allowed=receipt.allowed[:n],
             )

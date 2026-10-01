@@ -17,12 +17,12 @@ def _logit(p):
     return float(np.log(p / (1.0 - p)))
 
 
-def _params(k=5, hazard=0.5, cure=0.5, p=0, q=0):
+def _params(k=5, hazard=0.5, susceptibility=0.5, p=0, q=0):
     return StageParameters(
         age_logits=np.full(k, _logit(hazard)),
         beta=np.zeros((p,)),
-        cure_intercept=np.array(_logit(cure)),
-        cure_beta=np.zeros((q,)),
+        susceptibility_intercept=np.array(_logit(susceptibility)),
+        susceptibility_beta=np.zeros((q,)),
     )
 
 
@@ -186,8 +186,8 @@ def test_mismatched_posterior_draws_rejected():
     init3 = StageParameters(
         age_logits=np.zeros((3, 5)),
         beta=np.zeros((3, 0)),
-        cure_intercept=np.zeros((3,)),
-        cure_beta=np.zeros((3, 0)),
+        susceptibility_intercept=np.zeros((3,)),
+        susceptibility_beta=np.zeros((3, 0)),
     )
     future_sales = SalesForecast(
         cohorts=pd.DataFrame(
@@ -203,7 +203,7 @@ def test_mismatched_posterior_draws_rejected():
 
 def test_single_draw_broadcasts_against_future_count_draws():
     history = _history({"item_id": [], "sale_date": [], "initiation_date": [], "receipt_date": []})
-    params = _params(hazard=0.9, cure=1 - 1e-9)  # single draw
+    params = _params(hazard=0.9, susceptibility=1 - 1e-9)  # single draw
     future_sales = SalesForecast(
         cohorts=pd.DataFrame(
             {"item_id": ["f1"], "sale_date": [str(AS_OF + np.timedelta64(1, "D"))]}
@@ -235,7 +235,7 @@ def test_analytical_conditional_susceptibility_matches_closed_form():
             "receipt_date": [None],
         }
     )
-    receipt = _params(hazard=0.5, cure=0.4)
+    receipt = _params(hazard=0.5, susceptibility=0.4)
     result = forecast_returns(history, receipt, receipt, calendar=_calendar(), horizon=5, seed=0)
     np.testing.assert_allclose(result.expected_open_receipts, [1.0 / 7.0], rtol=1e-9)
     np.testing.assert_allclose(result.expected_existing_receipts, result.expected_open_receipts)
@@ -258,9 +258,9 @@ def test_day90_inclusive_vs_day91_policy_boundary_closed_form():
     assert history.frame["eligible"].all()  # both still within [0, policy_days]
 
     h, pi_init = 0.2, 0.6
-    init = _params(k=15, hazard=h, cure=pi_init)
+    init = _params(k=15, hazard=h, susceptibility=pi_init)
     receipt = _params(
-        k=15, hazard=h, cure=1 - 1e-9
+        k=15, hazard=h, susceptibility=1 - 1e-9
     )  # near-certain receipt susceptibility isolates p_initiate
     result = forecast_returns(history, init, receipt, calendar=_calendar(), horizon=5, seed=0)
 
@@ -289,8 +289,8 @@ def test_unbounded_initiation_deadline_uses_conditional_susceptibility_directly(
         policy_days=None,
     )
     h, pi_init = 0.3, 0.6
-    init = _params(k=10, hazard=h, cure=pi_init)
-    receipt = _params(k=10, hazard=h, cure=1 - 1e-9)
+    init = _params(k=10, hazard=h, susceptibility=pi_init)
+    receipt = _params(k=10, hazard=h, susceptibility=1 - 1e-9)
     calendar = _calendar()
     result = forecast_returns(history, init, receipt, calendar=calendar, horizon=5, seed=0)
 
@@ -311,7 +311,7 @@ def test_no_weekend_receipts():
             "receipt_date": [None],
         }
     )
-    params = _params(hazard=0.9, cure=1 - 1e-9)
+    params = _params(hazard=0.9, susceptibility=1 - 1e-9)
     calendar = _calendar()
     allowed = np.array([pd.Timestamp(d).weekday() < 5 for d in calendar])
     result = forecast_returns(
@@ -334,7 +334,7 @@ def test_same_day_initiation_and_receipt():
             "receipt_date": [None],
         }
     )
-    params = _params(hazard=1 - 1e-9, cure=1 - 1e-9)
+    params = _params(hazard=1 - 1e-9, susceptibility=1 - 1e-9)
     result = forecast_returns(history, params, params, calendar=_calendar(), horizon=3, seed=0)
     assert result.initiations[0, 0] == 1
     assert result.receipts[0, 0] == 1
@@ -365,8 +365,8 @@ def test_heterogeneous_origins_share_calendar_day_features():
     receipt = StageParameters(
         age_logits=age_logits,
         beta=beta,
-        cure_intercept=np.array(1000.0),  # sigmoid(1000) == 1.0 exactly
-        cure_beta=np.zeros((0,)),
+        susceptibility_intercept=np.array(1000.0),  # sigmoid(1000) == 1.0 exactly
+        susceptibility_beta=np.zeros((0,)),
     )
     init = _params(k=k, p=1)
 
@@ -412,8 +412,8 @@ def test_tail_bin_reused_and_no_artificial_receipt_deadline():
     params = StageParameters(
         age_logits=age_logits,
         beta=np.zeros((0,)),
-        cure_intercept=np.array(_logit(0.9)),
-        cure_beta=np.zeros((0,)),
+        susceptibility_intercept=np.array(_logit(0.9)),
+        susceptibility_beta=np.zeros((0,)),
     )
     result = forecast_returns(history, params, params, calendar=calendar, horizon=5, seed=0)
 
@@ -429,7 +429,7 @@ def test_tail_bin_reused_and_no_artificial_receipt_deadline():
     assert result.expected_open_receipts[0] > 0  # not artificially zeroed by an invented deadline
 
 
-def test_zero_cure_probability_suppresses_events():
+def test_zero_susceptibility_probability_suppresses_events():
     history = _history(
         {
             "item_id": ["a", "b"],
@@ -438,7 +438,7 @@ def test_zero_cure_probability_suppresses_events():
             "receipt_date": [None, None],
         }
     )
-    params = _params(hazard=0.9, cure=1e-22)  # essentially nobody is susceptible
+    params = _params(hazard=0.9, susceptibility=1e-22)  # essentially nobody is susceptible
     result = forecast_returns(history, params, params, calendar=_calendar(), horizon=20, seed=0)
     np.testing.assert_allclose(result.expected_open_receipts, [0.0], atol=1e-15)
     np.testing.assert_allclose(result.expected_uninitiated_receipts, [0.0], atol=1e-15)
@@ -459,7 +459,7 @@ def test_abandonment_lowers_expected_receipts_below_raw_susceptibility():
             "receipt_date": [None],
         }
     )
-    receipt = _params(hazard=0.3, cure=raw_pi)
+    receipt = _params(hazard=0.3, susceptibility=raw_pi)
     result = forecast_returns(history, receipt, receipt, calendar=_calendar(), horizon=5, seed=0)
     assert float(result.expected_open_receipts[0]) < raw_pi
     assert float(result.expected_open_receipts[0]) > 0.0
@@ -476,7 +476,7 @@ def test_expired_uninitiated_excluded_from_eligible():
         policy_days=90,
     )
     assert not history.frame["eligible"].iloc[0]  # far past the 90-day policy window
-    params = _params(hazard=0.9, cure=1 - 1e-9)
+    params = _params(hazard=0.9, susceptibility=1 - 1e-9)
     result = forecast_returns(history, params, params, calendar=_calendar(), horizon=10, seed=0)
     assert np.all(result.eligible == 0)
     assert np.all(result.initiations == 0)
@@ -491,7 +491,7 @@ def test_received_rows_excluded_from_simulation():
             "receipt_date": ["2026-01-10"],
         }
     )
-    params = _params(hazard=0.9, cure=1 - 1e-9)
+    params = _params(hazard=0.9, susceptibility=1 - 1e-9)
     result = forecast_returns(history, params, params, calendar=_calendar(), horizon=10, seed=0)
     assert np.all(result.eligible == 0)
     assert np.all(result.open_returns == 0)
@@ -513,8 +513,8 @@ def test_mass_conservation_and_expected_receipts_identity():
     }
     history = _history(raw)
     calendar = _calendar()
-    init = _params(hazard=0.3, cure=0.7)
-    receipt = _params(hazard=0.25, cure=0.6)
+    init = _params(hazard=0.3, susceptibility=0.7)
+    receipt = _params(hazard=0.25, susceptibility=0.6)
     future_sales = SalesForecast(
         cohorts=pd.DataFrame(
             {
@@ -554,7 +554,7 @@ def test_mass_conservation_and_expected_receipts_identity():
 
 def test_uncertain_future_counts_preserve_draws_without_averaging():
     history = _history({"item_id": [], "sale_date": [], "initiation_date": [], "receipt_date": []})
-    params = _params(hazard=0.9, cure=1 - 1e-9)
+    params = _params(hazard=0.9, susceptibility=1 - 1e-9)
     future_sales = SalesForecast(
         cohorts=pd.DataFrame(
             {"item_id": ["f1"], "sale_date": [str(AS_OF + np.timedelta64(1, "D"))]}
@@ -579,7 +579,7 @@ def test_counts_never_negative_or_exceed_remaining_population():
             "receipt_date": [None, None],
         }
     )
-    params = _params(hazard=0.6, cure=0.8)
+    params = _params(hazard=0.6, susceptibility=0.8)
     for seed in range(8):
         result = forecast_returns(
             history, params, params, calendar=_calendar(), horizon=25, seed=seed
@@ -641,7 +641,7 @@ def test_strong_susceptibility_does_not_cancel_remaining_event_probability():
     result = forecast_returns(
         history,
         certain_susceptible,
-        _params(hazard=0.5, cure=0.5),
+        _params(hazard=0.5, susceptibility=0.5),
         calendar=_calendar(),
         horizon=1,
     )
@@ -658,7 +658,7 @@ def test_strong_susceptibility_does_not_cancel_remaining_event_probability():
 def test_forecast_events_root_cohort_axis_and_conservation():
     # Historical and newly arriving cohorts retain separate event trajectories;
     # the aggregate stock conserves both sources.
-    params = _params(hazard=0.4, cure=0.6)
+    params = _params(hazard=0.4, susceptibility=0.6)
     origins = np.array(
         [AS_OF - np.timedelta64(2, "D"), np.datetime64("NaT", "D")], dtype="datetime64[D]"
     )
@@ -710,7 +710,7 @@ def test_forecast_events_deadline_freezes_pending_but_drops_eligible():
 
 
 def test_forecast_events_unbounded_deadline_keeps_eligible_equal_pending():
-    params = _params(hazard=0.3, cure=0.5)
+    params = _params(hazard=0.3, susceptibility=0.5)
     origins = np.array([AS_OF - np.timedelta64(10, "D")], dtype="datetime64[D]")
     observed = np.array([np.datetime64("NaT", "D")], dtype="datetime64[D]")
     horizon = 8
@@ -892,7 +892,7 @@ def test_count_pool_allocations_follow_the_prefix_law_moments():
     arrivals = np.zeros((draws, 4, 1), dtype=np.int64)
     arrivals[:, 0, 0] = n
     result = forecast_events(
-        _params(hazard=h, cure=pi),
+        _params(hazard=h, susceptibility=pi),
         origins=[np.datetime64("NaT", "D")],
         observed=[np.datetime64("NaT", "D")],
         arrivals=arrivals,
@@ -916,7 +916,7 @@ def test_count_pool_allocations_follow_the_prefix_law_moments():
 
 
 def test_seed_replay_is_exact_and_other_seeds_differ():
-    params = _params(hazard=0.4, cure=0.7)
+    params = _params(hazard=0.4, susceptibility=0.7)
     history = _history(
         {
             "item_id": ["a", "b"],
@@ -955,7 +955,7 @@ def test_long_event_free_history_is_conditioned_in_log_space():
         },
         policy_days=None,
     )
-    params = _params(hazard=0.5, cure=0.9)
+    params = _params(hazard=0.5, susceptibility=0.9)
     result = forecast_returns(
         history, params, params, calendar=_calendar(start="2015-01-01"), horizon=5
     )
@@ -985,7 +985,7 @@ def test_impossible_conditional_history_is_rejected_not_treated_as_cure():
 def test_single_unit_and_bulk_pools_share_the_same_law():
     # A cohort of exactly one unit in every draw and a bulk cohort fire with
     # the same per-unit probability on their arrival day.
-    params = _params(hazard=0.5, cure=1 - 1e-9)
+    params = _params(hazard=0.5, susceptibility=1 - 1e-9)
     draws = 400
     arrivals = np.zeros((draws, 1, 2), dtype=np.int64)
     arrivals[:, 0, 0] = 1

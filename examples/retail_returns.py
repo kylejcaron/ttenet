@@ -18,7 +18,7 @@ from numpyro_forecast import Horizon, predict
 
 from ttenet import (
     CountProcess,
-    CureProcess,
+    EventProcess,
     RetailData,
     RetailReturnModel,
     date_grid,
@@ -104,7 +104,7 @@ def initiation_covariates(frame, calendar):
     features = np.empty((len(frame), len(calendar), 2))
     features[:, :, 0] = product[:, None]
     features[:, :, 1] = np.sin(2 * np.pi * weekday / 7)[None, :]
-    return {"features": features, "cure_features": product[:, None]}
+    return {"features": features, "susceptibility_features": product[:, None]}
 
 
 def receipt_covariates(frame, calendar):
@@ -164,8 +164,8 @@ def run(steps=150, draws=40, seed=21, plot=None):
     )
     model = RetailReturnModel(
         sales=CountProcess(model=sales_model),
-        initiation=CureProcess(age_bins=16, deadline_days=90),
-        receipt=CureProcess(age_bins=16, allowed_weekdays=range(5)),
+        initiation=EventProcess(age_bins=16, deadline_days=90),
+        receipt=EventProcess(age_bins=16, allowed_weekdays=range(5)),
     )
     fitted = model.fit(
         data,

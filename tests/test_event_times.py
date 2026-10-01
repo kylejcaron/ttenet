@@ -37,26 +37,28 @@ def _probabilities(log_values) -> np.ndarray:
 
 
 def _constant_hazard_params(
-    hazard: float, cure_probability: float, num_bins: int = 3
+    hazard: float, susceptibility_probability: float, num_bins: int = 3
 ) -> StageParameters:
-    """StageParameters producing a flat hazard and a flat cure probability."""
+    """StageParameters producing a flat hazard and a flat susceptibility probability."""
     return StageParameters(
         age_logits=jnp.full((num_bins,), _logit(hazard)),
         beta=jnp.zeros(0),
-        cure_intercept=jnp.array(_logit(cure_probability)),
-        cure_beta=jnp.zeros(0),
+        susceptibility_intercept=jnp.array(_logit(susceptibility_probability)),
+        susceptibility_beta=jnp.zeros(0),
     )
 
 
-def _inputs(ages, features=None, cure_features=None) -> TimingInputs:
+def _inputs(ages, features=None, susceptibility_features=None) -> TimingInputs:
     ages = jnp.asarray(ages)
     days, cohorts = ages.shape
     if features is None:
         features = jnp.zeros((days, cohorts, 0))
-    if cure_features is None:
-        cure_features = jnp.zeros((cohorts, 0))
+    if susceptibility_features is None:
+        susceptibility_features = jnp.zeros((cohorts, 0))
     return TimingInputs(
-        ages=ages, features=jnp.asarray(features), cure_features=jnp.asarray(cure_features)
+        ages=ages,
+        features=jnp.asarray(features),
+        susceptibility_features=jnp.asarray(susceptibility_features),
     )
 
 
@@ -98,7 +100,7 @@ def _unit_log_probs(kernel: SurvivalKernel, days: int, cohorts: int) -> np.ndarr
 def test_unit_log_prob_matches_analytical_event_and_censor_probabilities():
     # h=.5 constant, pi=.4. Event on second exposed day: .4*.5*.5=.1.
     # Censor after two exposed days: .6+.4*.25=.7.
-    params = _constant_hazard_params(hazard=0.5, cure_probability=0.4)
+    params = _constant_hazard_params(hazard=0.5, susceptibility_probability=0.4)
     timing, logits = default_timing(params, _inputs([[0, 0], [1, 1]]))
     masks = _full_masks(2, 2)
     kernel = survival_kernel(timing, logits, allowed=masks, exposure=masks)
@@ -112,7 +114,7 @@ def test_pre_entry_conditions_susceptibility_on_known_survival():
     # h=.5, pi=.4. Two known event-free pre-entry days (S_pre=.25), then two
     # exposed days. Censored: ((1-pi)+pi*S_pre*S_post)/((1-pi)+pi*S_pre)=.625/.7.
     # Event on the first exposed day: conditioned pi is .1/.7, times h: 1/14.
-    params = _constant_hazard_params(hazard=0.5, cure_probability=0.4)
+    params = _constant_hazard_params(hazard=0.5, susceptibility_probability=0.4)
     timing, logits = default_timing(params, _inputs([[0, 0], [1, 1], [2, 2], [3, 3]]))
     pre_entry = jnp.array([[True], [True], [False], [False]])
     kernel = survival_kernel(
@@ -129,25 +131,30 @@ def test_calendar_hazard_variation_and_closures_match_probability_oracle():
     # starting one day later, and a calendar closure on day 1 for everyone.
     age_logits = np.array([-1.0, 0.0, 0.5, 1.0])
     beta = np.array([1.2])
-    cure_intercept, cure_beta = 0.3, np.array([0.7])
+    susceptibility_intercept, susceptibility_beta = 0.3, np.array([0.7])
     params = StageParameters(
-        jnp.array(age_logits), jnp.array(beta), jnp.array(cure_intercept), jnp.array(cure_beta)
+        jnp.array(age_logits),
+        jnp.array(beta),
+        jnp.array(susceptibility_intercept),
+        jnp.array(susceptibility_beta),
     )
     ages = np.array([[0, -1], [1, 0], [2, 1], [3, 2], [4, 3]])
     storm = np.zeros((5, 2, 1))
     storm[2, 0, 0] = 1.0
-    cure_features = np.array([[1.0], [-0.5]])
+    susceptibility_features = np.array([[1.0], [-0.5]])
     allowed = np.array([[True, True], [False, False], [True, True], [True, True], [True, True]])
 
     def kernel_for(ages, features, allowed):
-        timing, logits = default_timing(params, _inputs(ages, features, cure_features))
+        timing, logits = default_timing(params, _inputs(ages, features, susceptibility_features))
         return survival_kernel(
             timing, logits, allowed=jnp.asarray(allowed), exposure=jnp.asarray(ages >= 0)
         )
 
     def oracle_for(ages, features, allowed):
         hazard = 1 / (1 + np.exp(-(age_logits[np.clip(ages, 0, 3)] + features @ beta)))
-        pi = 1 / (1 + np.exp(-(cure_intercept + cure_features @ cure_beta)))
+        pi = 1 / (
+            1 + np.exp(-(susceptibility_intercept + susceptibility_features @ susceptibility_beta))
+        )
         return _oracle_masses(pi, hazard, allowed=allowed, exposure=ages >= 0)
 
     kernel = kernel_for(ages, storm, allowed)
@@ -220,7 +227,7 @@ def test_certain_hazard_day_absorbs_all_susceptible_mass():
 
 
 def test_empty_time_kernel_puts_all_mass_on_no_event():
-    params = _constant_hazard_params(hazard=0.5, cure_probability=0.4)
+    params = _constant_hazard_params(hazard=0.5, susceptibility_probability=0.4)
     timing, logits = default_timing(params, _inputs(jnp.zeros((0, 2), dtype=jnp.int32)))
     masks = _full_masks(0, 2)
     kernel = survival_kernel(timing, logits, allowed=masks, exposure=masks)
@@ -232,7 +239,7 @@ def test_empty_time_kernel_puts_all_mass_on_no_event():
 
 
 def test_kernel_unit_log_prob_treats_out_of_range_dates_as_impossible():
-    params = _constant_hazard_params(hazard=0.5, cure_probability=0.4)
+    params = _constant_hazard_params(hazard=0.5, susceptibility_probability=0.4)
     timing, logits = default_timing(params, _inputs([[0, 0], [1, 1]]))
     masks = _full_masks(2, 2)
     kernel = survival_kernel(timing, logits, allowed=masks, exposure=masks)
@@ -414,13 +421,13 @@ def test_default_timing_matches_stage_parameter_primitives():
     params = StageParameters(
         age_logits=jnp.array(rng.normal(size=4)),
         beta=jnp.array(rng.normal(size=p)),
-        cure_intercept=jnp.array(rng.normal()),
-        cure_beta=jnp.array(rng.normal(size=q)),
+        susceptibility_intercept=jnp.array(rng.normal()),
+        susceptibility_beta=jnp.array(rng.normal(size=q)),
     )
     ages = jnp.array(np.arange(days)[:, None] + rng.integers(0, 6, size=(1, cohorts)))
     features = jnp.array(rng.normal(size=(days, cohorts, p)))
-    cure_features = jnp.array(rng.normal(size=(cohorts, q)))
-    law = default_timing(params, TimingInputs(ages, features, cure_features))
+    susceptibility_features = jnp.array(rng.normal(size=(cohorts, q)))
+    law = default_timing(params, TimingInputs(ages, features, susceptibility_features))
     assert isinstance(law, EventLaw)
     timing, logits = law.timing, law.susceptibility_logits
     hazard = np.array(stage_hazard(params, ages, features))
@@ -429,7 +436,9 @@ def test_default_timing_matches_stage_parameter_primitives():
         _probabilities(timing.log_survival_step), 1 - hazard, rtol=1e-4, atol=1e-6
     )
     np.testing.assert_allclose(
-        np.array(jax.nn.sigmoid(logits)), np.array(susceptibility(params, cure_features)), rtol=1e-6
+        np.array(jax.nn.sigmoid(logits)),
+        np.array(susceptibility(params, susceptibility_features)),
+        rtol=1e-6,
     )
 
 
@@ -441,7 +450,7 @@ def test_long_history_underflow_stays_finite_in_log_space():
     # below float range, yet log masses stay finite and the censored
     # likelihood is exactly the cured mass.
     days, pi = 5000, 0.4
-    params = _constant_hazard_params(hazard=0.5, cure_probability=pi)
+    params = _constant_hazard_params(hazard=0.5, susceptibility_probability=pi)
     ages = jnp.broadcast_to(jnp.arange(days)[:, None], (days, 2))
     timing, logits = default_timing(params, _inputs(ages))
     masks = _full_masks(days, 2)
@@ -517,7 +526,7 @@ def test_log1mexp_boundaries_and_gradients():
 
 
 def test_survival_kernel_rejects_overlapping_pre_entry_and_exposure():
-    params = _constant_hazard_params(hazard=0.5, cure_probability=0.4)
+    params = _constant_hazard_params(hazard=0.5, susceptibility_probability=0.4)
     timing, logits = default_timing(params, _inputs([[0], [1], [2]]))
     allowed = _full_masks(3, 1)
     pre_entry = jnp.array([[True], [True], [False]])

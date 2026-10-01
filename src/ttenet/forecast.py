@@ -24,7 +24,7 @@ family reruns its ``family.model`` with the draw's named sites
 and resolved shared values substituted, so new ages, features and horizons
 re-evaluate the family rather than extend a frozen training grid. The host
 only prepares ``TimingInputs`` (ages, regressors) and administrative masks
-(closures, exposure, known pre-entry survival); cure marginalization,
+(closures, exposure, known pre-entry survival); susceptibility marginalization,
 conditioning and date masses come from ``event_times.survival_kernel``.
 
 Native allocation driver
@@ -172,24 +172,35 @@ def _stack_draws(value, base_ndim, name):
 def _normalize_stage_parameters(parameters, name):
     age_logits = _stack_draws(parameters.age_logits, 1, f"{name}.age_logits")
     beta = _stack_draws(parameters.beta, 1, f"{name}.beta")
-    cure_intercept = _stack_draws(parameters.cure_intercept, 0, f"{name}.cure_intercept")
-    cure_beta = _stack_draws(parameters.cure_beta, 1, f"{name}.cure_beta")
-    draws = {age_logits.shape[0], beta.shape[0], cure_intercept.shape[0], cure_beta.shape[0]}
+    susceptibility_intercept = _stack_draws(
+        parameters.susceptibility_intercept, 0, f"{name}.susceptibility_intercept"
+    )
+    susceptibility_beta = _stack_draws(
+        parameters.susceptibility_beta, 1, f"{name}.susceptibility_beta"
+    )
+    draws = {
+        age_logits.shape[0],
+        beta.shape[0],
+        susceptibility_intercept.shape[0],
+        susceptibility_beta.shape[0],
+    }
     draws.discard(1)
     if len(draws) > 1:
         raise ValueError(
             f"{name} parameter fields disagree on posterior draw count: {sorted(draws)}"
         )
     d = next(iter(draws)) if draws else 1
-    return StageParameters(age_logits, beta, cure_intercept, cure_beta), d
+    return StageParameters(age_logits, beta, susceptibility_intercept, susceptibility_beta), d
 
 
 def _broadcast_stage(params, d):
     return StageParameters(
         np.broadcast_to(params.age_logits, (d,) + params.age_logits.shape[1:]),
         np.broadcast_to(params.beta, (d,) + params.beta.shape[1:]),
-        np.broadcast_to(params.cure_intercept, (d,) + params.cure_intercept.shape[1:]),
-        np.broadcast_to(params.cure_beta, (d,) + params.cure_beta.shape[1:]),
+        np.broadcast_to(
+            params.susceptibility_intercept, (d,) + params.susceptibility_intercept.shape[1:]
+        ),
+        np.broadcast_to(params.susceptibility_beta, (d,) + params.susceptibility_beta.shape[1:]),
     )
 
 
@@ -229,7 +240,10 @@ def _resolve_stage(parameters, name):
         fit = StageFit(_broadcast_stage(normalized, draws), np.zeros(0))
     widths = None
     if fit.family is None:
-        widths = (int(fit.parameters.beta.shape[-1]), int(fit.parameters.cure_beta.shape[-1]))
+        widths = (
+            int(fit.parameters.beta.shape[-1]),
+            int(fit.parameters.susceptibility_beta.shape[-1]),
+        )
     return _Stage(fit, fit.draws, widths, _stage_tail(fit))
 
 
@@ -291,11 +305,11 @@ def _prepare_features(features, n_rows, calendar_len, width, name):
     return arr
 
 
-def _prepare_cure_features(features, n_rows, width, name):
+def _prepare_susceptibility_features(features, n_rows, width, name):
     if features is None:
         if width:
             raise ValueError(
-                f"{name} is required because the fitted model has cure feature width {width}"
+                f"{name} is required because the fitted model has susceptibility feature width {width}"
             )
         return np.zeros((n_rows, 0), dtype=np.float64)
     arr = np.asarray(features, dtype=np.float64)
@@ -323,16 +337,20 @@ class _StageInputs(NamedTuple):
     """Validated calendar-indexed regressors and closures of one stage's rows."""
 
     features: Any  # [N, T, P]
-    cure_features: Any  # [N, Q]
+    susceptibility_features: Any  # [N, Q]
     allowed: Any  # [N, T]
 
 
-def _stage_inputs(stage, features, cure_features, allowed, n_rows, calendar_len, *, prefix=""):
+def _stage_inputs(
+    stage, features, susceptibility_features, allowed, n_rows, calendar_len, *, prefix=""
+):
     """Validate a stage's host regressors; a custom family's widths are its own."""
     p, q = stage.widths if stage.widths is not None else (None, None)
     return _StageInputs(
         _prepare_features(features, n_rows, calendar_len, p, f"{prefix}features"),
-        _prepare_cure_features(cure_features, n_rows, q, f"{prefix}cure_features"),
+        _prepare_susceptibility_features(
+            susceptibility_features, n_rows, q, f"{prefix}susceptibility_features"
+        ),
         _prepare_allowed(allowed, n_rows, calendar_len, f"{prefix}allowed"),
     )
 
@@ -419,7 +437,7 @@ class _AgeWindow(NamedTuple):
 
     ages: Any  # [A, N]
     features: Any  # [A, N, P]
-    cure_features: Any  # [N, Q]
+    susceptibility_features: Any  # [N, Q]
     allowed: Any  # [A, N]
     pre_entry: Any  # [A, N] known event-free ages
     exposure: Any  # [A, N] ages still able to fire
@@ -447,7 +465,7 @@ def _age_window(inputs, rows, origin_idx, span, *, known_through, exposed_throug
     return _AgeWindow(
         ages=ages,
         features=inputs.features[row_index, index],
-        cure_features=inputs.cure_features[rows],
+        susceptibility_features=inputs.susceptibility_features[rows],
         allowed=np.where(within, inputs.allowed[row_index, index], True),
         pre_entry=ages <= known_through,
         exposure=(ages > known_through) & (ages <= exposed_through),
@@ -457,7 +475,7 @@ def _age_window(inputs, rows, origin_idx, span, *, known_through, exposed_throug
 def _window_kernel(fit, draw, window):
     """The shared kernel of one posterior draw on an age window."""
     timing, logits = fit.timing(
-        TimingInputs(window.ages, window.features, window.cure_features), draw=draw
+        TimingInputs(window.ages, window.features, window.susceptibility_features), draw=draw
     )
     return survival_kernel(
         timing,
@@ -485,7 +503,7 @@ class _PoolLayout(NamedTuple):
     """Draw-independent description of one pool partition over the forecast days."""
 
     features: Any  # [horizon, pools, P]
-    cure_features: Any  # [pools, Q]
+    susceptibility_features: Any  # [pools, Q]
     allowed: Any  # [horizon, pools]
     cohort: Any  # [pools] root-cohort index of each pool
     historical: Any  # [h] partition positions of pools pending at as_of
@@ -511,7 +529,7 @@ class _PoolInputs(NamedTuple):
     entry_logits: Any  # [h] susceptibility logits conditioned on the event-free run to as_of
     historical: Any  # [h]
     features: Any  # [horizon, pools, P]
-    cure_features: Any  # [pools, Q]
+    susceptibility_features: Any  # [pools, Q]
     allowed: Any  # [horizon, pools]
 
 
@@ -525,7 +543,7 @@ def _pool_model(inputs, data=None, *, fit, draw, deadline, counted):
     h = Horizon.from_data(inputs.allowed, data)
     ages = jnp.arange(1, h.duration + 1)[:, None] - inputs.parent_day[None, :]
     timing, logits = fit.timing(
-        TimingInputs(ages, inputs.features, inputs.cure_features), draw=draw
+        TimingInputs(ages, inputs.features, inputs.susceptibility_features), draw=draw
     )
     logits = logits.at[inputs.historical].set(inputs.entry_logits)
     kernel = survival_kernel(
@@ -566,7 +584,7 @@ def _draw_forecast(key, draw, fit, history, unit, bulk, *, deadline, num_cohorts
             entry_logits[layout.entry_rows],
             layout.historical,
             layout.features,
-            layout.cure_features,
+            layout.susceptibility_features,
             layout.allowed,
         )
         program = functools.partial(
@@ -664,7 +682,7 @@ def _partition(index, counts, parent_days, pool_cohorts, inputs, future_idx):
     cohorts = pool_cohorts[index]
     layout = _PoolLayout(
         features=inputs.features[cohorts[:, None], future_idx[None, :]].transpose(1, 0, 2),
-        cure_features=inputs.cure_features[cohorts],
+        susceptibility_features=inputs.susceptibility_features[cohorts],
         allowed=inputs.allowed[cohorts[:, None], future_idx[None, :]].T,
         cohort=cohorts,
         historical=np.zeros(0, dtype=np.int64),
@@ -683,7 +701,7 @@ def forecast_events(
     as_of,
     horizon,
     features=None,
-    cure_features=None,
+    susceptibility_features=None,
     allowed=None,
     deadline_days=None,
     seed=0,
@@ -762,7 +780,9 @@ def forecast_events(
     cal = _validate_calendar(calendar, as_of, horizon, earliest_origin, as_of)
     calendar_len = int(cal.size)
     asof_idx = int(_elapsed(cal[0], as_of))
-    inputs = _stage_inputs(stage, features, cure_features, allowed, n_cohorts, calendar_len)
+    inputs = _stage_inputs(
+        stage, features, susceptibility_features, allowed, n_cohorts, calendar_len
+    )
 
     already_done = event_known & (observed <= as_of)
     initial_pending_mask = origin_known & (origins <= as_of) & ~already_done
@@ -866,7 +886,7 @@ class _Stream(NamedTuple):
     origin_idx: Any  # [N] calendar index of each row's sale
     features: Any  # [T, N, P] calendar-indexed receipt regressors of the rows
     allowed: Any  # [T, N]
-    cure_features: Any  # [N, Q]
+    susceptibility_features: Any  # [N, Q]
     first_future: Any  # calendar index of the first day after as_of
 
 
@@ -885,7 +905,8 @@ def _completion(fit, draw, stream, start, span):
     columns = jnp.arange(n)[None, :]
     allowed = jnp.where(calendar_day < calendar_len, stream.allowed[index, columns], True)
     timing, logits = fit.timing(
-        TimingInputs(ages, stream.features[index, columns], stream.cure_features), draw=draw
+        TimingInputs(ages, stream.features[index, columns], stream.susceptibility_features),
+        draw=draw,
     )
     kernel = survival_kernel(timing, logits, allowed=allowed, exposure=jnp.ones_like(allowed))
     return _window_probability(kernel, eventual=False)
@@ -918,7 +939,9 @@ def _draw_expectations(
             # Proper receipt: every initiated susceptible unit eventually arrives.
             initiates = _window_probability(kernel, eventual=not init_bounded)
             _, recv_logits = recv_fit.timing(
-                TimingInputs(recv_probe.ages, recv_probe.features, recv_probe.cure_features),
+                TimingInputs(
+                    recv_probe.ages, recv_probe.features, recv_probe.susceptibility_features
+                ),
                 draw=recv_draw,
             )
             uninitiated = jnp.sum(initiates * sigmoid(recv_logits))
@@ -1049,7 +1072,7 @@ def _eligible_windows(init, recv, rows, origin_idx, age0, init_end, recv_end, as
         origin_idx=origin_idx,
         features=recv.features[rows].transpose(1, 0, 2),
         allowed=recv.allowed[rows].T,
-        cure_features=recv.cure_features[rows],
+        susceptibility_features=recv.susceptibility_features[rows],
         first_future=np.int64(asof_idx + 1),
     )
     stationary = _age_window(
@@ -1072,8 +1095,8 @@ def expected_return_receipts(
     calendar,
     initiation_features=None,
     receipt_features=None,
-    initiation_cure_features=None,
-    receipt_cure_features=None,
+    initiation_susceptibility_features=None,
+    receipt_susceptibility_features=None,
     initiation_allowed=None,
     receipt_allowed=None,
 ):
@@ -1112,7 +1135,7 @@ def expected_return_receipts(
     init = _stage_inputs(
         init_stage,
         initiation_features,
-        initiation_cure_features,
+        initiation_susceptibility_features,
         initiation_allowed,
         n_hist,
         calendar_len,
@@ -1121,7 +1144,7 @@ def expected_return_receipts(
     recv = _stage_inputs(
         recv_stage,
         receipt_features,
-        receipt_cure_features,
+        receipt_susceptibility_features,
         receipt_allowed,
         n_hist,
         calendar_len,
@@ -1175,7 +1198,7 @@ def expected_return_receipts(
         if not np.all(np.isfinite(values)):
             raise ValueError(
                 f"{name} as-of conditioning produced a nonfinite expectation -- an impossible or "
-                "degenerate conditional history (an infinite hazard/cure logit combined with a "
+                "degenerate conditional history (an infinite hazard/susceptibility logit combined with a "
                 "fully decayed survival) is rejected rather than silently treated as certain cure"
             )
     return np.asarray(uninitiated, dtype=np.float64), np.asarray(open_receipts, dtype=np.float64)
@@ -1203,8 +1226,8 @@ def forecast_returns(
     future_sales=None,
     initiation_features=None,
     receipt_features=None,
-    initiation_cure_features=None,
-    receipt_cure_features=None,
+    initiation_susceptibility_features=None,
+    receipt_susceptibility_features=None,
     initiation_allowed=None,
     receipt_allowed=None,
     seed=0,
@@ -1251,7 +1274,7 @@ def forecast_returns(
     init = _stage_inputs(
         init_stage,
         initiation_features,
-        initiation_cure_features,
+        initiation_susceptibility_features,
         initiation_allowed,
         n_total,
         calendar_len,
@@ -1260,7 +1283,7 @@ def forecast_returns(
     recv = _stage_inputs(
         recv_stage,
         receipt_features,
-        receipt_cure_features,
+        receipt_susceptibility_features,
         receipt_allowed,
         n_total,
         calendar_len,
@@ -1292,7 +1315,7 @@ def forecast_returns(
         as_of=as_of,
         horizon=horizon,
         features=init.features,
-        cure_features=init.cure_features,
+        susceptibility_features=init.susceptibility_features,
         allowed=init.allowed,
         deadline_days=policy_days,
         seed=init_seed,
@@ -1311,7 +1334,7 @@ def forecast_returns(
         as_of=as_of,
         horizon=horizon,
         features=recv.features,
-        cure_features=recv.cure_features,
+        susceptibility_features=recv.susceptibility_features,
         allowed=recv.allowed,
         deadline_days=None,  # retail receipts have no imposed deadline
         seed=recv_seed,
@@ -1329,8 +1352,8 @@ def forecast_returns(
         calendar=cal,
         initiation_features=init.features[:n_hist],
         receipt_features=recv.features[:n_hist],
-        initiation_cure_features=init.cure_features[:n_hist],
-        receipt_cure_features=recv.cure_features[:n_hist],
+        initiation_susceptibility_features=init.susceptibility_features[:n_hist],
+        receipt_susceptibility_features=recv.susceptibility_features[:n_hist],
         initiation_allowed=init.allowed[:n_hist],
         receipt_allowed=recv.allowed[:n_hist],
     )

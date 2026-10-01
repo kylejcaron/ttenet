@@ -53,7 +53,7 @@ _STAGES = ("initiation", "receipt")
     data_fields=[
         "ages",
         "features",
-        "cure_features",
+        "susceptibility_features",
         "at_risk",
         "allowed",
         "event_index",
@@ -71,7 +71,7 @@ class StageObservations:
     ``"receipt"``); negative before the clock starts.
     ``features: [N, T, P]`` -- time-varying hazard regressors, calendar-day
     indexed.
-    ``cure_features: [N, Q]`` -- static susceptibility regressors.
+    ``susceptibility_features: [N, Q]`` -- static susceptibility regressors.
     ``at_risk: [N, T]`` -- observed exposure window: ``True`` for every
     calendar day the unit was under observation *from its entry date
     inclusive* through and including its event or censoring day, clipped at
@@ -89,7 +89,7 @@ class StageObservations:
     likelihood. When supplied, the cumulative survival over these days
     shifts the susceptibility logit at entry, so a unit's already-known
     event-free run before it entered the observed snapshot still informs
-    its posterior cure probability without re-litigating a likelihood
+    its posterior susceptibility probability without re-litigating a likelihood
     contribution for those days directly.
     ``exposure: [N, T] | None`` -- administrative exposure of the generative
     law: ``True`` from the unit's entry (``max(origin, entry)``) through
@@ -109,7 +109,7 @@ class StageObservations:
 
     ages: Any
     features: Any
-    cure_features: Any
+    susceptibility_features: Any
     at_risk: Any
     allowed: Any
     event_index: Any
@@ -117,7 +117,7 @@ class StageObservations:
     exposure: Any = None
 
 
-_DRAW_AXES = {"age_logits": 2, "beta": 2, "cure_intercept": 1, "cure_beta": 2}
+_DRAW_AXES = {"age_logits": 2, "beta": 2, "susceptibility_intercept": 1, "susceptibility_beta": 2}
 
 
 def _fit_parameter_leaves(parameters, family):
@@ -206,7 +206,7 @@ class StageFit:
         if self.num_samples is not None:
             return int(self.num_samples)
         if self.family is None:
-            return int(np.shape(self.parameters.cure_intercept)[0])
+            return int(np.shape(self.parameters.susceptibility_intercept)[0])
         return int(np.shape(tree_util.tree_leaves((dict(self.parameters), self.shared))[0])[0])
 
     def timing(self, inputs: TimingInputs, *, draw, key=None) -> EventLaw:
@@ -238,7 +238,7 @@ def _select_rows(
     if array is None:
         return None
     array = np.asarray(array)
-    required_ndim = {"features": 3, "cure_features": 2, "allowed": 2}[name]
+    required_ndim = {"features": 3, "susceptibility_features": 2, "allowed": 2}[name]
     if array.ndim != required_ndim:
         raise ValueError(f"{name} must have {required_ndim} dimensions")
     if name != "allowed" and not np.isfinite(array).all():
@@ -391,7 +391,7 @@ def _observation_allowed(allowed, row_mask, total_rows, num_rows, num_days):
 
 def _normalize_observation_arrays(
     features: Any | None,
-    cure_features: Any | None,
+    susceptibility_features: Any | None,
     allowed: Any | None,
     row_mask: np.ndarray,
     total_rows: int,
@@ -407,10 +407,14 @@ def _normalize_observation_arrays(
             raise ValueError("features must be indexed against the exact calendar length")
         features_arr = features_full
 
-    cure_full = _select_rows(cure_features, row_mask, total_rows, name="cure_features")
-    cure_arr = np.zeros((num_rows, 0)) if cure_full is None else cure_full
+    susceptibility_full = _select_rows(
+        susceptibility_features, row_mask, total_rows, name="susceptibility_features"
+    )
+    susceptibility_arr = (
+        np.zeros((num_rows, 0)) if susceptibility_full is None else susceptibility_full
+    )
     allowed_arr = _observation_allowed(allowed, row_mask, total_rows, num_rows, num_days)
-    return features_arr, cure_arr, allowed_arr
+    return features_arr, susceptibility_arr, allowed_arr
 
 
 def make_event_observations(
@@ -423,7 +427,7 @@ def make_event_observations(
     deadline_days: int | None = None,
     entry_dates: Any | None = None,
     features: Any | None = None,
-    cure_features: Any | None = None,
+    susceptibility_features: Any | None = None,
     allowed: Any | None = None,
 ) -> StageObservations:
     """Build calendar-indexed :class:`StageObservations` for one generic event stage.
@@ -448,7 +452,7 @@ def make_event_observations(
     contributes no new information given that entry and is excluded
     entirely (not zeroed out).
 
-    ``features`` (``[frame rows, len(calendar), P]``), ``cure_features``
+    ``features`` (``[frame rows, len(calendar), P]``), ``susceptibility_features``
     (``[frame rows, Q]``), and ``allowed`` (``[len(calendar)]`` or
     ``[frame rows, len(calendar)]``) are indexed against the *full* frame
     row order, matching every row -- including rows this stage will
@@ -480,13 +484,13 @@ def make_event_observations(
         as_of_day,
         entry_dates is not None,
     )
-    features_arr, cure_arr, allowed_arr = _normalize_observation_arrays(
-        features, cure_features, allowed, row_mask, total_rows, calendar_arr.shape[0]
+    features_arr, susceptibility_arr, allowed_arr = _normalize_observation_arrays(
+        features, susceptibility_features, allowed, row_mask, total_rows, calendar_arr.shape[0]
     )
     return StageObservations(
         ages=jnp.asarray(ages),
         features=jnp.asarray(features_arr, dtype=jnp.float32),
-        cure_features=jnp.asarray(cure_arr, dtype=jnp.float32),
+        susceptibility_features=jnp.asarray(susceptibility_arr, dtype=jnp.float32),
         at_risk=jnp.asarray(at_risk),
         allowed=jnp.asarray(allowed_arr),
         event_index=jnp.asarray(event_index),
@@ -501,7 +505,7 @@ def make_observations(
     calendar: Any,
     *,
     features: Any | None = None,
-    cure_features: Any | None = None,
+    susceptibility_features: Any | None = None,
     allowed: Any | None = None,
 ) -> StageObservations:
     """Build calendar-indexed :class:`StageObservations` for one stage.
@@ -514,13 +518,13 @@ def make_observations(
     ``"initiation"`` uses every row of ``history.frame`` (all historical
     sales); ``"receipt"`` uses only rows with an observed initiation date,
     and resets the clock origin to that initiation date. ``features``
-    (``[frame rows, len(calendar), P]``), ``cure_features``
+    (``[frame rows, len(calendar), P]``), ``susceptibility_features``
     (``[frame rows, Q]``), and ``allowed`` (``[len(calendar)]`` or
     ``[frame rows, len(calendar)]``) are indexed against the *full*
     ``history.frame`` row order; for ``"receipt"`` the matching row subset
-    is selected automatically so feature/cure/mask rows stay aligned with
+    is selected automatically so feature/susceptibility/mask rows stay aligned with
     the units actually observed in that stage. Omitted arrays default to
-    zero-width features/cure-features or an all-allowed mask. No
+    zero-width features/susceptibility-features or an all-allowed mask. No
     conditional-entry snapshot semantics here (``entry_dates`` is always
     ``None``); existing public behavior is maintained except that
     ``policy_days=None`` now means an unbounded initiation deadline.
@@ -543,7 +547,7 @@ def make_observations(
         calendar=calendar,
         deadline_days=deadline_days,
         features=features,
-        cure_features=cure_features,
+        susceptibility_features=susceptibility_features,
         allowed=allowed,
     )
 
@@ -558,7 +562,7 @@ def timing_inputs(observations: StageObservations) -> TimingInputs:
     return TimingInputs(
         ages=jnp.asarray(observations.ages).T,
         features=jnp.moveaxis(features, 0, 1),
-        cure_features=jnp.asarray(observations.cure_features),
+        susceptibility_features=jnp.asarray(observations.susceptibility_features),
     )
 
 
@@ -717,17 +721,17 @@ def sample_stage_parameters(
       recorded as ``age_logits``.
     - ``beta ~ Normal(0, 1)^P``: linear effects of the time-varying hazard
       regressors.
-    - ``cure_intercept ~ Normal(0, 2)``: logit susceptibility intercept.
-    - ``cure_beta ~ Normal(0, 1)^Q``: linear effects of the static
+    - ``susceptibility_intercept ~ Normal(0, 2)``: logit susceptibility intercept.
+    - ``susceptibility_beta ~ Normal(0, 1)^Q``: linear effects of the static
       susceptibility regressors.
 
     Extracted from ``stage_model`` so a custom NumPyro prior callback (e.g.
-    ``CureProcess.parameter_model``) can sample or otherwise construct its
+    ``EventProcess.parameter_model``) can sample or otherwise construct its
     own :class:`StageParameters` under a caller-controlled scope while
     reusing these exact sample sites and priors when no override is given.
     """
     num_features = observations.features.shape[-1]
-    num_cure_features = observations.cure_features.shape[-1]
+    num_susceptibility_features = observations.susceptibility_features.shape[-1]
 
     age_scale = numpyro.sample("age_scale", dist.HalfNormal(1.0))
     age_init = numpyro.sample("age_init", dist.Normal(0.0, 2.0))
@@ -738,13 +742,17 @@ def sample_stage_parameters(
     age_logits = numpyro.deterministic("age_logits", age_logits)
 
     beta = numpyro.sample("beta", dist.Normal(0.0, 1.0).expand([num_features]).to_event(1))
-    cure_intercept = numpyro.sample("cure_intercept", dist.Normal(0.0, 2.0))
-    cure_beta = numpyro.sample(
-        "cure_beta", dist.Normal(0.0, 1.0).expand([num_cure_features]).to_event(1)
+    susceptibility_intercept = numpyro.sample("susceptibility_intercept", dist.Normal(0.0, 2.0))
+    susceptibility_beta = numpyro.sample(
+        "susceptibility_beta",
+        dist.Normal(0.0, 1.0).expand([num_susceptibility_features]).to_event(1),
     )
 
     return StageParameters(
-        age_logits=age_logits, beta=beta, cure_intercept=cure_intercept, cure_beta=cure_beta
+        age_logits=age_logits,
+        beta=beta,
+        susceptibility_intercept=susceptibility_intercept,
+        susceptibility_beta=susceptibility_beta,
     )
 
 
@@ -923,7 +931,7 @@ def fit_stage(
         raise ValueError("fitting requires at least one observed or censored item")
     if (
         not np.isfinite(observations.features).all()
-        or not np.isfinite(observations.cure_features).all()
+        or not np.isfinite(observations.susceptibility_features).all()
     ):
         raise ValueError("fitting requires finite feature values")
     if family is not None:

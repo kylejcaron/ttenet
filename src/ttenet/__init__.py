@@ -37,7 +37,7 @@ from .models import (
     stage_model,
 )
 from .network import FittedNetwork, ForecastNetwork, NetworkForecast
-from .processes import CountNode, CountProcess, CureProcess, EventNode
+from .processes import CountNode, CountProcess, EventNode, EventProcess
 from .retail import FittedRetailReturnModel, RetailReturnModel
 from .survival import (
     StageParameters,
@@ -50,7 +50,7 @@ __all__ = [
     "CohortEventTime",
     "CountNode",
     "CountProcess",
-    "CureProcess",
+    "EventProcess",
     "EventFamily",
     "EventForecast",
     "EventLaw",

@@ -37,7 +37,7 @@ import numpy as np
 from jax import lax
 from jax.nn import log_sigmoid
 
-from .survival import StageParameters, _cure_logits, _hazard_logits
+from .survival import StageParameters, _hazard_logits, _susceptibility_logits
 
 _LOG_HALF = math.log(0.5)
 
@@ -49,12 +49,12 @@ class TimingInputs(NamedTuple):
         date; negative before the parent date. Calendar closures do not
         pause age.
     features: ``[..., time, cohort, P]`` time-varying hazard regressors.
-    cure_features: ``[..., cohort, Q]`` static susceptibility regressors.
+    susceptibility_features: ``[..., cohort, Q]`` static susceptibility regressors.
     """
 
     ages: Any
     features: Any
-    cure_features: Any
+    susceptibility_features: Any
 
 
 class TimingLaw(NamedTuple):
@@ -256,7 +256,7 @@ def timing_from_log_survival(log_survival_start: Any, log_survival_end: Any) -> 
     above one rather than a laundered law.
 
     Callers evaluate the continuous law at elapsed ages only; exposure,
-    closures, entry conditioning and cure stay in the shared core.
+    closures, entry conditioning and susceptibility stay in the shared core.
     """
     start, end = jnp.broadcast_arrays(
         jnp.asarray(log_survival_start), jnp.asarray(log_survival_end)
@@ -270,7 +270,7 @@ def default_timing(parameters: StageParameters, inputs: TimingInputs) -> EventLa
     """Timing law and susceptibility logits of the default logistic stage family.
 
     Hazard logits are ``age_logits[min(age, K-1)] + x(t) @ beta`` and the
-    susceptibility logit is ``cure_intercept + z @ cure_beta``, both from
+    susceptibility logit is ``susceptibility_intercept + z @ susceptibility_beta``, both from
     the ``survival`` primitives. Log hazard and log stay are
     ``log_sigmoid(+-logit)`` so large finite logits keep finite values and
     gradients.
@@ -280,7 +280,7 @@ def default_timing(parameters: StageParameters, inputs: TimingInputs) -> EventLa
     """
     logits = _hazard_logits(parameters, inputs.ages, inputs.features)
     timing = TimingLaw(log_hazard=log_sigmoid(logits), log_survival_step=log_sigmoid(-logits))
-    return EventLaw(timing, _cure_logits(parameters, inputs.cure_features))
+    return EventLaw(timing, _susceptibility_logits(parameters, inputs.susceptibility_features))
 
 
 def _require_disjoint(pre_entry: Any, exposure: Any) -> None:

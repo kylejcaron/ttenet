@@ -3,7 +3,7 @@
 A timing family is an object with a NumPyro ``model(inputs, shared) -> EventLaw``
 that samples its own named sites from ``TimingInputs`` (ages and regressors only)
 and a static ``tail`` declaration. The package core applies administrative
-exposure, calendar closures, cure marginalization, entry conditioning, native
+exposure, calendar closures, susceptibility marginalization, entry conditioning, native
 observation and count propagation, so swapping the family never touches fitting,
 the native distributions or the network.
 
@@ -27,8 +27,8 @@ import pandas as pd
 
 from ttenet import (
     CountNode,
-    CureProcess,
     EventNode,
+    EventProcess,
     ForecastNetwork,
     RetailData,
     SalesForecast,
@@ -105,9 +105,12 @@ def main():
     )
     weibull = fit_stage(receipts, family=family, num_steps=300, num_samples=60, seed=1)
     assert isinstance(default.parameters, StageParameters)
-    print("default family posterior:", _summary("cure", default.parameters.cure_intercept))
+    print(
+        "default family posterior:",
+        _summary("susceptibility", default.parameters.susceptibility_intercept),
+    )
     print("weibull family posterior sites:", sorted(weibull.parameters))
-    for name in ("scale", "shape", "cure_intercept"):
+    for name in ("scale", "shape", "susceptibility_intercept"):
         print("  " + _summary(name, weibull.parameters[name]))
     print("  simulated truth: scale 6, shape 2, every initiated unit susceptible")
 
@@ -138,12 +141,12 @@ def main():
         event_columns={"inspections": "inspection_date"},
     )
     sales = CountNode("sales")
-    initiations = EventNode("initiations", sales, CureProcess(age_bins=12, deadline_days=30))
-    receipt_node = EventNode("receipts", initiations, CureProcess(family=family))
+    initiations = EventNode("initiations", sales, EventProcess(age_bins=12, deadline_days=30))
+    receipt_node = EventNode("receipts", initiations, EventProcess(family=family))
     inspections = EventNode(
         "inspections",
         receipt_node,
-        CureProcess(age_bins=4, deadline_days=7),
+        EventProcess(age_bins=4, deadline_days=7),
         event_column="inspection_date",
     )
     network = ForecastNetwork([sales, initiations, receipt_node, inspections])
@@ -178,7 +181,7 @@ def main():
     late_ages = TimingInputs(
         ages=jnp.array([[80], [120]]),
         features=jnp.zeros((2, 1, 0)),
-        cure_features=jnp.zeros((1, 0)),
+        susceptibility_features=jnp.zeros((1, 0)),
     )
     law = receipt_fit.timing(late_ages, draw=0)
     print(

@@ -35,13 +35,13 @@ from .models import (
 from .processes import CountNode, EventNode, _positive_integer
 from .survival import StageParameters
 
-_FEATURE_KEYS = frozenset({"features", "cure_features", "allowed"})
+_FEATURE_KEYS = frozenset({"features", "susceptibility_features", "allowed"})
 
 
 @dataclass(frozen=True)
 class _Features:
     features: np.ndarray
-    cure_features: np.ndarray
+    susceptibility_features: np.ndarray
     allowed: np.ndarray
 
     def kwargs(self):
@@ -59,7 +59,9 @@ def _covariate_mapping(value, names):
     return dict(value)
 
 
-def _resolve_features(process, provider, frame, calendar, *, widths=None, default_cure=None):
+def _resolve_features(
+    process, provider, frame, calendar, *, widths=None, default_susceptibility=None
+):
     value = (
         {} if provider is None else provider(frame, calendar) if callable(provider) else provider
     )
@@ -69,17 +71,20 @@ def _resolve_features(process, provider, frame, calendar, *, widths=None, defaul
         raise ValueError(f"unknown event covariate keys: {sorted(set(value) - _FEATURE_KEYS)}")
     n, t = len(frame), len(calendar)
     features = np.asarray(value.get("features", np.empty((n, t, 0))), dtype=np.float64)
-    cure = np.asarray(
-        value.get("cure_features", np.empty((n, 0)) if default_cure is None else default_cure),
+    susceptibility = np.asarray(
+        value.get(
+            "susceptibility_features",
+            np.empty((n, 0)) if default_susceptibility is None else default_susceptibility,
+        ),
         dtype=np.float64,
     )
     if features.ndim != 3 or features.shape[:2] != (n, t):
         raise ValueError(f"features must have shape ({n}, {t}, P)")
-    if cure.ndim != 2 or cure.shape[0] != n:
-        raise ValueError(f"cure_features must have shape ({n}, Q)")
-    if not np.isfinite(features).all() or not np.isfinite(cure).all():
+    if susceptibility.ndim != 2 or susceptibility.shape[0] != n:
+        raise ValueError(f"susceptibility_features must have shape ({n}, Q)")
+    if not np.isfinite(features).all() or not np.isfinite(susceptibility).all():
         raise ValueError("event covariates must be finite over the requested calendar")
-    if widths is not None and (features.shape[-1], cure.shape[-1]) != widths:
+    if widths is not None and (features.shape[-1], susceptibility.shape[-1]) != widths:
         raise ValueError(
             "future covariates must preserve fitted feature widths; missing values are not imputed"
         )
@@ -90,7 +95,7 @@ def _resolve_features(process, provider, frame, calendar, *, widths=None, defaul
         raise ValueError(f"allowed must have shape ({t},) or ({n}, {t})")
     weekdays = pd.DatetimeIndex(calendar).dayofweek.to_numpy()
     allowed = np.broadcast_to(mask, (n, t)) & np.isin(weekdays, process.allowed_weekdays)[None, :]
-    return _Features(features.copy(), cure.copy(), allowed)
+    return _Features(features.copy(), susceptibility.copy(), allowed)
 
 
 def _count_covariates(value, duration):
@@ -136,7 +141,7 @@ def _default_parameters(node, observations, shared):
         (node.process.age_bins,),
         (observations.features.shape[-1],),
         (),
-        (observations.cure_features.shape[-1],),
+        (observations.susceptibility_features.shape[-1],),
     )
     for name, value, shape in zip(StageParameters._fields, parameters, shapes, strict=True):
         if np.shape(value) != shape:
@@ -188,7 +193,7 @@ def _resolved_stage_fit(node, posterior, params, losses, resolved, shared, num_s
 
 @dataclass(frozen=True)
 class ForecastNetwork:
-    """One count root and an acyclic graph of single-source cure-capable events.
+    """One count root and an acyclic graph of single-source susceptibility-capable events.
 
     Joint mode is one NumPyro program/posterior. Independent priors and fully
     observed parents still factorize. For cross-stage learning, ``shared_model()``
@@ -379,7 +384,7 @@ class ForecastNetwork:
         """Fit one joint AutoNormal guide, or explicitly independent modular guides.
 
         Covariates map node names to arrays (count root) or mappings/callables
-        returning features, cure_features and allowed masks (event nodes).
+        returning features, susceptibility_features and allowed masks (event nodes).
         Event fit providers receive the original-origin context calendar, not
         just the root sales observation window. No historical prefix is imputed.
         """
@@ -547,12 +552,12 @@ class FittedNetwork:
             provider,
             frame,
             future_days,
-            widths=(old.features.shape[-1], old.cure_features.shape[-1]),
-            default_cure=old.cure_features if len(frame) == n else None,
+            widths=(old.features.shape[-1], old.susceptibility_features.shape[-1]),
+            default_susceptibility=old.susceptibility_features if len(frame) == n else None,
         )
-        if not np.array_equal(future.cure_features[:n], old.cure_features):
+        if not np.array_equal(future.susceptibility_features[:n], old.susceptibility_features):
             raise ValueError(
-                "historical cure_features are static at stage entry and cannot change in a scenario"
+                "historical susceptibility_features are static at stage entry and cannot change in a scenario"
             )
         prefix = old.features.shape[1]
         features = np.empty((len(frame), prefix + len(future_days), old.features.shape[-1]))
@@ -563,7 +568,7 @@ class FittedNetwork:
         allowed[:n, :prefix] = old.allowed
         allowed[n:, :prefix] = False
         allowed[:, prefix:] = future.allowed
-        return _Features(features, future.cure_features, allowed)
+        return _Features(features, future.susceptibility_features, allowed)
 
     def _forecast(self, *, horizon, covariates=None, future_sales=None, seed=0, through=None):
         _positive_integer("horizon", horizon)
