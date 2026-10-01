@@ -946,28 +946,29 @@ def _(mo):
     Ordinary convolution shifts one lag curve along time. Here, storms and weekends can
     change the curve for each source date. We compose it **within each posterior draw**;
     simulated paths still allocate whole units and carry their actual parent dates forward.
-    The interface need not prescribe a delay family: a parametric distribution or, later,
-    a learned nonparametric survival curve can supply the same kernel.
+    The interface does not prescribe a delay family: the default daily hazard or a
+    discretized Weibull factory supplies the same kernel. A learned nonparametric
+    survival curve can use that interface without changing the graph.
 
-    The native `numpyro_forecast` prototype expresses the same idea with an event-time
-    distribution. Its `slice_time` and `prefix_condition` registrations tell upstream
-    `predict` how to score the observed prefix and sample only what remains:
+    TTENet's native `EventTime` distribution implements the same law for fitting and
+    forecasting. Its `slice_time` and `prefix_condition` registrations tell
+    `numpyro_forecast.predict` how to score an observed prefix and sample what remains:
 
     ```python
-    # Sketch: the kernel and EventTime are our components, not upstream built-ins.
+    # TTENet components; timing comes from the selected family's factory.
     h = Horizon.from_data(calendar_covariates, observed_events)
-    kernel = survival_kernel(parameters, **calendar_inputs)
+    kernel = survival_kernel(timing, susceptibility_logits, **exposure_inputs)
     predict(
         h,
-        lambda log_mass: EventTime(log_mass, kernel.log_tail),
-        kernel.log_mass,
+        lambda log_hazard: EventTime(kernel=kernel._replace(log_hazard=log_hazard)),
+        kernel.log_hazard,
     )
     ```
 
-    **One law for the observed past and the possible future.** Upstream `forecast` then
-    draws the suffix. This is the proposed native backend; the runnable `CureProcess`
-    example below still uses the existing, mathematically equivalent implementation
-    while cohort-scale correctness and performance are evaluated.
+    **One law for the observed past and the possible future.** The runnable
+    `CureProcess` below uses this native backend. Count cohorts use the corresponding
+    `CohortEventTime` law without expanding their population into individual units;
+    every stage retains actual parent dates and conserves integer counts per draw.
     """)
     return
 

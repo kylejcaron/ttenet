@@ -205,3 +205,90 @@ After the numerical-review corrections, the parent observes **79 passing shared-
 Fresh pinned-reference measurements from `8a85dfd661740e9df6c1a61b4e28a3262ab3afea`, in a detached benchmark worktree with the same installed dependencies: real retail (150 SVI steps, 40 draws) fits in 7.303102625 seconds, first forecast 0.575479917 seconds, warm median 0.073085167 seconds, total 8.312623750 seconds, peak RSS 1,511,702,528 bytes. Its final loss is `1492.4757080078125`, expected historical receipts `3.962345190929851`, mean forecast receipts 15.05, and conservation/finite-loss/closed-weekend checks pass. The large-32 sparse quantity-10,000,000 fixture has cold 2.738233625 seconds, five-call warm median 2.616348875 seconds and peak RSS 1,650,868,224 bytes. These are refreshed reference results, not measurements of the still-unmigrated production forecast path.
 
 Final desk review accepts the distribution repairs. The parent also reproduces host int64 observations wrapping into feasible int32 events/counts, records three failing-before regressions, and adds a host-only pre-conversion range guard; JAX arrays/tracers bypass host inspection. The resulting distribution suite has **32 passing tests**, the actual native API smoke passes again, and Ruff lint/format checks pass. The full public compatibility suite before this final host guard has **185 passing tests in 57.79 seconds**. No unresolved probability-layer review finding remains. Default fitting and production cohort propagation migrate in the next tasks; this layer alone is not the completed cutover.
+
+## Complete production cutover verification
+
+The completed package routes standalone/native network observation sites, posterior replay, source-aware unit/count forecasting and eventual expectations through the shared family-independent law. Default `StageParameters` priors and resolved parameter contracts remain; custom factories retain actual named posterior sites and derived shared values. Zero-latent fits retain draw-count metadata without fabricated posterior sites. The production count sampler is a pure-JAX balanced binomial tree with masked inversion/BTRS, integer complements and the documented float-proposal limits. No RBG sampler, private JAX import, NumPy event allocator or compiled extension was promoted.
+
+Initial end-to-end cutover suite: **226 tests passed in 112.13 seconds**. Subsequent reviewer counterexamples were reproduced before repair: invalid observation indices becoming censored paths, zero-size sampled sites disappearing on replay, a stationary receipt tail inheriting the final historical closure, singleton expectation arrays failing to match expanded forecast draws, and retail finite-support initiation tails being cut off by the forecast calendar. The repaired family/network/retail partition has **48 passes in 54.39 seconds**, without the earlier empty-guide warning. A one-unit/absent-pool regression confirms zero-population draws remain zero; joint and modular descendant tests include independent sibling events and immediate-parent deadlines.
+
+The promoted tree sampler's distribution suite has **36 passes in 97.17 seconds**: exact binomial frequencies, all-category means and covariances, 365-date closure support, vmapped-key replay, integer accounting and invalid-law boundaries. This is correctness evidence, not a performance measurement. The final supported-version matrix passes all **243 tests** on Python **3.12.11** (233.84 s), **3.13.5** (231.12 s) and **3.14.5** (224.02 s). Ruff lint/format checks and the complexity watermark pass; an initial plan-code-block formatting failure was corrected and the real nox lint session rerun successfully. No complexity baseline was increased: migrated `ForecastNetwork.fit` is 14, `_fit_program` is 10, and `forecast_events` ratchets from 27 to 26.
+
+### Actual public runtime surfaces
+
+- `examples/event_time_families.py`: a real shape-2 Weibull fit produces scale `6.359 ± 0.384` and shape `2.107 ± 0.140` against generating values 6 and 2. Native in-sample paths have shape `[60,46,159]` and observed-date agreement 9.6%, not an observation echo. A mixed-family network forecasts 90 days with 40 paired draws and exact conservation.
+- `examples/survival_convolution.py`: production imports replace the retired example backend. Unit future/in-sample shapes are `[128,18,12]` / `[128,24,12]`; likelihood-adapter error `1.9073486e-6`, gradient error `4.172325e-7`, closed-date events zero and hidden-outcome leakage false. Chained future/in-sample shapes are `[128,18,24]` / `[128,24,24]`; joint likelihood-adapter error zero, gradient error `2.384e-7`, 8,192-draw convolution probability error `0.00519869`, lineage violations zero. The adapter is the shared production law, not claimed as an independent mathematical oracle; analytic/moment checks supply independent evidence.
+- Real retail CLI, 150 joint steps / 40 draws: finite loss, exact conservation, zero weekend receipts; expected historical receipts `3.9623436133445082`, decomposed into `1.930658245103538` uninitiated and `2.03168536824097` open returns. Mean sampled receipts 14.9, 90% interval `[8,22.05]`. These draws need not be bit-identical to the old NumPy allocator.
+- A throwaway public NUTS smoke uses `stage_model`, ten warmup steps and ten posterior draws, then `StageFit` / `predict_stage`. The real native observation model samples successfully, all parameter arrays are finite, and `[10,8,3]` integer paths contain 20 events with each unit absorbing. This proves API execution, not sampler convergence.
+- `marimo check` passes; the actual retail blog script executes its 2,000-step / 200-draw defaults. Browser rendering shows the native backend's complete fitted notebook, not a script-mode stub. Desktop math/prose/code are balanced; at width 390 the document width is 390, without horizontal overflow. The \(K_0,K_1\) notation remains.
+- Actual demand/weather controls recompute forecasts. The +50% promotion scenario displays 191 receipts and 258 initiations against baseline 154 and 199. Selecting sales “As forecast” and “Clear skies: no storm” produces 156 receipts, 199 initiations and 322 open at horizon; the unchanged baseline remains 154 receipts. Native conservation/closure/decomposition indicators pass and browser errors are empty. Isolated browser/notebook verification services were stopped after inspection.
+
+Independent final public-cutover source review reports no evidence-backed correctness finding across public fitting/replay, native unit/count allocation consumers, descendant propagation, draw pairing and tail expectations. It is a read-only review, not additional executed test evidence.
+
+The final numerical review accepts the tree factorization, log-ratio splits, masked geometric inversion, regrouped BTRS bound and Stirling terms. Its direct unsigned-JAX counterexample was reproduced: a massless pool of 3 returned unsigned `4294967295` instead of negative sentinel `-1`. Three regressions fail before the repair; direct JAX pools now require signed integers, while range-checked host unsigned inputs remain accepted. After this final dtype-boundary change, **nine focused count-boundary tests pass on each supported Python** (11.15 / 10.64 / 10.74 s), including eager/JIT refusal and host conversion. Ruff lint/format checks pass. The earlier 243-test full-version results precede this small guard; the final large native count benchmark below executes the repaired signed path successfully. The review's optional quick-accept ordering hardening is not a reachable defect under the fixed inversion threshold 10 and was not promoted as an additional behavior change.
+
+### Final public-package performance
+
+Environment: Darwin 24.6.0 arm64, Python 3.13.5, JAX/jaxlib 0.11.0, NumPyro 0.22.0, numpyro-forecast 0.4.0, NumPy 2.5.3, pandas 3.0.5. Reference source is pinned `8a85dfd661740e9df6c1a61b4e28a3262ab3afea`; native source is the completed production package, not a monkeypatched candidate. Each backend runs in an isolated process using the same interpreter, fixture seed 7341 and actual public APIs. Timing synchronizes/materializes returned arrays. Notebook/browser services and version-test processes are stopped before measurement.
+
+The matrix has 12 matched old/native cases (24 isolated processes), one cold call and five warm repetitions per process. Dimensions are `(cohorts, history days, horizon, draws)`: small `(100,60,28,32)`, medium `(1000,180,90,128)`, large `(5000,365,365,32)`. Sparse/multi layouts retain actual immediate-parent source dates; quantities are one or 10,000,000. Different generators have distributional rather than bit-identical draw parity.
+
+| Case / layout / quantity | Old cold s | Native cold s | Old warm median s | Native warm median s | Native / old |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Small / sparse / 1 | 0.007223 | 0.376415 | 0.006035 | 0.003785 | 0.627× |
+| Small / sparse / 10,000,000 | 0.007542 | 2.029177 | 0.006464 | 0.011883 | 1.838× |
+| Small / multi / 1 | 0.010872 | 0.410069 | 0.009691 | 0.004360 | 0.450× |
+| Small / multi / 10,000,000 | 0.011445 | 2.053962 | 0.010238 | 0.022409 | 2.189× |
+| Medium / sparse / 1 | 0.606037 | 0.730980 | 0.602285 | 0.267029 | 0.443× |
+| Medium / sparse / 10,000,000 | 0.646873 | 3.781867 | 0.618200 | 1.121807 | 1.815× |
+| Medium / multi / 1 | 1.091028 | 0.811656 | 1.060866 | 0.361040 | 0.340× |
+| Medium / multi / 10,000,000 | 1.270134 | 6.047438 | 1.242003 | 3.424711 | 2.757× |
+| Large / sparse / 1 | 2.590512 | 1.177730 | 2.569133 | 0.730391 | 0.284× |
+| Large / sparse / 10,000,000 | 2.782449 | 9.297343 | 2.754116 | 6.421117 | 2.331× |
+| Large / multi / 1 | 5.291955 | 2.207420 | 5.261554 | 1.656632 | 0.315× |
+| Large / multi / 10,000,000, clean 3-repeat check | 5.705027 | 19.992407 | 5.555602 | 17.835323 | 3.210× |
+
+The initial large/multi/10,000,000 old process was anomalous: cold 27.269765 s; five warm calls `[48.979989,81.686169,108.279923,129.903879,47.769376]` s, median 81.686169 s. Its native paired process had cold 34.309950 s and warm median 17.824132 s. Cause is not established; the apparent 0.218× ratio is excluded from conclusions. A narrow fresh paired check has old warm calls `[5.722366,5.452595,5.555602]` and native `[18.113959,17.835323,17.594903]`, with identical per-backend aggregate checksums to the initial runs. The table identifies this 3-repeat cross-check rather than pretending it is the original five-repeat median.
+
+| Case / layout / quantity | Old peak RSS bytes | Native peak RSS bytes |
+| --- | ---: | ---: |
+| Small / sparse / 1 | 183,762,944 | 401,473,536 |
+| Small / sparse / 10,000,000 | 179,748,864 | 619,429,888 |
+| Small / multi / 1 | 186,941,440 | 401,408,000 |
+| Small / multi / 10,000,000 | 185,581,568 | 617,283,584 |
+| Medium / sparse / 1 | 670,679,040 | 882,507,776 |
+| Medium / sparse / 10,000,000 | 669,696,000 | 1,169,489,920 |
+| Medium / multi / 1 | 768,851,968 | 1,008,779,264 |
+| Medium / multi / 10,000,000 | 765,263,872 | 1,531,822,080 |
+| Large / sparse / 1 | 1,653,325,824 | 2,248,638,464 |
+| Large / sparse / 10,000,000 | 1,664,483,328 | 2,543,779,840 |
+| Large / multi / 1 | 1,834,516,480 | 2,590,736,384 |
+| Large / multi / 10,000,000, clean check | 1,756,299,264 | 2,746,810,368 |
+
+Warm unit forecasts improve in all measured cases. Counted forecasts retain 1.815–3.210× warm overhead in this matrix. Native peak RSS is higher, including fixed JAX startup costs in small cases. Neither the runtime nor memory prospective 1.25× target passes globally; the user's approved native-only tradeoff is recorded, not silently relabeled as parity.
+
+### Final actual fitting and retail workflow
+
+Public `stage_model` / `stage_log_likelihood` comparisons use the same real random-walk prior and paired observation fixtures: 16 age bins, two hazard and two cure regressors, 25% proposed delayed entry, inclusive deadline 45, heterogeneous closures. Selected observations and fixture hashes match: `(100,60)` → 91 / `c9f5c115b1942b5c`; `(1000,180)` → 875 / `ef5e8536e5727fd0`; `(5000,365)` → 4,415 / `7656eccd9424af83`. Each SVI process executes six real 100-step chunks (one first, five warm), followed by 40 real posterior draws.
+
+| Fixture | Old warm 100-step SVI s | Native warm SVI s | Ratio | Old likelihood-gradient s | Native gradient s | Ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `(100,60)` | 0.011619 | 0.014476 | 1.246× | 0.000116 | 0.000161 | 1.389× |
+| `(1000,180)` | 0.102769 | 0.105516 | 1.027× | 0.001249 | 0.001753 | 1.404× |
+| `(5000,365)` | 0.998372 | 1.028418 | 1.030× | 0.011775 | 0.016762 | 1.424× |
+
+Joint-model gradient medians old/native: small `0.000116 / 0.000177` s (1.522×), medium `0.001245 / 0.001854` s (1.489×), large `0.011825 / 0.019190` s (1.623×). Cold SVI initialization/lowering/compilation/first chunks old/native are `3.077612 / 3.290574`, `3.225436 / 3.442768`, `4.132788 / 4.425126` s. Peak RSS old/native is `814,481,408 / 877,084,672`, `839,172,096 / 908,181,504`, `1,333,936,128 / 1,586,741,248` bytes. All gradients, losses and posterior arrays are finite; final paired losses are `170.830444 / 170.830444`, `1643.775146 / 1643.774902`, and `8807.114258 / 8807.114258`. These are final public native fitting results, not the earlier prototype adapter numbers.
+
+| Real retail, 150 steps / 40 draws | Old reference s | Final native s |
+| --- | ---: | ---: |
+| Cold fitting | 7.303103 | 9.097288 |
+| First forecast | 0.575480 | 4.312413 |
+| Five-call warm forecast median | 0.073085 | 0.038690 |
+| Total measured workflow | 8.312624 | 13.664727 |
+| Peak RSS bytes | 1,511,702,528 | 1,938,178,048 |
+
+Final native joint loss `1492.475830078125`; all stage/sales losses finite, exact conservation and zero weekend receipts. Historical expected receipts and decomposition are the values above; sampled receipt mean 14.9 versus old 15.05 is not claimed as identical RNG output. Warm retail forecasts improve, while first-call compilation and cold fitting increase total workflow time.
+
+### Final gate interpretation
+
+Gates A–C and E are supported by the executed analytic/gradient/entry/closure/count tests, native runtime surfaces, complete graph/factory integration, supported-version suites, focused final boundary regressions, independent reviews and lint/complexity results. Gate D is **measured, not a prospective performance pass**: bulk-count and raw-gradient overhead plus increased RSS remain. The explicit user approval permits the pure-native cutover with these recorded tradeoffs; no NumPy hybrid, alternative RNG or unverified performance claim is used to conceal them.

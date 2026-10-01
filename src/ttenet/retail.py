@@ -10,7 +10,14 @@ import numpy as np
 from .data import RetailHistory, prepare_history
 from .forecast import ReturnForecast, expected_return_receipts
 from .network import FittedNetwork, ForecastNetwork
-from .processes import CountNode, CountProcess, CureProcess, EventNode, _positive_integer
+from .processes import (
+    CountNode,
+    CountProcess,
+    CureProcess,
+    EventNode,
+    _positive_integer,
+    tail_behavior,
+)
 
 
 @dataclass(frozen=True)
@@ -108,6 +115,11 @@ class FittedRetailReturnModel:
         _positive_integer("horizon", horizon)
         through = self.history.as_of + np.timedelta64(int(horizon), "D")
         policy = self.model.initiation.deadline_days
+        factory = self.model.initiation.event_time_model
+        if factory is not None:
+            tail = tail_behavior(factory)
+            if tail["kind"] == "finite":
+                policy = tail["last_age"] if policy is None else min(policy, tail["last_age"])
         eligible = self.history.frame.loc[self.history.frame.eligible, "sale_date"]
         if policy is not None and len(eligible) and self.model.receipt.allowed_weekdays:
             deadline = np.asarray(eligible, dtype="datetime64[D]").max() + np.timedelta64(
@@ -127,8 +139,8 @@ class FittedRetailReturnModel:
         if self.model.receipt.allowed_weekdays:
             uninitiated, open_returns = expected_return_receipts(
                 self.history,
-                self.initiation_fit.parameters,
-                self.receipt_fit.parameters,
+                self.initiation_fit,
+                self.receipt_fit,
                 calendar=context.calendar,
                 initiation_features=initiation.features[:n],
                 receipt_features=receipt.features[:n],

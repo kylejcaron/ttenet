@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 import ttenet
+from ttenet.event_times import log1mexp
 
 
 def _certain_parameters(observations, shared):
@@ -22,20 +23,26 @@ def _empty_future():
     return ttenet.SalesForecast.from_frame(pd.DataFrame(columns=["sale_date", "quantity"]))
 
 
-def test_arbitrary_descendant_uses_parent_date_and_keeps_root_cohort():
+@pytest.mark.parametrize("mode", ["joint", "modular"])
+def test_arbitrary_descendants_and_siblings_use_parent_dates_and_keep_root_cohorts(mode):
     root = ttenet.CountNode("sales")
     initiation = ttenet.EventNode("initiations", root, _certain_process(deadline_days=1))
     receipt = ttenet.EventNode("receipts", initiation, _certain_process())
     inspection = ttenet.EventNode(
         "inspections", receipt, _certain_process(deadline_days=1), event_column="inspection_date"
     )
-    model = ttenet.ForecastNetwork(nodes=[inspection, root, receipt, initiation])
-    units = pd.DataFrame(columns=["item_id", "sale_date", "product", "inspection_date"])
+    restock = ttenet.EventNode(
+        "restocks", receipt, _certain_process(deadline_days=0), event_column="restock_date"
+    )
+    model = ttenet.ForecastNetwork(nodes=[inspection, restock, root, receipt, initiation])
+    units = pd.DataFrame(
+        columns=["item_id", "sale_date", "product", "inspection_date", "restock_date"]
+    )
     data = ttenet.RetailData.from_units(
         units,
         as_of="2026-01-01",
         calendar=["2026-01-01"],
-        event_columns={"inspections": "inspection_date"},
+        event_columns={"inspections": "inspection_date", "restocks": "restock_date"},
     )
     covariates = {
         "receipts": lambda frame, days: {
@@ -44,7 +51,7 @@ def test_arbitrary_descendant_uses_parent_date_and_keeps_root_cohort():
         },
         "inspections": lambda frame, days: {"allowed": days >= np.datetime64("2026-01-04")},
     }
-    fitted = model.fit(data, covariates=covariates, num_steps=1, num_samples=3)
+    fitted = model.fit(data, covariates=covariates, num_steps=1, num_samples=3, mode=mode)
     future = ttenet.SalesForecast(
         pd.DataFrame(
             {
@@ -70,6 +77,8 @@ def test_arbitrary_descendant_uses_parent_date_and_keeps_root_cohort():
         result.counts["initiations"].cumsum(axis=1),
     )
     assert not result.nodes["inspections"].events[:, :, 1].any()
+    # Both distinct sibling events may happen for the same physical units.
+    np.testing.assert_array_equal(result.nodes["restocks"].events, result.nodes["receipts"].events)
 
 
 def _shared_model():
@@ -238,3 +247,126 @@ def test_optimized_event_parameters_are_resolved_before_simulating():
     )
     result = fitted.forecast(horizon=1, future_sales=future)
     assert result.counts["initiations"].mean() > 500
+
+
+def _weibull_receipts(inputs, shared):
+    """Shape-2 Weibull receipt timing with a sampled scale and certain susceptibility."""
+    scale = numpyro.sample("scale", dist.LogNormal(np.log(3.0), 0.3))
+    age = jnp.maximum(inputs.ages, 0)
+    log_stay = -(((age + 1) / scale) ** 2 - (age / scale) ** 2)
+    return ttenet.TimingLaw(log1mexp(log_stay), log_stay), jnp.full(inputs.ages.shape[-1], 50.0)
+
+
+_weibull_receipts.tail_behavior = {"kind": "proper"}
+
+
+def test_mixed_family_network_propagates_through_the_custom_stage():
+    """Default -> Weibull -> default: the custom stage keeps its own named posterior."""
+    root = ttenet.CountNode("sales")
+    initiation = ttenet.EventNode("initiations", root, _certain_process(deadline_days=1))
+    receipt = ttenet.EventNode(
+        "receipts", initiation, ttenet.CureProcess(event_time_model=_weibull_receipts)
+    )
+    inspection = ttenet.EventNode(
+        "inspections", receipt, _certain_process(deadline_days=1), event_column="inspection_date"
+    )
+    model = ttenet.ForecastNetwork(nodes=[root, initiation, receipt, inspection])
+    units = pd.DataFrame(
+        {
+            "item_id": ["a", "b", "c", "d"],
+            "sale_date": ["2026-01-01", "2026-01-01", "2026-01-03", "2026-01-05"],
+            "initiation_date": ["2026-01-01", "2026-01-01", "2026-01-03", "2026-01-05"],
+            "receipt_date": ["2026-01-03", "2026-01-06", None, None],
+            "inspection_date": ["2026-01-03", "2026-01-06", None, None],
+        }
+    )
+    data = ttenet.RetailData.from_units(
+        units,
+        as_of="2026-01-10",
+        calendar=ttenet.date_grid("2026-01-01", "2026-01-10"),
+        event_columns={"inspections": "inspection_date"},
+    )
+    fitted = model.fit(data, num_steps=20, num_samples=5, seed=4)
+    fit = fitted.stage_fits["receipts"]
+    assert fit.event_time_model is _weibull_receipts
+    assert set(fit.parameters) == {"scale"} and fit.parameters["scale"].shape == (5,)
+    assert fit.num_samples == 5 and fit.draws == 5 and fit.shared is None
+    assert isinstance(fitted.stage_fits["initiations"].parameters, ttenet.StageParameters)
+    assert isinstance(fitted.stage_fits["inspections"].parameters, ttenet.StageParameters)
+    inputs = ttenet.TimingInputs(
+        ages=jnp.array([[0, 3], [1, 4]]),
+        features=jnp.zeros((2, 2, 0)),
+        cure_features=jnp.zeros((2, 0)),
+    )
+    timing, logits = fit.timing(inputs, draw=1)
+    scale = fit.parameters["scale"][1]
+    expected = -(((inputs.ages + 1) / scale) ** 2 - (inputs.ages / scale) ** 2)
+    np.testing.assert_allclose(timing.log_survival_step, expected, rtol=1e-5)
+    np.testing.assert_allclose(logits, 50.0)
+    future = ttenet.SalesForecast(
+        pd.DataFrame({"item_id": ["p0", "p1"], "sale_date": ["2026-01-11", "2026-01-12"]}),
+        np.array([[30, 20]] * 5),
+    )
+    result = fitted.forecast(horizon=14, future_sales=future, seed=7)
+    initiations = result.counts["initiations"]
+    receipts = result.counts["receipts"]
+    inspections = result.counts["inspections"]
+    np.testing.assert_array_equal(initiations[:, :2], [[30, 20]] * 5)
+    assert np.issubdtype(receipts.dtype, np.integer) and (receipts >= 0).all()
+    assert (receipts.cumsum(axis=1) <= initiations.cumsum(axis=1) + 2).all()
+    np.testing.assert_array_equal(
+        result.nodes["receipts"].pending + receipts.cumsum(axis=1),
+        initiations.cumsum(axis=1) + 2,
+    )
+    np.testing.assert_array_equal(inspections, receipts)
+    assert receipts.sum() > 0
+    # Lineage: the historical open units (c, d) are the only cohorts before new sales.
+    assert not result.nodes["receipts"].events[:, :, :2].any()
+
+
+def _derived_shared_model():
+    demand = numpyro.sample("demand", dist.Normal(0.0, 0.5))
+    return {"demand": demand, "rate": jnp.exp(demand)}
+
+
+def _shared_rate_family(inputs, shared):
+    log_stay = jnp.broadcast_to(-shared["rate"], inputs.ages.shape)
+    return ttenet.TimingLaw(log1mexp(log_stay), log_stay), jnp.full(inputs.ages.shape[-1], 0.0)
+
+
+_shared_rate_family.tail_behavior = {"kind": "proper"}
+
+
+def test_custom_family_fit_records_the_shared_models_derived_values_per_draw():
+    root = ttenet.CountNode("sales")
+    child = ttenet.EventNode(
+        "initiations",
+        root,
+        ttenet.CureProcess(deadline_days=3, event_time_model=_shared_rate_family),
+    )
+    model = ttenet.ForecastNetwork([root, child], shared_model=_derived_shared_model)
+    units = pd.DataFrame(
+        {
+            "item_id": range(12),
+            "sale_date": ["2026-01-01"] * 12,
+            "initiation_date": ["2026-01-01"] * 4 + ["2026-01-02"] * 2 + [None] * 6,
+        }
+    )
+    data = ttenet.RetailData.from_units(units, as_of="2026-01-04", calendar=["2026-01-04"])
+    fitted = model.fit(data, num_steps=40, num_samples=6, seed=5)
+    fit = fitted.stage_fits["initiations"]
+    assert fit.event_time_model is _shared_rate_family
+    assert dict(fit.parameters) == {}
+    assert fit.num_samples == 6 and fit.draws == 6
+    assert set(fit.shared) == {"demand", "rate"}
+    np.testing.assert_array_equal(fit.shared["demand"], fitted.posterior["shared/demand"])
+    np.testing.assert_allclose(fit.shared["rate"], np.exp(fit.shared["demand"]), rtol=1e-6)
+    assert len(np.unique(np.asarray(fit.shared["demand"]))) > 1
+    inputs = ttenet.TimingInputs(
+        ages=jnp.array([[0, 2], [1, 3]]),
+        features=jnp.zeros((2, 2, 0)),
+        cure_features=jnp.zeros((2, 0)),
+    )
+    for draw in range(6):
+        timing, _ = fit.timing(inputs, draw=draw)
+        np.testing.assert_allclose(timing.log_survival_step, -np.exp(fit.shared["demand"][draw]))

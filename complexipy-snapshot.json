@@ -23,7 +23,7 @@
     "functions": [
       {
         "name": "forecast_events",
-        "complexity": 27
+        "complexity": 26
       }
     ]
   },
@@ -46,16 +46,8 @@
     "file_name": "network.py",
     "functions": [
       {
-        "name": "ForecastNetwork::fit",
-        "complexity": 16
-      },
-      {
         "name": "_resolve_features",
         "complexity": 16
-      },
-      {
-        "name": "_fit_program",
-        "complexity": 22
       },
       {
         "name": "FittedNetwork::_sales",

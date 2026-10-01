@@ -876,3 +876,167 @@ def test_parent_arrival_dates_vary_by_draw_and_within_cohort():
         result.pending + result.events.sum(axis=-1).cumsum(axis=1),
         arrivals.sum(axis=-1).cumsum(axis=1),
     )
+
+
+# --------------------------------------------------------------------------
+# Native allocation law: moments, prefix conditioning, replay, conditioning
+# --------------------------------------------------------------------------
+
+
+def test_count_pool_allocations_follow_the_prefix_law_moments():
+    # 5000 units arriving on day 1 at h=.3, pi=.6: day-t events have mean
+    # n*pi*(1-h)**(t-1)*h, and given the day-1 count the day-2 count is
+    # Binomial(n - X1, pi*(1-h)*h / (1 - pi*h)) -- the residual pool's
+    # renormalized law, not an independent Poisson per day.
+    n, h, pi, draws = 5000, 0.3, 0.6, 64
+    arrivals = np.zeros((draws, 4, 1), dtype=np.int64)
+    arrivals[:, 0, 0] = n
+    result = forecast_events(
+        _params(hazard=h, cure=pi),
+        origins=[np.datetime64("NaT", "D")],
+        observed=[np.datetime64("NaT", "D")],
+        arrivals=arrivals,
+        calendar=_calendar(),
+        as_of=AS_OF,
+        horizon=4,
+        seed=21,
+    )
+    events = result.events[:, :, 0]
+    assert np.all(events.sum(axis=1) <= n) and np.all(events >= 0)
+    for t in range(4):
+        mean = n * pi * (1 - h) ** t * h
+        spread = np.sqrt(mean * (1 - pi * (1 - h) ** t * h) / draws)
+        assert abs(events[:, t].mean() - mean) < 5 * spread
+    conditional = pi * (1 - h) * h / (1 - pi * h)
+    ratio = events[:, 1] / (n - events[:, 0])
+    assert abs(ratio.mean() - conditional) < 5 * np.sqrt(
+        conditional * (1 - conditional) / (n * draws)
+    )
+    assert np.std(events[:, 0]) > 0.5 * np.sqrt(n * pi * h * (1 - pi * h))
+
+
+def test_seed_replay_is_exact_and_other_seeds_differ():
+    params = _params(hazard=0.4, cure=0.7)
+    history = _history(
+        {
+            "item_id": ["a", "b"],
+            "sale_date": ["2026-02-20", "2026-01-01"],
+            "initiation_date": [None, "2026-02-25"],
+            "receipt_date": [None, None],
+        }
+    )
+    future_sales = SalesForecast(
+        cohorts=pd.DataFrame(
+            {"item_id": ["f1"], "sale_date": [str(AS_OF + np.timedelta64(1, "D"))]}
+        ),
+        counts=np.array([[300], [300]]),
+    )
+    kwargs = dict(calendar=_calendar(), horizon=8, future_sales=future_sales)
+    first = forecast_returns(history, params, params, seed=9, **kwargs)
+    replay = forecast_returns(history, params, params, seed=9, **kwargs)
+    other = forecast_returns(history, params, params, seed=10, **kwargs)
+    np.testing.assert_array_equal(first.initiations, replay.initiations)
+    np.testing.assert_array_equal(first.receipts, replay.receipts)
+    assert not np.array_equal(first.initiations, other.initiations)
+    # Draws of the same scenario are distinct paths, not one path copied.
+    assert not np.array_equal(first.initiations[0], first.initiations[1])
+
+
+def test_long_event_free_history_is_conditioned_in_log_space():
+    # 3650 event-free days at h=.5 drive the susceptible survival to 2**-3650,
+    # far below float range: the unit is identified as cured without any
+    # nonfinite intermediate, so neither events nor expectations are NaN.
+    history = _history(
+        {
+            "item_id": ["ancient"],
+            "sale_date": ["2015-01-01"],
+            "initiation_date": [str(AS_OF - np.timedelta64(3650, "D"))],
+            "receipt_date": [None],
+        },
+        policy_days=None,
+    )
+    params = _params(hazard=0.5, cure=0.9)
+    result = forecast_returns(
+        history, params, params, calendar=_calendar(start="2015-01-01"), horizon=5
+    )
+    assert np.all(np.isfinite(result.expected_open_receipts))
+    assert float(result.expected_open_receipts[0]) < 1e-300
+    np.testing.assert_array_equal(result.receipts, 0)
+    np.testing.assert_array_equal(result.open_returns, 1)
+
+
+def test_impossible_conditional_history_is_rejected_not_treated_as_cure():
+    # Infinite hazard logit makes the age-0 trial certain and infinite cure
+    # logit makes every unit susceptible; a unit that nevertheless survived
+    # its age-0 day is an impossible history, refused rather than cured.
+    impossible = StageParameters(np.array([np.inf]), np.empty(0), np.array(np.inf), np.empty(0))
+    with pytest.raises(ValueError, match="impossible"):
+        forecast_events(
+            impossible,
+            origins=[AS_OF - np.timedelta64(1, "D")],
+            observed=[np.datetime64("NaT", "D")],
+            arrivals=np.zeros((1, 2, 1), dtype=np.int64),
+            calendar=_calendar(),
+            as_of=AS_OF,
+            horizon=2,
+        )
+
+
+def test_single_unit_and_bulk_pools_share_the_same_law():
+    # A cohort of exactly one unit in every draw and a bulk cohort fire with
+    # the same per-unit probability on their arrival day.
+    params = _params(hazard=0.5, cure=1 - 1e-9)
+    draws = 400
+    arrivals = np.zeros((draws, 1, 2), dtype=np.int64)
+    arrivals[:, 0, 0] = 1
+    arrivals[:, 0, 1] = 1000
+    result = forecast_events(
+        params,
+        origins=[np.datetime64("NaT", "D")] * 2,
+        observed=[np.datetime64("NaT", "D")] * 2,
+        arrivals=arrivals,
+        calendar=date_grid(AS_OF, AS_OF + np.timedelta64(1, "D")),
+        as_of=AS_OF,
+        horizon=1,
+        seed=3,
+    )
+    assert set(np.unique(result.events[:, 0, 0])) <= {0, 1}
+    assert abs(result.events[:, 0, 0].mean() - 0.5) < 5 * np.sqrt(0.25 / draws)
+    assert abs(result.events[:, 0, 1].mean() - 500) < 5 * np.sqrt(250 / draws)
+
+
+def test_draw_blocks_keep_posterior_and_count_rows_paired(monkeypatch):
+    # Five posterior draws alternating certain/zero hazard against five count
+    # draws of distinct sizes, mapped in blocks of two draws (the last block
+    # wraps): draw i must see exactly posterior row i and count row i.
+    import ttenet.forecast as forecast_module
+
+    monkeypatch.setattr(forecast_module, "_BLOCK_CELLS", 2)
+    hazard = np.array([50.0, -50.0, 50.0, -50.0, 50.0])
+    parameters = StageParameters(
+        hazard[:, None], np.zeros((5, 0)), np.full(5, 50.0), np.zeros((5, 0))
+    )
+    arrivals = np.zeros((5, 2, 1), dtype=np.int64)
+    arrivals[:, 0, 0] = np.arange(1, 6) * 10
+    result = forecast_events(
+        parameters,
+        origins=[np.datetime64("NaT", "D")],
+        observed=[np.datetime64("NaT", "D")],
+        arrivals=arrivals,
+        calendar=date_grid(AS_OF, AS_OF + np.timedelta64(2, "D")),
+        as_of=AS_OF,
+        horizon=2,
+    )
+    np.testing.assert_array_equal(result.events[:, 0, 0], [10, 0, 30, 0, 50])
+    np.testing.assert_array_equal(result.pending[:, 1], [0, 20, 0, 40, 0])
+    # A single posterior draw pairs with every count draw the same way.
+    single = forecast_events(
+        StageParameters(hazard[:1], np.zeros(0), 50.0, np.zeros(0)),
+        origins=[np.datetime64("NaT", "D")],
+        observed=[np.datetime64("NaT", "D")],
+        arrivals=arrivals,
+        calendar=date_grid(AS_OF, AS_OF + np.timedelta64(2, "D")),
+        as_of=AS_OF,
+        horizon=2,
+    )
+    np.testing.assert_array_equal(single.events[:, 0, 0], np.arange(1, 6) * 10)

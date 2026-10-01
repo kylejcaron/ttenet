@@ -9,13 +9,20 @@ import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 import pytest
+from numpyro import handlers
+from numpyro.infer.util import log_density
 
 from ttenet.dates import date_grid
+from ttenet.event_times import TimingInputs, TimingLaw
 from ttenet.models import (
+    StageFit,
     StageObservations,
+    fit_stage,
     make_event_observations,
     make_observations,
+    predict_stage,
     stage_log_likelihood,
+    stage_model,
 )
 from ttenet.survival import (
     StageParameters,
@@ -532,3 +539,211 @@ def test_entry_before_parent_starts_exposure_at_parent_event():
     np.testing.assert_allclose(
         np.exp(stage_log_likelihood(parameters, observations)), [0.1], rtol=1e-6
     )
+
+
+# --- Native observation: log joint, exposure and posterior predictive ---------
+
+
+_PRIOR_SITES = ("age_scale", "age_init", "age_steps", "beta", "cure_intercept", "cure_beta")
+
+
+def _constant_sites(hazard, cure_probability):
+    """Default-model sample-site values giving one flat hazard bin and a flat cure."""
+    return {
+        "age_scale": jnp.array(1.0),
+        "age_init": jnp.array(float(np.log(hazard / (1 - hazard)))),
+        "age_steps": jnp.zeros(0),
+        "beta": jnp.zeros(0),
+        "cure_intercept": jnp.array(float(np.log(cure_probability / (1 - cure_probability)))),
+        "cure_beta": jnp.zeros(0),
+    }
+
+
+def _observation_log_density(sites, observations):
+    """Log density of the native observation site alone, as a function of the prior sites."""
+    model = handlers.block(
+        handlers.substitute(stage_model, data=sites), hide=list(_PRIOR_SITES) + ["age_logits"]
+    )
+    return log_density(model, (observations,), {"age_bins": 1}, {})[0]
+
+
+def test_native_log_joint_matches_analytic_probabilities_and_gradients():
+    # h=.5, pi=.4: event on the second exposed day is .4*.5*.5=.1; censoring
+    # after two exposed days is .6+.4*.25=.7. The observation site of the
+    # NumPyro model carries exactly that likelihood, and its gradients are the
+    # closed forms d/d(age_init) = (1-2h) + .4*2(1-h)(-h(1-h))/.7 = -1/7 and
+    # d/d(cure_intercept) = (1-pi) + (-pi(1-pi) + pi(1-pi)*.25)/.7 = 12/35.
+    observations = _observations(ages=[[0, 1], [0, 1]], event_index=[1, -1])
+    sites = _constant_sites(0.5, 0.4)
+    value, gradients = jax.value_and_grad(_observation_log_density)(sites, observations)
+    np.testing.assert_allclose(float(value), np.log(0.1) + np.log(0.7), rtol=1e-6)
+    np.testing.assert_allclose(float(gradients["age_init"]), -1 / 7, rtol=1e-5)
+    np.testing.assert_allclose(float(gradients["cure_intercept"]), 12 / 35, rtol=1e-5)
+    assert all(np.isfinite(np.asarray(value)).all() for value in gradients.values())
+
+
+def test_native_log_joint_conditions_delayed_entry_like_the_public_helper():
+    # Two known event-free pre-entry days, then two exposed censored days:
+    # ((1-pi) + pi*S_pre*S_post) / ((1-pi) + pi*S_pre) = .625/.7. The gradient
+    # is checked against central differences of that float64 identity.
+    observations = StageObservations(
+        ages=jnp.array([[0, 1, 2, 3]]),
+        features=jnp.zeros((1, 4, 0)),
+        cure_features=jnp.zeros((1, 0)),
+        at_risk=jnp.array([[False, False, True, True]]),
+        allowed=jnp.ones((1, 4), dtype=bool),
+        event_index=jnp.array([-1]),
+        pre_entry=jnp.array([[True, True, False, False]]),
+    )
+
+    def oracle(age_init, cure_intercept):
+        hazard = 1 / (1 + np.exp(-age_init))
+        pi = 1 / (1 + np.exp(-cure_intercept))
+        survive = (1 - hazard) ** 2
+        return np.log(((1 - pi) + pi * survive * survive) / ((1 - pi) + pi * survive))
+
+    sites = _constant_sites(0.5, 0.4)
+    value, gradients = jax.value_and_grad(_observation_log_density)(sites, observations)
+    np.testing.assert_allclose(float(value), np.log(0.625 / 0.7), rtol=1e-6)
+    step = 1e-6
+    theta, cure = float(sites["age_init"]), float(sites["cure_intercept"])
+    expected_theta = (oracle(theta + step, cure) - oracle(theta - step, cure)) / (2 * step)
+    expected_cure = (oracle(theta, cure + step) - oracle(theta, cure - step)) / (2 * step)
+    np.testing.assert_allclose(float(gradients["age_init"]), expected_theta, rtol=1e-4)
+    np.testing.assert_allclose(float(gradients["cure_intercept"]), expected_cure, rtol=1e-4)
+
+
+def test_builder_exposure_is_administrative_and_stops_at_as_of():
+    # Exposure runs from the clock origin through min(deadline, as_of) even for
+    # a unit whose event is observed earlier, while at_risk still stops at the
+    # event; a calendar extending past as_of never adds exposure.
+    history = _history(
+        as_of="2026-01-10",
+        policy_days=5,
+        item_id=["event", "expired", "late"],
+        sale_date=pd.to_datetime(["2026-01-01", "2026-01-01", "2026-01-08"]),
+        initiation_date=pd.to_datetime(["2026-01-03", pd.NaT, pd.NaT]),
+        receipt_date=pd.to_datetime([pd.NaT, pd.NaT, pd.NaT]),
+    )
+    calendar = date_grid("2026-01-01", "2026-02-01")
+    observations = make_observations(history, "initiation", calendar)
+    exposure = np.array(observations.exposure)
+    at_risk = np.array(observations.at_risk)
+    ages = np.array(observations.ages)
+    assert exposure.shape == at_risk.shape
+    np.testing.assert_array_equal(np.flatnonzero(at_risk[0]), [0, 1, 2])
+    np.testing.assert_array_equal(np.flatnonzero(exposure[0]), [0, 1, 2, 3, 4, 5])
+    np.testing.assert_array_equal(np.flatnonzero(exposure[1]), [0, 1, 2, 3, 4, 5])
+    np.testing.assert_array_equal(np.flatnonzero(exposure[2]), [7, 8, 9])
+    assert not exposure[:, 10:].any()
+    assert not exposure[ages < 0].any()
+
+
+def test_pre_entry_and_exposure_never_overlap_or_precede_the_origin():
+    frame = pd.DataFrame(
+        {"origin": pd.to_datetime(["2026-01-03"]), "own_event": pd.to_datetime([pd.NaT])}
+    )
+    observations = make_event_observations(
+        frame,
+        origin_column="origin",
+        event_column="own_event",
+        as_of="2026-01-10",
+        calendar=date_grid("2026-01-01", "2026-01-12"),
+        deadline_days=4,
+        entry_dates=["2026-01-05"],
+    )
+    pre_entry = np.array(observations.pre_entry[0])
+    exposure = np.array(observations.exposure[0])
+    np.testing.assert_array_equal(np.flatnonzero(pre_entry), [2, 3])
+    np.testing.assert_array_equal(np.flatnonzero(exposure), [4, 5, 6])
+    assert not (pre_entry & exposure).any()
+
+
+def test_manual_observations_without_exposure_keep_their_event_window():
+    # Legacy hand-built observations carry only at_risk. An event on a day
+    # outside that window stays impossible, and censoring still sums survival
+    # over exactly the at_risk days.
+    params = _constant_hazard_params(hazard=0.5, cure_probability=0.4)
+    outside = _observations(ages=[[0, 1, 2]], event_index=[2], at_risk=[[True, True, False]])
+    assert float(stage_log_likelihood(params, outside)[0]) == -np.inf
+    censored = _observations(
+        ages=[[0, 1, 2, 3]], event_index=[-1], at_risk=[[True, True, False, False]]
+    )
+    np.testing.assert_allclose(np.exp(stage_log_likelihood(params, censored)), [0.7], rtol=1e-6)
+
+
+def _constant_fit(hazard, cure_probability, draws):
+    single = _constant_hazard_params(hazard, cure_probability, num_bins=1)
+    parameters = jax.tree_util.tree_map(
+        lambda leaf: jnp.broadcast_to(leaf, (draws,) + leaf.shape), single
+    )
+    return StageFit(parameters, jnp.zeros(0), num_samples=draws)
+
+
+def test_predict_stage_draws_the_fitted_law_not_the_stored_observations():
+    # Two units exposed on four open days (h=.5, pi=.4); one closed day.
+    # Posterior predictive trajectories must follow the law: the unit with an
+    # observed day-1 event can fire on any exposed day, including after its
+    # observed event, and the no-event share is .6+.4*.5**4=.625.
+    draws = 4000
+    observations = StageObservations(
+        ages=jnp.array([[0, 1, 2, 3, 4]] * 2),
+        features=jnp.zeros((2, 5, 0)),
+        cure_features=jnp.zeros((2, 0)),
+        at_risk=jnp.array([[True, True, False, False, False], [True] * 5]),
+        allowed=jnp.array([[True, True, True, False, True]] * 2),
+        event_index=jnp.array([1, -1]),
+        exposure=jnp.ones((2, 5), dtype=bool),
+    )
+    paths = np.asarray(predict_stage(_constant_fit(0.5, 0.4, draws), observations, seed=3))
+    assert paths.shape == (draws, 5, 2)
+    assert np.issubdtype(paths.dtype, np.integer)
+    assert set(np.unique(paths)) <= {0, 1}
+    assert (paths.sum(axis=1) <= 1).all()
+    assert not paths[:, 3, :].any()
+    observed = np.zeros((5, 2), dtype=int)
+    observed[1, 0] = 1
+    assert not np.array_equal(paths, np.broadcast_to(observed, paths.shape))
+    assert paths[:, 2, 0].sum() > 0 and paths[:, 4, 0].sum() > 0
+    no_event = 1 - paths.sum(axis=1)
+    np.testing.assert_allclose(no_event.mean(axis=0), 0.625, atol=0.03)
+    np.testing.assert_allclose(paths[:, 0].mean(axis=0), 0.2, atol=0.03)
+    replay = np.asarray(predict_stage(_constant_fit(0.5, 0.4, draws), observations, seed=3))
+    np.testing.assert_array_equal(paths, replay)
+
+
+def test_fit_stage_default_family_keeps_stage_parameters_with_draw_axes():
+    rng = np.random.default_rng(3)
+    sales = pd.to_datetime("2026-01-01") + pd.to_timedelta(rng.integers(0, 10, 40), unit="D")
+    delay = rng.geometric(0.3, 40) - 1
+    initiated = rng.random(40) < 0.6
+    events = pd.Series(sales + pd.to_timedelta(delay, unit="D")).where(initiated)
+    history = _history(
+        as_of="2026-01-25",
+        policy_days=30,
+        item_id=np.arange(40),
+        sale_date=sales,
+        initiation_date=events,
+        receipt_date=pd.to_datetime([pd.NaT] * 40),
+    )
+    observations = make_observations(history, "initiation", date_grid("2026-01-01", "2026-01-25"))
+    fit = fit_stage(observations, age_bins=4, num_steps=30, num_samples=7, seed=1)
+    assert fit.event_time_model is None and fit.shared is None
+    assert fit.num_samples == 7 and fit.draws == 7
+    assert fit.parameters.age_logits.shape == (7, 4)
+    assert fit.parameters.cure_intercept.shape == (7,)
+    assert fit.parameters.beta.shape == (7, 0) and fit.parameters.cure_beta.shape == (7, 0)
+    assert np.isfinite(fit.losses).all() and fit.losses.shape == (30,)
+    inputs = TimingInputs(
+        ages=jnp.array([[0, 5], [1, 6], [2, 7]]),
+        features=jnp.zeros((3, 2, 0)),
+        cure_features=jnp.zeros((2, 0)),
+    )
+    timing, logits = fit.timing(inputs, draw=2)
+    assert isinstance(timing, TimingLaw)
+    assert timing.log_hazard.shape == (3, 2) and logits.shape == (2,)
+    expected = jax.nn.log_sigmoid(fit.parameters.age_logits[2][jnp.minimum(inputs.ages, 3)])
+    np.testing.assert_allclose(timing.log_hazard, expected, rtol=1e-6)
+    # The legacy two-argument result still describes its draws from the arrays.
+    legacy = StageFit(fit.parameters, fit.losses)
+    assert legacy.draws == 7 and legacy.num_samples is None

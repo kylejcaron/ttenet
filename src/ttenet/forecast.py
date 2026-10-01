@@ -1,107 +1,114 @@
-"""Calendar-day, count-conserving event forecasts built on one generic kernel.
+"""Calendar-day, count-conserving event forecasts from the shared survival law.
 
 ``forecast_events`` propagates a single parent -> child event (e.g. sale ->
 initiation, or initiation -> receipt) forward from ``as_of`` through a
-calendar-day horizon, given a stage's fitted mixture-cure parameters, known
-historical origin/own-event dates, and an exact realized-arrivals array for
-new parent events during the horizon. ``forecast_returns`` composes two
-calls to this kernel (initiation, then receipt, the second consuming the
-first's ``events`` output as its ``arrivals``) to reproduce the full retail
-return process, and adds the exact analytic eventual-receipt expectations
-for the existing historical population via ``expected_return_receipts``.
+calendar-day horizon, given a stage's fitted timing family, known historical
+origin/own-event dates, and an exact realized-arrivals array for new parent
+events during the horizon. ``forecast_returns`` composes two calls (initiation,
+then receipt, the second consuming the first's ``events`` output as its
+``arrivals``) to reproduce the full retail return process, and adds the exact
+eventual-receipt expectations for the existing historical population via
+``expected_return_receipts``.
 
 Every cohort (one historical row, or one future dated sales cohort) is
 tracked as a conserved integer count, never expanded per unit: a historical
 row simply starts with count 1. Population mass is exact within every
 posterior/count draw and no unit is ever materialized or destroyed.
 
-Host float64 hazard/cure arithmetic
-------------------------------------
-This module is host-side NumPy simulation, not JAX-traced code: parameter
-draws are ordinary float64 NumPy arrays, and every day's hazard/susceptibility
-value is computed directly from the *documented* linear equations behind
-``survival.stage_hazard``/``survival.susceptibility``
-(``age_logits[min(age, K-1)] + x(t) @ beta`` and
-``cure_intercept + z @ cure_beta``) rather than by calling those JAX
-functions and re-deriving a logit from their sigmoid output. Two reasons:
+Stage parameters
+----------------
+Each stage is a ``StageParameters`` (one draw, or a leading draw axis) or a
+``StageFit``. Both replay through ``StageFit.timing``: the default family
+evaluates ``event_times.default_timing`` on the draw's parameters; a custom
+family reruns its ``event_time_model`` factory with the draw's named sites
+and resolved shared values substituted, so new ages, features and horizons
+re-evaluate the family rather than extend a frozen training grid. The host
+only prepares ``TimingInputs`` (ages, regressors) and administrative masks
+(closures, exposure, known pre-entry survival); cure marginalization,
+conditioning and date masses come from ``event_times.survival_kernel``.
 
-* Day-by-day cumulative log-survival tracking over long horizons needs
-  ``log(1 - hazard)``. Forming that from an already-sigmoid-transformed
-  hazard loses precision as the hazard approaches 0 or 1 (float32 rounds
-  ``sigmoid(logit)`` to exactly 1 once ``logit`` exceeds ~16.7, turning
-  ``log(1 - hazard)`` into ``-inf``). Computed instead as
-  ``-log(1 + exp(hazard_logit)) = -logaddexp(0, hazard_logit)`` directly from
-  the pre-sigmoid logit, this stays finite and accurate for any realistic
-  finite logit in float64.
-* ``conditional_susceptibility``'s ``pi * S / ((1 - pi) + pi * S)`` is
-  exactly ``sigmoid(cure_logit + log_survival)`` in logit space (dividing
-  numerator/denominator by ``1 - pi`` turns the ratio into ``sigmoid`` of the
-  sum of logits). Evaluating the combined logit directly avoids ever forming
-  ``pi`` and ``1 - pi`` separately, so it cannot hit the indeterminate
-  ``0 / 0`` that a rounded ``pi == 1`` meets a ``log_survival == -inf``
-  history with.
-
-Both are the *same* mixture-cure model implemented by ``survival.py`` and
-``models.py``; this module never redefines the model, it
-only evaluates its equations without a lossy sigmoid/logit round trip. If any
-row's as-of conditioning still produces a nonfinite susceptibility/log-
-survival combination (e.g. a genuinely impossible supplied history), forecast
-construction fails loudly for that row rather than silently treating it as
-certain cure.
-
-Generic event kernel mechanics
---------------------------------
-``forecast_events`` packs cohorts into parent-date pools. A unit, or a count
-cohort whose parents arrive on only one day per draw, needs one pool with a
-draw-specific clock. Cohorts with arrivals on several days retain separate
-pools for the actual arrival dates. Empty pools are not allocated.
-Historical pools start with susceptibility conditioned on all observed
-survival through ``as_of``; future pools start at their original susceptibility.
-Future pools cannot produce events or contribute to pending stocks before
-their parent day. An age-zero trial runs on that day, allowing same-day
+Native allocation driver
+------------------------
+``forecast_events`` packs cohorts into immediate-parent-date pools. A unit,
+or a count cohort whose parents arrive on only one day per draw, needs one
+pool with a draw-specific clock; cohorts with arrivals on several days keep
+separate pools for the actual arrival dates; empty pools are not allocated.
+Historical pools enter the horizon as selected survivors: their
+susceptibility logits are conditioned on the known event-free run through
+``as_of`` (the kernel's pre-entry rule evaluated on the history window), so
+no historical event path is materialized. Future pools cannot fire before
+their parent day; an age-zero trial runs on that day, allowing same-day
 transitions. Every pool retains its original root-cohort identity.
 
-A unit's *marginal* (cure-integrated) hazard on a given day is the raw stage
-hazard multiplied by the *current posterior probability of being
-susceptible given survival so far*, recomputed every day from a running
-cumulative log-survival state per pool. This is mathematically equivalent
-to drawing each unit's latent cure status once and simulating only the
-susceptible sub-population forward, without ever having to materialize or
-track that latent draw. Once a pool's age exceeds a configured
-``deadline_days``, its members stop accruing hazard (frozen survival, zero
-event probability) but remain counted in ``pending`` forever -- ``eligible``
-is the subset still within the deadline.
+For every posterior draw the pools form a NumPyro Forecast program: an
+upstream ``Horizon`` over the forecast days with an empty observed prefix,
+and ``predict`` with the native ``EventTime`` law for pools statically known
+to hold one unit or ``CohortEventTime`` for counted pools. The generated
+suffix is read from the program's ``forecast`` site through
+``numpyro.infer.Predictive`` with a singleton batch, one program per draw,
+so draw-specific parent dates and counts never cross other draws' posterior
+rows; ``forecast`` in ``numpyro_forecast`` runs the same ``Predictive`` call
+but refuses the empty posterior of a fixed family, which this driver must
+replay ``StageFit.num_samples`` times. Draws are mapped in fixed-shape blocks
+under a local ``jax.enable_x64`` scope so counts stay exact int64; nothing
+here samples on the host or changes global precision.
 
-Receipt tail assumption
-------------------------
-Receipt age uses the final fitted baseline bin beyond the learned ages.
-Eventual receipt estimates assume positive tail exposure continues and
-receiving eventually reopens. For a susceptible unit, cumulative tail hazard
-then diverges and eventual receipt probability is one.
+Once a pool's age exceeds a configured ``deadline_days``, its members stop
+accruing hazard but remain counted in ``pending`` forever; ``eligible`` is
+the subset still within the deadline.
+
+Tail assumptions
+----------------
+Eventual expectations need each family's declared ``tail_behavior``:
+``{"kind": "proper"}`` means a susceptible unit eventually fires under the
+documented continuing-exposure assumption (positive hazard keeps running and
+closed days eventually reopen); the default family's final fitted baseline
+bin continues beyond the learned ages and is proper. ``{"kind": "finite",
+"last_age": a}`` integrates the calendar-masked kernel through age ``a``,
+closures included -- a terminal atom falling on a closure does not fire.
+``{"kind": "unknown"}`` cannot support an eventual expectation and is
+refused unless a deadline bounds the stage. Beyond the supplied calendar,
+finite windows continue all-open with each row's last calendar features
+held constant; proper initiation mass that remains after the calendar ends
+completes with the stationary receipt probability computed under that same
+continuation from the same factory.
 
 The ``expected_*_receipts`` fields concern the historical population at the
-forecast origin, not future sales. Their initiation component still depends
-on the supplied calendar through the policy deadline (when one is
-configured; an unbounded ``policy_days=None`` initiation reduces the
-eventual-initiation probability to the posterior conditional susceptibility
-itself, exactly like the already-unbounded receipt stage). Simulated
-``receipts`` include future sales and process noise, so a realized path
-need not be below the historical-population eventual expectation.
-Finite-horizon expected receipts from the same historical population cannot
-exceed that eventual expectation. No receipt deadline is invented.
+forecast origin, not future sales. Their initiation component depends on the
+supplied calendar through the policy deadline (or the family's finite
+support); an unbounded proper initiation reduces to the conditional
+susceptibility itself. Simulated ``receipts`` include future sales and
+process noise, so a realized path need not be below the historical-
+population eventual expectation. No receipt deadline is invented.
 """
 
 from __future__ import annotations
 
+import functools
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pandas as pd
+from jax import lax, random
+from jax.nn import sigmoid
+from numpyro.infer import Predictive
+from numpyro_forecast import Horizon, predict
 
 from .dates import date_grid, elapsed_days, to_day
+from .distributions import CohortEventTime, EventTime
+from .event_times import TimingInputs, survival_kernel
 from .integration import SalesForecast, _validate_counts
+from .models import StageFit
 from .survival import StageParameters
+
+_DEFAULT_TAIL = {"kind": "proper"}
+_TAIL_KINDS = ("proper", "finite", "unknown")
+_BLOCK_CELLS = 1 << 22
+"""Per-block budget of ``[time, pool]`` cells: draws are mapped in blocks this size."""
 
 
 @dataclass(frozen=True)
@@ -114,9 +121,8 @@ class ReturnForecast:
     stochastic per-draw simulations over the supplied ``calendar``/horizon.
     ``expected_existing_receipts``, ``expected_uninitiated_receipts``, and
     ``expected_open_receipts`` are exact analytic expectations under the
-    continuing-tail assumption documented on this module and are independent
-    of the simulated draws. See the module docstring for the exact
-    definition of the tail assumption. ``sales`` is the bundled
+    tail assumptions documented on this module and are independent of the
+    simulated draws. ``sales`` is the bundled
     :class:`~ttenet.integration.SalesForecast` source that produced the
     future cohorts, if any was supplied.
     """
@@ -149,7 +155,7 @@ class EventForecast:
 
 
 # --------------------------------------------------------------------------
-# Parameter normalization
+# Stage parameter resolution
 # --------------------------------------------------------------------------
 
 
@@ -199,36 +205,117 @@ def _align_draws(*counts):
     return unique[0] if unique else 1
 
 
+def _tail_behavior(fit):
+    """The family's static tail declaration; the default family is proper."""
+    if fit.event_time_model is None:
+        return _DEFAULT_TAIL
+    tail = getattr(fit.event_time_model, "tail_behavior", None)
+    if not isinstance(tail, Mapping) or tail.get("kind") not in _TAIL_KINDS:
+        raise ValueError(
+            "event_time_model.tail_behavior must be {'kind': 'proper'}, "
+            "{'kind': 'finite', 'last_age': a} or {'kind': 'unknown'}"
+        )
+    if tail["kind"] == "finite":
+        last_age = tail.get("last_age")
+        if isinstance(last_age, bool) or not isinstance(last_age, (int, np.integer)):
+            raise ValueError("a finite tail_behavior must declare an integer last_age")
+        if last_age < 0:
+            raise ValueError("tail_behavior last_age must be nonnegative")
+    return tail
+
+
+class _Stage(NamedTuple):
+    """A stage ready to replay: its fit, draw count, regressor widths and tail."""
+
+    fit: StageFit
+    draws: int
+    widths: tuple[int, int] | None  # (P, Q) for the default family, None for a custom one
+    tail: Mapping
+
+
+def _resolve_stage(parameters, name):
+    """Accept ``StageParameters`` (one draw or stacked) or a ``StageFit``."""
+    if isinstance(parameters, StageFit):
+        fit = parameters
+    else:
+        normalized, draws = _normalize_stage_parameters(parameters, name)
+        fit = StageFit(_broadcast_stage(normalized, draws), np.zeros(0))
+    widths = None
+    if fit.event_time_model is None:
+        widths = (int(fit.parameters.beta.shape[-1]), int(fit.parameters.cure_beta.shape[-1]))
+    return _Stage(fit, fit.draws, widths, _tail_behavior(fit))
+
+
+def _x64(tree):
+    """Device copies of a pytree with float64/int64 leaves (inside ``jax.enable_x64``)."""
+
+    def promote(leaf):
+        value = jnp.asarray(leaf)
+        if jnp.issubdtype(value.dtype, jnp.floating):
+            return value.astype(jnp.float64)
+        if jnp.issubdtype(value.dtype, jnp.integer):
+            return value.astype(jnp.int64)
+        return value
+
+    return jax.tree.map(promote, tree)
+
+
+def _root_key(seed):
+    sequence = seed if isinstance(seed, np.random.SeedSequence) else np.random.SeedSequence(seed)
+    return random.key(int(sequence.generate_state(1, dtype=np.uint32)[0]))
+
+
+def _map_draws(block, draws, cells, key, *args):
+    """Run a jitted block function over every draw index in fixed-shape blocks.
+
+    Block ``i`` receives draw indices ``arange(i * size, (i + 1) * size) % draws``
+    and gathers its own rows of the per-draw arguments, so every block shares
+    one shape and compiles once; wrapped rows of the last block are
+    discarded. Outputs are concatenated along the draw axis.
+    """
+    size = max(1, min(draws, _BLOCK_CELLS // max(int(cells), 1)))
+    pieces = []
+    for index, start in enumerate(range(0, draws, size)):
+        indices = jnp.asarray(np.arange(start, start + size) % draws)
+        result = block(random.fold_in(key, index), indices, *args)
+        valid = min(size, draws - start)
+        pieces.append(jax.tree.map(lambda value: np.asarray(value)[:valid], result))
+    return jax.tree.map(lambda *values: np.concatenate(values), *pieces)
+
+
 # --------------------------------------------------------------------------
 # Feature / allowed / count validation
 # --------------------------------------------------------------------------
 
 
 def _prepare_features(features, n_rows, calendar_len, width, name):
+    """``[N, T, P]`` regressors; ``width`` None accepts any P (a custom family's own)."""
     if features is None:
-        if width != 0:
+        if width:
             raise ValueError(
                 f"{name} is required because the fitted model has feature width {width}"
             )
         return np.zeros((n_rows, calendar_len, 0), dtype=np.float64)
     arr = np.asarray(features, dtype=np.float64)
-    expected_shape = (n_rows, calendar_len, width)
-    if tuple(arr.shape) != expected_shape:
-        raise ValueError(f"{name} must have shape {expected_shape}; got {tuple(arr.shape)}")
+    expected = (n_rows, calendar_len) + (() if width is None else (width,))
+    if arr.ndim != 3 or tuple(arr.shape[: len(expected)]) != expected:
+        shown = expected if width is not None else expected + ("P",)
+        raise ValueError(f"{name} must have shape {shown}; got {tuple(arr.shape)}")
     return arr
 
 
 def _prepare_cure_features(features, n_rows, width, name):
     if features is None:
-        if width != 0:
+        if width:
             raise ValueError(
                 f"{name} is required because the fitted model has cure feature width {width}"
             )
         return np.zeros((n_rows, 0), dtype=np.float64)
     arr = np.asarray(features, dtype=np.float64)
-    expected_shape = (n_rows, width)
-    if tuple(arr.shape) != expected_shape:
-        raise ValueError(f"{name} must have shape {expected_shape}; got {tuple(arr.shape)}")
+    expected = (n_rows,) + (() if width is None else (width,))
+    if arr.ndim != 2 or tuple(arr.shape[: len(expected)]) != expected:
+        shown = expected if width is not None else expected + ("Q",)
+        raise ValueError(f"{name} must have shape {shown}; got {tuple(arr.shape)}")
     return arr
 
 
@@ -242,6 +329,24 @@ def _prepare_allowed(allowed, n_rows, calendar_len, name):
         return arr
     raise ValueError(
         f"{name} must have shape ({calendar_len},) or ({n_rows}, {calendar_len}); got {tuple(arr.shape)}"
+    )
+
+
+class _StageInputs(NamedTuple):
+    """Validated calendar-indexed regressors and closures of one stage's rows."""
+
+    features: Any  # [N, T, P]
+    cure_features: Any  # [N, Q]
+    allowed: Any  # [N, T]
+
+
+def _stage_inputs(stage, features, cure_features, allowed, n_rows, calendar_len, *, prefix=""):
+    """Validate a stage's host regressors; a custom family's widths are its own."""
+    p, q = stage.widths if stage.widths is not None else (None, None)
+    return _StageInputs(
+        _prepare_features(features, n_rows, calendar_len, p, f"{prefix}features"),
+        _prepare_cure_features(cure_features, n_rows, q, f"{prefix}cure_features"),
+        _prepare_allowed(allowed, n_rows, calendar_len, f"{prefix}allowed"),
     )
 
 
@@ -302,7 +407,8 @@ def _validate_calendar(calendar, as_of, horizon, earliest_origin, latest_deadlin
         raise ValueError("calendar must extend through the output horizon (as_of + horizon)")
     if cal[-1] < latest_deadline:
         raise ValueError(
-            "calendar must extend through the latest uninitiated historical initiation deadline"
+            "calendar must extend through the latest uninitiated historical initiation "
+            "deadline or finite initiation support window"
         )
     return cal
 
@@ -312,136 +418,214 @@ def _elapsed(origin, target):
 
 
 # --------------------------------------------------------------------------
-# Host float64 hazard/cure logit primitives (see module docstring)
+# Age-relative windows of the shared kernel
 # --------------------------------------------------------------------------
 
 
-def _sigmoid(x):
-    """Numerically stable sigmoid for float64 NumPy arrays."""
-    x = np.asarray(x, dtype=np.float64)
-    out = np.empty_like(x)
-    pos = x >= 0
-    out[pos] = 1.0 / (1.0 + np.exp(-x[pos]))
-    exp_x = np.exp(x[~pos])
-    out[~pos] = exp_x / (1.0 + exp_x)
-    return out
+class _AgeWindow(NamedTuple):
+    """``[A, N]`` age-relative grid of selected rows with their calendar regressors.
 
-
-def _softplus(x):
-    """``log(1 + exp(x))``, stable via ``logaddexp(0, x)``."""
-    return np.logaddexp(0.0, x)
-
-
-def _linear_logit(features, weights):
-    """``features @ weights`` contracted over the trailing feature axis.
-
-    ``features`` is ``[..., P]`` (no draw axis); ``weights`` is ``[D, P]``.
-    Returns ``[D, ...]`` -- the same contraction as
-    ``survival._linear_effect`` with the draw axis made explicit and leading.
+    Cell ``(a, n)`` is row ``n`` at age ``a`` on calendar day
+    ``origin[n] + a``. Days past the supplied calendar continue all-open with
+    the last calendar day's regressors held constant.
     """
-    return np.tensordot(
-        np.asarray(weights, dtype=np.float64),
-        np.asarray(features, dtype=np.float64),
-        axes=([-1], [-1]),
+
+    ages: Any  # [A, N]
+    features: Any  # [A, N, P]
+    cure_features: Any  # [N, Q]
+    allowed: Any  # [A, N]
+    pre_entry: Any  # [A, N] known event-free ages
+    exposure: Any  # [A, N] ages still able to fire
+
+
+def _age_window(inputs, rows, origin_idx, span, *, known_through, exposed_through):
+    """Build an ``_AgeWindow`` of ``span`` ages for ``rows`` of a stage's inputs.
+
+    ``known_through[n]`` is the last age with a known event-free outcome
+    (``-1`` for none); ``exposed_through[n]`` is the last age that may still
+    fire (``-1`` for no exposed window); exposure starts the age after the
+    known run.
+    """
+    rows = np.asarray(rows, dtype=np.int64)
+    origin_idx = np.asarray(origin_idx, dtype=np.int64)
+    n = rows.shape[0]
+    calendar_len = inputs.allowed.shape[1]
+    ages = np.broadcast_to(np.arange(span, dtype=np.int64)[:, None], (span, n))
+    calendar_day = origin_idx[None, :] + ages
+    within = calendar_day < calendar_len
+    index = np.clip(calendar_day, 0, calendar_len - 1)
+    row_index = np.broadcast_to(rows[None, :], (span, n))
+    known_through = np.asarray(known_through, dtype=np.int64)[None, :]
+    exposed_through = np.asarray(exposed_through, dtype=np.int64)[None, :]
+    return _AgeWindow(
+        ages=ages,
+        features=inputs.features[row_index, index],
+        cure_features=inputs.cure_features[rows],
+        allowed=np.where(within, inputs.allowed[row_index, index], True),
+        pre_entry=ages <= known_through,
+        exposure=(ages > known_through) & (ages <= exposed_through),
     )
 
 
-def _hazard_logit(params, ages, features, allowed):
-    """Host float64 hazard logit, mirroring ``survival.stage_hazard`` exactly.
+def _window_kernel(fit, draw, window):
+    """The shared kernel of one posterior draw on an age window."""
+    timing, logits = fit.timing(
+        TimingInputs(window.ages, window.features, window.cure_features), draw=draw
+    )
+    return survival_kernel(
+        timing,
+        logits,
+        allowed=window.allowed,
+        exposure=window.exposure,
+        pre_entry=window.pre_entry,
+    )
 
-    ``ages`` is ``[D, ...]`` (callers always broadcast a leading draw axis
-    onto ages, even where the age trajectory itself does not vary by draw).
-    ``features``/``allowed`` are ``[..., P]``/``[...]`` and shared across
-    draws. Returns ``-inf`` (so the corresponding hazard probability is
-    exactly zero, never a rounded near-zero) wherever ``ages < 0`` or
-    ``allowed`` is ``False``, exactly matching ``stage_hazard``'s masking.
+
+def _window_probability(kernel, *, eventual):
+    """Per-row probability of firing: within the exposed window, or eventually (proper tail)."""
+    susceptible = jnp.exp(kernel.log_susceptible)
+    if eventual:
+        return susceptible
+    return susceptible * -jnp.expm1(jnp.sum(kernel.log_survival_step, axis=-2))
+
+
+# --------------------------------------------------------------------------
+# Native pool allocation
+# --------------------------------------------------------------------------
+
+
+class _PoolLayout(NamedTuple):
+    """Draw-independent description of one pool partition over the forecast days."""
+
+    features: Any  # [horizon, pools, P]
+    cure_features: Any  # [pools, Q]
+    allowed: Any  # [horizon, pools]
+    cohort: Any  # [pools] root-cohort index of each pool
+    historical: Any  # [h] partition positions of pools pending at as_of
+    entry_rows: Any  # [h] rows of the history window those pools condition on
+
+
+class _Partition(NamedTuple):
+    layout: _PoolLayout
+    parent_day: Any  # [pools] forecast day of the immediate parent event (<= 0: pending at as_of)
+    counts: Any  # [pools] integer population
+
+
+class _PoolInputs(NamedTuple):
+    """Covariates of the pool program over the forecast days.
+
+    ``allowed`` is the time-major ``[horizon, pools]`` calendar grid the
+    upstream ``Horizon`` is derived from; the pools' metadata and other
+    regressors ride along as pytree leaves.
     """
-    ages = np.asarray(ages)
-    num_bins = params.age_logits.shape[-1]
-    age_index = np.clip(ages, 0, num_bins - 1).astype(np.int64)
-    d = params.age_logits.shape[0]
-    flat_index = age_index.reshape(d, -1)
-    baseline = np.take_along_axis(params.age_logits, flat_index, axis=1).reshape(age_index.shape)
-    logit = baseline + _linear_logit(features, params.beta)
-    valid = ages >= 0
-    if allowed is not None:
-        valid = valid & np.asarray(allowed, dtype=bool)[None, ...]
-    return np.where(valid, logit, -np.inf)
+
+    parent_day: Any
+    counts: Any
+    entry_logits: Any  # [h] susceptibility logits conditioned on the event-free run to as_of
+    historical: Any  # [h]
+    features: Any  # [horizon, pools, P]
+    cure_features: Any  # [pools, Q]
+    allowed: Any  # [horizon, pools]
 
 
-def _cure_logit(params, cure_features):
-    """Host float64 cure logit, mirroring ``survival.susceptibility`` exactly.
-
-    ``cure_features`` is ``[N, Q]`` (draw-independent). Returns ``[D, N]``.
-    """
-    return params.cure_intercept[:, None] + _linear_logit(cure_features, params.cure_beta)
+def _exposed(ages, deadline):
+    started = ages >= 0
+    return started if deadline is None else started & (ages <= deadline)
 
 
-def _require_finite(values, name):
-    values = np.asarray(values)
-    if not np.all(np.isfinite(values)):
-        bad = np.argwhere(~np.isfinite(values))[:5].tolist()
-        raise ValueError(
-            f"{name} produced a nonfinite value at draw/row indices {bad} (possibly more) -- this is "
-            "an impossible or degenerate conditional history (an infinite hazard/cure logit combined "
-            "with a fully decayed survival), not a valid cure outcome, and is rejected rather than "
-            "silently treated as certain cure"
+def _pool_model(inputs, data=None, *, fit, draw, deadline, counted):
+    """NumPyro Forecast program of one posterior draw's pools over the horizon."""
+    h = Horizon.from_data(inputs.allowed, data)
+    ages = jnp.arange(1, h.duration + 1)[:, None] - inputs.parent_day[None, :]
+    timing, logits = fit.timing(
+        TimingInputs(ages, inputs.features, inputs.cure_features), draw=draw
+    )
+    logits = logits.at[inputs.historical].set(inputs.entry_logits)
+    kernel = survival_kernel(
+        timing,
+        logits,
+        allowed=inputs.allowed,
+        exposure=_exposed(ages, deadline) & (inputs.counts > 0)[None, :],
+    )
+    if counted:
+        predict(
+            h,
+            lambda log_mass: CohortEventTime(log_mass, kernel.log_tail, inputs.counts),
+            kernel.log_mass,
         )
-    return values
+    else:
+        predict(
+            h,
+            lambda log_hazard: EventTime(kernel=kernel._replace(log_hazard=log_hazard)),
+            kernel.log_hazard,
+        )
 
 
-def _conditional_probability(cure_logit, log_survival, name):
-    """``sigmoid(cure_logit + log_survival)``, i.e. ``conditional_susceptibility`` in logit space."""
-    return _require_finite(_sigmoid(cure_logit + log_survival), name)
+def _draw_forecast(key, draw, fit, history, unit, bulk, *, deadline, num_cohorts):
+    """One posterior draw: native allocations of every pool, reduced to cohorts and stocks."""
+    entry_logits = _window_kernel(fit, draw, history).susceptibility_logits
+    events = pending = eligible = None
+    undefined = jnp.asarray(False)
+    for partition, counted, subkey in zip(
+        (unit, bulk), (False, True), random.split(key, 2), strict=True
+    ):
+        if partition is None:
+            continue
+        layout, parent_day, counts = partition
+        horizon, pools = layout.allowed.shape
+        inputs = _PoolInputs(
+            parent_day,
+            counts,
+            entry_logits[layout.entry_rows],
+            layout.historical,
+            layout.features,
+            layout.cure_features,
+            layout.allowed,
+        )
+        program = functools.partial(
+            _pool_model, fit=fit, draw=draw, deadline=deadline, counted=counted
+        )
+        predictive = Predictive(program, num_samples=1, return_sites=["forecast"], parallel=True)
+        allocation = predictive(subkey, inputs, jnp.zeros((0, pools), counts.dtype))["forecast"][0]
+        undefined = undefined | jnp.any(allocation < 0)
+        ages = jnp.arange(1, horizon + 1)[:, None] - parent_day[None, :]
+        remaining = counts[None, :] - jnp.cumsum(allocation, axis=0)
+        by_cohort = jax.ops.segment_sum(allocation.T, layout.cohort, num_segments=num_cohorts).T
+        started = jnp.sum(jnp.where(ages >= 0, remaining, 0), axis=1)
+        within = jnp.sum(jnp.where(_exposed(ages, deadline), remaining, 0), axis=1)
+        events = by_cohort if events is None else events + by_cohort
+        pending = started if pending is None else pending + started
+        eligible = within if eligible is None else eligible + within
+    return events, pending, eligible, undefined
 
 
-def _gather_window(full_arr, row_positions, cal_idx):
-    """Gather ``full_arr[row_positions[i], cal_idx[i, k], ...]`` for every (i, k)."""
-    selected = np.asarray(full_arr)[np.asarray(row_positions)]  # [N, T, ...]
-    n = selected.shape[0]
-    return selected[np.arange(n)[:, None], cal_idx]  # [N, W, ...]
+@functools.lru_cache(maxsize=None)
+def _forecast_block(deadline, num_cohorts, has_unit, has_bulk):
+    """Jitted, draw-mapped forecast of one static pool configuration.
 
-
-def _window_log_survival(
-    params,
-    full_features,
-    full_allowed,
-    row_positions,
-    origin_idx,
-    start_age,
-    end_age,
-    max_width,
-    calendar_len,
-):
-    """Cumulative ``sum(log(1 - hazard))`` over ages [start_age, end_age] inclusive, per row/draw.
-
-    Computed as ``-softplus(hazard_logit)`` directly from the pre-sigmoid
-    logit (see module docstring) rather than ``log1p(-sigmoid(logit))``.
-    Each row ``i`` has its own calendar origin (``origin_idx[i]``); age ``a``
-    for row ``i`` corresponds to calendar position ``origin_idx[i] + a``.
-    Rows whose window is empty (``start_age[i] > end_age[i]``) contribute
-    exactly 0. Returns ``[D, N]``.
+    A single-draw fit pairs with every arrival/count draw, and a single
+    arrival draw with every posterior draw: the fit row of draw ``i`` is
+    ``i % fit.draws`` and the pool row ``i`` is gathered from the stacked
+    per-draw metadata (already broadcast to the aligned draw count).
     """
-    n = row_positions.shape[0]
-    d = params.age_logits.shape[0]
-    if n == 0:
-        return np.zeros((d, 0))
-    ages_rel = start_age[:, None] + np.arange(max_width)[None, :]  # [N, W]
-    ages = np.broadcast_to(ages_rel[None, :, :], (d, n, max_width))
-    cal_idx = np.clip(origin_idx[:, None] + ages_rel, 0, calendar_len - 1)
-    features = _gather_window(full_features, row_positions, cal_idx)  # [N, W, P]
-    allowed = _gather_window(full_allowed, row_positions, cal_idx)  # [N, W]
-    within = (
-        (ages_rel <= end_age[:, None]) & (start_age[:, None] <= end_age[:, None]) & (ages_rel >= 0)
-    )
-    logit = _hazard_logit(params, ages, features, allowed)  # [D, N, W]
-    log_survive = np.where(within[None, :, :], -_softplus(logit), 0.0)
-    return np.sum(log_survive, axis=-1)
+    per_draw = functools.partial(_draw_forecast, deadline=deadline, num_cohorts=num_cohorts)
+    mapped = _Partition(None, 0, 0)
+    axes = (0, 0, None, None, mapped if has_unit else None, mapped if has_bulk else None)
+    vmapped = jax.vmap(per_draw, in_axes=axes)
 
+    def rows(partition, indices):
+        if partition is None:
+            return None
+        return partition._replace(
+            parent_day=partition.parent_day[indices], counts=partition.counts[indices]
+        )
 
-# --------------------------------------------------------------------------
-# Generic event kernel
-# --------------------------------------------------------------------------
+    def block(key, indices, fit, history, unit, bulk):
+        keys = random.split(key, indices.shape[0])
+        draws = indices % fit.draws
+        return vmapped(keys, draws, fit, history, rows(unit, indices), rows(bulk, indices))
+
+    return jax.jit(block)
 
 
 def _arrival_pools(arrivals, initial_pending, age0):
@@ -470,11 +654,10 @@ def _arrival_pools(arrivals, initial_pending, age0):
     occupied = np.column_stack((initial_pending[multiple], possible[:, multiple].T))
     groups, days = np.nonzero(occupied)
     pool_cohorts = np.concatenate((single, multiple[groups]))
-    active_cohorts = np.concatenate((single, multiple))
     sizes = occupied.sum(axis=1)
     starts = np.concatenate((np.arange(single.size), single.size + np.cumsum(sizes) - sizes))
     initial_pool = np.full(cohorts, -1, dtype=np.int64)
-    initial_pool[active_cohorts] = starts
+    initial_pool[np.concatenate((single, multiple))] = starts
 
     counts = np.empty((draws, pool_cohorts.size), dtype=np.int64)
     origins = np.empty_like(counts)
@@ -484,7 +667,23 @@ def _arrival_pools(arrivals, initial_pending, age0):
     multi_counts[:] = arrivals[:, days - 1, multiple[groups]]
     multi_counts[:, days == 0] = 1
     origins[:, single.size :] = np.where(days == 0, -age0[multiple[groups]], days)
-    return counts, origins, pool_cohorts, active_cohorts, starts, initial_pool
+    return counts, origins, pool_cohorts, initial_pool
+
+
+def _partition(index, counts, parent_days, pool_cohorts, inputs, future_idx):
+    """Host-packed pool partition over the forecast days, or ``None`` when empty."""
+    if index.size == 0:
+        return None
+    cohorts = pool_cohorts[index]
+    layout = _PoolLayout(
+        features=inputs.features[cohorts[:, None], future_idx[None, :]].transpose(1, 0, 2),
+        cure_features=inputs.cure_features[cohorts],
+        allowed=inputs.allowed[cohorts[:, None], future_idx[None, :]].T,
+        cohort=cohorts,
+        historical=np.zeros(0, dtype=np.int64),
+        entry_rows=np.zeros(0, dtype=np.int64),
+    )
+    return _Partition(layout, parent_days[:, index], counts[:, index])
 
 
 def forecast_events(
@@ -502,17 +701,18 @@ def forecast_events(
     deadline_days=None,
     seed=0,
 ) -> EventForecast:
-    """Simulate one calendar-day parent -> child event propagation.
+    """Forecast one calendar-day parent -> child event propagation.
 
-    ``origins``/``observed`` are ``[C]`` dates: each cohort's known
-    historical immediate-parent event and its own event, ``NaT`` for
-    unknown/future. A cohort with a known origin ``<= as_of`` and no known
-    own event starts with exactly one pending unit (its actual age at
-    ``as_of``); a cohort whose own event is already observed never produces
-    it again. A cohort with unknown origin (``NaT``) starts with zero
-    pending units -- it can only enter later through ``arrivals`` (e.g. a
-    future sales cohort, whose "origin" is simply the day its arrival lands
-    at age zero).
+    ``parameters`` is a ``StageParameters`` (one draw or a leading draw axis)
+    or a ``StageFit`` of either family. ``origins``/``observed`` are ``[C]``
+    dates: each cohort's known historical immediate-parent event and its own
+    event, ``NaT`` for unknown/future. A cohort with a known origin
+    ``<= as_of`` and no known own event starts with exactly one pending unit
+    (its actual age at ``as_of``); a cohort whose own event is already
+    observed never produces it again. A cohort with unknown origin (``NaT``)
+    starts with zero pending units -- it can only enter later through
+    ``arrivals`` (e.g. a future sales cohort, whose "origin" is simply the
+    day its arrival lands at age zero).
 
     ``arrivals`` is ``[D or 1, horizon, C]``: the exact realized count of
     *new* parent events for each cohort on each forecast day (e.g. a root
@@ -521,8 +721,7 @@ def forecast_events(
     Every arriving unit begins its own age-0 clock that day, so a parent
     event and its child's own trial may both happen the same calendar day.
 
-    See the module docstring for the age-bucket propagation mechanics, the
-    host float64 hazard/cure arithmetic rationale, and the exact
+    See the module docstring for the native allocation driver and the exact
     ``pending``/``eligible`` semantics on :class:`EventForecast`.
     """
     if horizon < 1:
@@ -532,8 +731,9 @@ def forecast_events(
             raise ValueError("deadline_days must be an integer or None")
         if deadline_days < 0:
             raise ValueError("deadline_days must be nonnegative")
+        deadline_days = int(deadline_days)
 
-    params, d_params = _normalize_stage_parameters(parameters, "parameters")
+    stage = _resolve_stage(parameters, "parameters")
 
     origins = np.asarray(to_day(origins)).reshape(-1)
     observed = np.asarray(to_day(observed)).reshape(-1)
@@ -548,7 +748,7 @@ def forecast_events(
     if np.any(event_known & origin_known & (observed < origins)):
         raise ValueError("observed own event precedes its parent/origin date")
     if deadline_days is not None:
-        deadline_date = origins + np.timedelta64(int(deadline_days), "D")
+        deadline_date = origins + np.timedelta64(deadline_days, "D")
         if np.any(event_known & origin_known & (observed > deadline_date)):
             raise ValueError(f"observed own event exceeds the {deadline_days}-day deadline")
 
@@ -568,21 +768,14 @@ def forecast_events(
     if d_arrivals == 0:
         raise ValueError("arrivals must contain at least one draw")
 
-    d = _align_draws(d_params, d_arrivals)
-    params = _broadcast_stage(params, d)
+    d = _align_draws(stage.draws, d_arrivals)
     arrivals_arr = np.broadcast_to(arrivals_arr, (d, horizon, n_cohorts))
-
-    p = int(params.beta.shape[-1])
-    q = int(params.cure_beta.shape[-1])
 
     earliest_origin = origins[origin_known].min() if np.any(origin_known) else as_of
     cal = _validate_calendar(calendar, as_of, horizon, earliest_origin, as_of)
     calendar_len = int(cal.size)
     asof_idx = int(_elapsed(cal[0], as_of))
-
-    features_arr = _prepare_features(features, n_cohorts, calendar_len, p, "features")
-    cure_arr = _prepare_cure_features(cure_features, n_cohorts, q, "cure_features")
-    allowed_arr = _prepare_allowed(allowed, n_cohorts, calendar_len, "allowed")
+    inputs = _stage_inputs(stage, features, cure_features, allowed, n_cohorts, calendar_len)
 
     already_done = event_known & (observed <= as_of)
     initial_pending_mask = origin_known & (origins <= as_of) & ~already_done
@@ -596,72 +789,292 @@ def forecast_events(
         if sum(map(int, row)) > available:
             raise ValueError("total available population in a draw exceeds int64 count support")
 
-    n, parent_days, pool_cohorts, active_cohorts, starts, initial_pool = _arrival_pools(
-        arrivals_arr,
-        initial_pending_mask,
-        age0,
+    counts, parent_days, pool_cohorts, initial_pool = _arrival_pools(
+        arrivals_arr, initial_pending_mask, age0
     )
-    cure_logit = _cure_logit(params, cure_arr[pool_cohorts])
-    log_ssus = np.zeros_like(n, dtype=np.float64)
+    if pool_cohorts.size == 0:
+        zeros = np.zeros((d, horizon), dtype=np.int64)
+        return EventForecast(
+            events=np.zeros((d, horizon, n_cohorts), dtype=np.int64),
+            pending=zeros,
+            eligible=zeros.copy(),
+        )
+
+    # Historical pools are one unit in every draw; their history window conditions entry.
     positions = np.flatnonzero(initial_pending_mask)
+    known_through = age0[positions]
+    if deadline_days is not None:
+        known_through = np.minimum(known_through, deadline_days)
+    history = _age_window(
+        inputs,
+        positions,
+        _elapsed(cal[0], origins[positions]),
+        int(known_through.max()) + 1 if positions.size else 0,
+        known_through=known_through,
+        exposed_through=np.full(positions.size, -1, dtype=np.int64),
+    )
+
+    one_unit = np.all(counts <= 1, axis=0)
+    unit_index = np.flatnonzero(one_unit)
+    bulk_index = np.flatnonzero(~one_unit)
+    future_idx = asof_idx + 1 + np.arange(horizon)
+    packed = (counts, parent_days, pool_cohorts, inputs, future_idx)
+    unit = _partition(unit_index, *packed)
+    bulk = _partition(bulk_index, *packed)
     if positions.size:
-        last_age = age0[positions]
-        if deadline_days is not None:
-            last_age = np.minimum(last_age, deadline_days)
-        log_ssus[:, initial_pool[positions]] = _window_log_survival(
-            params,
-            features_arr,
-            allowed_arr,
-            positions,
-            _elapsed(cal[0], origins[positions]),
-            np.zeros(positions.size, dtype=np.int64),
-            last_age,
-            int(last_age.max()) + 1,
-            calendar_len,
+        unit_position = np.full(pool_cohorts.size, -1, dtype=np.int64)
+        unit_position[unit_index] = np.arange(unit_index.size)
+        historical = unit_position[initial_pool[positions]]
+        assert np.all(historical >= 0), "historical pools are unit pools"
+        unit = unit._replace(
+            layout=unit.layout._replace(
+                historical=historical, entry_rows=np.arange(positions.size, dtype=np.int64)
+            )
         )
 
-    rng = np.random.default_rng(seed)
-
-    events_out = np.zeros((d, horizon, n_cohorts), dtype=np.int64)
-    pending_out = np.zeros((d, horizon), dtype=np.int64)
-    eligible_out = np.zeros((d, horizon), dtype=np.int64)
-
-    for t in range(1, horizon + 1):
-        day_idx = t - 1
-        ci = asof_idx + t
-
-        ages = t - parent_days
-        started = ages >= 0
-        elig_mask = started if deadline_days is None else started & (ages <= deadline_days)
-        hazard_logit = _hazard_logit(
-            params,
-            ages,
-            features_arr[pool_cohorts, ci],
-            allowed_arr[pool_cohorts, ci],
+    cells = horizon * pool_cohorts.size + history.allowed.size
+    with jax.enable_x64(True):
+        block = _forecast_block(deadline_days, n_cohorts, unit is not None, bulk is not None)
+        events, pending, eligible, undefined = _map_draws(
+            block, d, cells, _root_key(seed), _x64(stage.fit), _x64(history), _x64(unit), _x64(bulk)
         )
-        hazard = _sigmoid(hazard_logit)
-
-        cond_pi = _conditional_probability(
-            cure_logit,
-            log_ssus,
-            "forecast_events simulation",
+    if undefined.any():
+        raise ValueError(
+            "forecast_events reached an impossible or degenerate conditional history in draws "
+            f"{np.flatnonzero(undefined)[:5].tolist()} (possibly more) -- an infinite hazard or "
+            "susceptibility logit combined with a fully decayed survival is rejected rather than "
+            "silently treated as certain cure"
         )
-
-        p_event = np.where(elig_mask, cond_pi * hazard, 0.0)
-        events = rng.binomial(n, p_event)
-        n -= events
-        log_ssus -= np.where(elig_mask, _softplus(hazard_logit), 0.0)
-
-        events_out[:, day_idx, active_cohorts] = np.add.reduceat(events, starts, axis=1)
-        pending_out[:, day_idx] = np.where(started, n, 0).sum(axis=1)
-        eligible_out[:, day_idx] = np.where(elig_mask, n, 0).sum(axis=1)
-
-    return EventForecast(events=events_out, pending=pending_out, eligible=eligible_out)
+    return EventForecast(
+        events=events.astype(np.int64),
+        pending=pending.astype(np.int64),
+        eligible=eligible.astype(np.int64),
+    )
 
 
 # --------------------------------------------------------------------------
-# Analytic eventual-receipt expectations
+# Eventual-receipt expectations
 # --------------------------------------------------------------------------
+
+
+def _window_end(tail, deadline, stage):
+    """Last age at which ``stage`` can still fire, or ``None`` for an unbounded proper tail."""
+    bounds = [deadline] if deadline is not None else []
+    if tail["kind"] == "finite":
+        bounds.append(int(tail["last_age"]))
+    if bounds:
+        return int(min(bounds))
+    if tail["kind"] == "proper":
+        return None
+    raise ValueError(
+        f"the {stage} family declares an unknown tail, so its eventual {stage} probability "
+        "is undefined: declare a proper continuation or finite support, or bound the stage "
+        "with a deadline, before requesting eventual expectations"
+    )
+
+
+class _Stream(NamedTuple):
+    """Per-row receipt regressors for the initiation-day contraction of a finite receipt law."""
+
+    origin_idx: Any  # [N] calendar index of each row's sale
+    features: Any  # [T, N, P] calendar-indexed receipt regressors of the rows
+    allowed: Any  # [T, N]
+    cure_features: Any  # [N, Q]
+    first_future: Any  # calendar index of the first day after as_of
+
+
+def _completion(fit, draw, stream, start, span):
+    """Receipt probability of fresh units initiating on calendar index ``start``.
+
+    The finite support ``0..span-1`` follows the calendar's closures and
+    regressors, continuing all-open with the last regressors held past the
+    calendar end.
+    """
+    n = stream.origin_idx.shape[0]
+    calendar_len = stream.allowed.shape[0]
+    ages = jnp.broadcast_to(jnp.arange(span)[:, None], (span, n))
+    calendar_day = start + ages
+    index = jnp.clip(calendar_day, 0, calendar_len - 1)
+    columns = jnp.arange(n)[None, :]
+    allowed = jnp.where(calendar_day < calendar_len, stream.allowed[index, columns], True)
+    timing, logits = fit.timing(
+        TimingInputs(ages, stream.features[index, columns], stream.cure_features), draw=draw
+    )
+    kernel = survival_kernel(timing, logits, allowed=allowed, exposure=jnp.ones_like(allowed))
+    return _window_probability(kernel, eventual=False)
+
+
+def _draw_expectations(
+    init_draw,
+    recv_draw,
+    init_fit,
+    recv_fit,
+    open_window,
+    elig_window,
+    recv_probe,
+    stream,
+    stationary,
+    *,
+    init_bounded,
+    recv_span,
+    future_days,
+):
+    """One posterior draw's eventual receipts from open and uninitiated rows."""
+    open_receipts = jnp.float64(0.0)
+    if open_window is not None:
+        kernel = _window_kernel(recv_fit, recv_draw, open_window)
+        open_receipts = _window_probability(kernel, eventual=recv_span is None).sum()
+    uninitiated = jnp.float64(0.0)
+    if elig_window is not None:
+        kernel = _window_kernel(init_fit, init_draw, elig_window)
+        if recv_span is None:
+            # Proper receipt: every initiated susceptible unit eventually arrives.
+            initiates = _window_probability(kernel, eventual=not init_bounded)
+            _, recv_logits = recv_fit.timing(
+                TimingInputs(recv_probe.ages, recv_probe.features, recv_probe.cure_features),
+                draw=recv_draw,
+            )
+            uninitiated = jnp.sum(initiates * sigmoid(recv_logits))
+        else:
+            log_mass = kernel.log_mass  # [A, N] initiation mass by age
+            span = log_mass.shape[0]
+
+            def day(total, offset):
+                start = stream.first_future + offset
+                age = start - stream.origin_idx
+                row_mass = jnp.take_along_axis(
+                    log_mass, jnp.clip(age, 0, span - 1)[None, :], axis=0
+                )[0]
+                mass = jnp.where(age < span, jnp.exp(row_mass), 0.0)
+                completion = _completion(recv_fit, recv_draw, stream, start, recv_span)
+                return total + jnp.sum(mass * completion), None
+
+            uninitiated, _ = lax.scan(day, jnp.float64(0.0), jnp.arange(future_days))
+            if not init_bounded:
+                # Proper initiation mass left after the calendar completes under the
+                # stationary continuation of the same receipt factory.
+                remaining = jnp.exp(
+                    kernel.log_susceptible + jnp.sum(kernel.log_survival_step, axis=-2)
+                )
+                completion = _window_probability(
+                    _window_kernel(recv_fit, recv_draw, stationary), eventual=False
+                )
+                uninitiated = uninitiated + jnp.sum(remaining * completion)
+    return uninitiated, open_receipts
+
+
+@functools.lru_cache(maxsize=None)
+def _expectation_block(init_bounded, recv_span, future_days):
+    """Jitted, draw-mapped expectations; single-draw fits pair with every draw."""
+    per_draw = functools.partial(
+        _draw_expectations,
+        init_bounded=init_bounded,
+        recv_span=recv_span,
+        future_days=future_days,
+    )
+    vmapped = jax.vmap(per_draw, in_axes=(0, 0) + (None,) * 7)
+
+    def block(key, indices, init_fit, recv_fit, *windows):
+        del key
+        return vmapped(
+            indices % init_fit.draws, indices % recv_fit.draws, init_fit, recv_fit, *windows
+        )
+
+    return jax.jit(block)
+
+
+class _HistoryRows(NamedTuple):
+    """Date arrays and row classes of a ``RetailHistory`` frame."""
+
+    sale: Any  # [N] datetime64[D]
+    initiation: Any  # [N] datetime64[D], NaT when uninitiated
+    receipt: Any  # [N] datetime64[D], NaT when not received
+    eligible: Any  # [n_elig] positions of uninitiated rows still within the policy window
+    open: Any  # [n_open] positions of initiated rows awaiting receipt
+    item_ids: Any
+
+
+def _history_rows(history):
+    frame = history.frame.reset_index(drop=True)
+    if len(frame):
+        sale = np.asarray(to_day(frame["sale_date"].to_numpy()))
+        initiation = np.asarray(to_day(frame["initiation_date"].to_numpy()))
+        receipt = np.asarray(to_day(frame["receipt_date"].to_numpy()))
+        eligible = frame["eligible"].to_numpy(dtype=bool)
+        item_ids = frame["item_id"].to_numpy()
+    else:
+        sale = initiation = receipt = np.zeros(0, dtype="datetime64[D]")
+        eligible = np.zeros(0, dtype=bool)
+        item_ids = np.array([])
+    return _HistoryRows(
+        sale,
+        initiation,
+        receipt,
+        np.flatnonzero(eligible),
+        np.flatnonzero(~np.isnat(initiation) & np.isnat(receipt)),
+        item_ids,
+    )
+
+
+class _ExpectationWindows(NamedTuple):
+    """Host-packed inputs of ``_draw_expectations`` (absent groups are ``None``)."""
+
+    open: _AgeWindow | None
+    eligible: _AgeWindow | None
+    probe: _AgeWindow | None  # fresh-unit receipt logits of eligible rows (proper receipt)
+    stream: _Stream | None  # finite receipt contraction over initiation days
+    stationary: _AgeWindow | None  # finite receipt completion past the calendar
+
+
+def _open_window(recv, rows, origin_idx, age0, recv_end):
+    """Open returns: known event-free through ``age0``, exposed through the receipt support."""
+    through = np.full(age0.shape, -1 if recv_end is None else recv_end, dtype=np.int64)
+    span = int(max(age0.max(), through.max())) + 1
+    return _age_window(recv, rows, origin_idx, span, known_through=age0, exposed_through=through)
+
+
+def _eligible_windows(init, recv, rows, origin_idx, age0, init_end, recv_end, asof_idx):
+    """Uninitiated rows: the initiation window plus the receipt completion inputs."""
+    calendar_len = init.allowed.shape[1]
+    n = rows.shape[0]
+    none = np.full(n, -1, dtype=np.int64)
+    if init_end is not None:
+        through = np.full(n, init_end, dtype=np.int64)
+    elif recv_end is None:
+        through = none  # proper initiation and receipt: eventual = conditional susceptibility
+    else:
+        through = calendar_len - 1 - origin_idx  # proper initiation streamed through the calendar
+    span = int(max(age0.max(), through.max())) + 1
+    eligible = _age_window(
+        init, rows, origin_idx, span, known_through=age0, exposed_through=through
+    )
+    if recv_end is None:
+        probe = _age_window(
+            recv,
+            rows,
+            np.full(n, asof_idx, dtype=np.int64),
+            1,
+            known_through=none,
+            exposed_through=none,
+        )
+        return eligible, probe, None, None, 0
+    stream = _Stream(
+        origin_idx=origin_idx,
+        features=recv.features[rows].transpose(1, 0, 2),
+        allowed=recv.allowed[rows].T,
+        cure_features=recv.cure_features[rows],
+        first_future=np.int64(asof_idx + 1),
+    )
+    stationary = _age_window(
+        recv,
+        rows,
+        np.full(n, calendar_len, dtype=np.int64),
+        recv_end + 1,
+        known_through=none,
+        exposed_through=np.full(n, recv_end, dtype=np.int64),
+    )
+    latest = calendar_len - 1 if init_end is None else int((origin_idx + init_end).max())
+    return eligible, None, stream, stationary, max(0, min(latest, calendar_len - 1) - asof_idx)
 
 
 def expected_return_receipts(
@@ -677,165 +1090,115 @@ def expected_return_receipts(
     initiation_allowed=None,
     receipt_allowed=None,
 ):
-    """Exact analytic eventual-receipt expectations for the existing historical population.
+    """Exact eventual-receipt expectations for the existing historical population.
 
     Returns ``(expected_uninitiated_receipts, expected_open_receipts)``,
-    each ``[draw]``, under the continuing-tail assumption documented on this
-    module. Reuses the same as-of conditioning math the generic kernel's
-    hazard/cure primitives are built from, so callers needing these extras
-    (e.g. a retail wrapper) never need to run a second simulation.
+    each ``[draw]``, under each family's declared tail behavior (see the
+    module docstring). Open returns contribute their conditional receipt
+    probability; uninitiated eligible rows contribute the probability of
+    initiating within their window (the policy deadline and/or the
+    initiation family's finite support) times the receipt probability of a
+    fresh unit, which for a finite receipt law is contracted day by day over
+    the actual initiation dates.
 
     ``history.policy_days`` may be ``None`` (unbounded initiation deadline):
-    the eventual initiation probability then reduces to the posterior
-    conditional susceptibility itself, exactly like the already-unbounded
-    receipt stage's own eventual-receipt expectation.
+    a proper initiation family then initiates eventually with its conditional
+    susceptibility, and a finite one within its support; an unknown tail
+    without a deadline is refused.
     """
-    init_params, d_init = _normalize_stage_parameters(initiation, "initiation")
-    recv_params, d_recv = _normalize_stage_parameters(receipt, "receipt")
-    d = _align_draws(d_init, d_recv)
-    init_params = _broadcast_stage(init_params, d)
-    recv_params = _broadcast_stage(recv_params, d)
-
-    frame = history.frame.reset_index(drop=True)
-    n_hist = len(frame)
+    init_stage = _resolve_stage(initiation, "initiation")
+    recv_stage = _resolve_stage(receipt, "receipt")
+    d = _align_draws(init_stage.draws, recv_stage.draws)
     as_of = np.datetime64(history.as_of, "D")
-    policy_days = history.policy_days
+    init_end = _window_end(init_stage.tail, history.policy_days, "initiation")
+    recv_end = _window_end(recv_stage.tail, None, "receipt")
 
-    p_init = int(init_params.beta.shape[-1])
-    p_recv = int(recv_params.beta.shape[-1])
-    q_init = int(init_params.cure_beta.shape[-1])
-    q_recv = int(recv_params.cure_beta.shape[-1])
-
-    if n_hist:
-        sale_date_hist = np.asarray(to_day(frame["sale_date"].to_numpy()))
-        initiation_date_hist = np.asarray(to_day(frame["initiation_date"].to_numpy()))
-        receipt_date_hist = np.asarray(to_day(frame["receipt_date"].to_numpy()))
-        eligible_mask = frame["eligible"].to_numpy(dtype=bool)
-        open_mask = ~np.isnat(initiation_date_hist) & np.isnat(receipt_date_hist)
-    else:
-        sale_date_hist = np.zeros(0, dtype="datetime64[D]")
-        initiation_date_hist = np.zeros(0, dtype="datetime64[D]")
-        eligible_mask = np.zeros(0, dtype=bool)
-        open_mask = np.zeros(0, dtype=bool)
-
-    elig_positions = np.where(eligible_mask)[0]
-    open_positions = np.where(open_mask)[0]
-    n_elig = int(elig_positions.size)
-    n_open = int(open_positions.size)
-
-    elig_sale_date = sale_date_hist[elig_positions]
-    open_init_date = initiation_date_hist[open_positions]
-
-    deadline_candidates = []
-    if n_elig and policy_days is not None:
-        deadline_candidates.append((elig_sale_date + np.timedelta64(int(policy_days), "D")).max())
-    latest_deadline = max(deadline_candidates) if deadline_candidates else as_of
-    earliest_origin = sale_date_hist.min() if n_hist else as_of
-
-    cal = _validate_calendar(calendar, as_of, 0, earliest_origin, latest_deadline)
+    rows = _history_rows(history)
+    n_hist = rows.sale.shape[0]
+    elig_sale_date = rows.sale[rows.eligible]
+    open_init_date = rows.initiation[rows.open]
+    latest_required = _required_calendar_end(elig_sale_date, init_end, as_of)
+    earliest_origin = rows.sale.min() if n_hist else as_of
+    cal = _validate_calendar(calendar, as_of, 0, earliest_origin, latest_required)
     calendar_len = int(cal.size)
-    cal0 = cal[0]
-
-    init_features = _prepare_features(
-        initiation_features, n_hist, calendar_len, p_init, "initiation_features"
-    )
-    recv_features = _prepare_features(
-        receipt_features, n_hist, calendar_len, p_recv, "receipt_features"
-    )
-    init_cure = _prepare_cure_features(
-        initiation_cure_features, n_hist, q_init, "initiation_cure_features"
-    )
-    recv_cure = _prepare_cure_features(
-        receipt_cure_features, n_hist, q_recv, "receipt_cure_features"
-    )
-    init_allowed = _prepare_allowed(initiation_allowed, n_hist, calendar_len, "initiation_allowed")
-    recv_allowed = _prepare_allowed(receipt_allowed, n_hist, calendar_len, "receipt_allowed")
-
-    # -- as-of conditioning: eligible (uninitiated) historical rows -----------------------
-    elig_age0 = _elapsed(elig_sale_date, as_of)  # [n_elig]
-    elig_origin_idx = _elapsed(cal0, elig_sale_date)  # [n_elig]
-    elig_feature_row = elig_positions
-
-    elig_init_cure_logit = _cure_logit(init_params, init_cure[elig_feature_row])  # [D, n_elig]
-    max_w_elig_asof = int(elig_age0.max()) + 1 if n_elig else 0
-    elig_log_ssus_asof = _window_log_survival(
-        init_params,
-        init_features,
-        init_allowed,
-        elig_feature_row,
-        elig_origin_idx,
-        np.zeros(n_elig, dtype=np.int64),
-        elig_age0,
-        max_w_elig_asof,
+    asof_idx = int(_elapsed(cal[0], as_of))
+    init = _stage_inputs(
+        init_stage,
+        initiation_features,
+        initiation_cure_features,
+        initiation_allowed,
+        n_hist,
         calendar_len,
-    )  # [D, n_elig]
-    elig_recv_cure_logit = _cure_logit(recv_params, recv_cure[elig_feature_row])  # [D, n_elig]
-
-    # -- as-of conditioning: pre-existing open (initiated, not received) historical rows --
-    open_age0 = _elapsed(open_init_date, as_of)  # [n_open]
-    open_origin_idx = _elapsed(cal0, open_init_date)  # [n_open]
-    open_feature_row = open_positions
-
-    open_recv_cure_logit = _cure_logit(recv_params, recv_cure[open_feature_row])  # [D, n_open]
-    max_w_open_asof = int(open_age0.max()) + 1 if n_open else 0
-    open_log_ssus_asof = _window_log_survival(
-        recv_params,
-        recv_features,
-        recv_allowed,
-        open_feature_row,
-        open_origin_idx,
-        np.zeros(n_open, dtype=np.int64),
-        open_age0,
-        max_w_open_asof,
+        prefix="initiation_",
+    )
+    recv = _stage_inputs(
+        recv_stage,
+        receipt_features,
+        receipt_cure_features,
+        receipt_allowed,
+        n_hist,
         calendar_len,
-    )  # [D, n_open]
+        prefix="receipt_",
+    )
 
-    # -- analytic exact expected remaining receipts (continuing-tail assumption) ----------
-    # Open returns: eventual receipt given receipt-susceptible is certain (see module
-    # docstring), so the expectation is exactly the posterior conditional susceptibility.
-    if n_open:
-        expected_open_receipts = np.sum(
-            _conditional_probability(
-                open_recv_cure_logit, open_log_ssus_asof, "receipt as-of conditioning"
-            ),
-            axis=1,
+    windows = _ExpectationWindows(None, None, None, None, None)
+    cells = future_days = 0
+    if rows.open.size:
+        open_window = _open_window(
+            recv,
+            rows.open,
+            _elapsed(cal[0], open_init_date),
+            _elapsed(open_init_date, as_of),
+            recv_end,
         )
-    else:
-        expected_open_receipts = np.zeros(d)
-
-    # Remaining receipts require initiating (by the deadline, when one is configured) and
-    # being receipt-susceptible. Use posterior susceptibility times susceptible event
-    # probability; subtracting two large log-marginal survivals can lose the entire
-    # remaining-event probability to cancellation.
-    if n_elig:
-        conditional_init = _conditional_probability(
-            elig_init_cure_logit, elig_log_ssus_asof, "initiation as-of conditioning"
+        windows = windows._replace(open=open_window)
+        cells += open_window.allowed.size
+    if rows.eligible.size:
+        eligible, probe, stream, stationary, future_days = _eligible_windows(
+            init,
+            recv,
+            rows.eligible,
+            _elapsed(cal[0], elig_sale_date),
+            _elapsed(elig_sale_date, as_of),
+            init_end,
+            recv_end,
+            asof_idx,
         )
-        if policy_days is None:
-            p_initiate = conditional_init
-        else:
-            remaining_width = (
-                int(policy_days) - elig_age0
-            )  # >= 0 because eligible implies age0 <= policy_days
-            max_w_deadline = int(remaining_width.max())
-            extra_log_ssus = _window_log_survival(
-                init_params,
-                init_features,
-                init_allowed,
-                elig_feature_row,
-                elig_origin_idx,
-                elig_age0 + 1,
-                np.full(n_elig, int(policy_days), dtype=np.int64),
-                max_w_deadline,
-                calendar_len,
-            )  # [D, n_elig]
-            p_initiate = conditional_init * -np.expm1(extra_log_ssus)
-        pi_receipt_raw = _sigmoid(elig_recv_cure_logit)
-        expected_uninitiated_receipts = np.sum(p_initiate * pi_receipt_raw, axis=1)
-    else:
-        expected_uninitiated_receipts = np.zeros(d)
+        windows = windows._replace(
+            eligible=eligible, probe=probe, stream=stream, stationary=stationary
+        )
+        cells += eligible.allowed.size
+        cells += 0 if recv_end is None else (recv_end + 1) * rows.eligible.size
+    if cells == 0:
+        return np.zeros(d), np.zeros(d)
 
-    return expected_uninitiated_receipts, expected_open_receipts
+    with jax.enable_x64(True):
+        recv_span = None if recv_end is None else recv_end + 1
+        block = _expectation_block(init_end is not None, recv_span, future_days)
+        uninitiated, open_receipts = _map_draws(
+            block,
+            d,
+            cells,
+            random.key(0),
+            _x64(init_stage.fit),
+            _x64(recv_stage.fit),
+            *_x64(windows),
+        )
+    for name, values in (("initiation", uninitiated), ("receipt", open_receipts)):
+        if not np.all(np.isfinite(values)):
+            raise ValueError(
+                f"{name} as-of conditioning produced a nonfinite expectation -- an impossible or "
+                "degenerate conditional history (an infinite hazard/cure logit combined with a "
+                "fully decayed survival) is rejected rather than silently treated as certain cure"
+            )
+    return np.asarray(uninitiated, dtype=np.float64), np.asarray(open_receipts, dtype=np.float64)
+
+
+def _required_calendar_end(elig_sale_date, init_end, as_of):
+    """Latest calendar day the uninitiated rows' bounded initiation windows reach."""
+    if init_end is None or elig_sale_date.size == 0:
+        return as_of
+    return (elig_sale_date + np.timedelta64(init_end, "D")).max()
 
 
 # --------------------------------------------------------------------------
@@ -859,101 +1222,71 @@ def forecast_returns(
     receipt_allowed=None,
     seed=0,
 ):
-    """Simulate calendar-day return initiations/receipts from ``history.as_of``.
+    """Forecast calendar-day return initiations/receipts from ``history.as_of``.
 
     A thin two-event composition of :func:`forecast_events`: the initiation
-    kernel call's ``events`` output feeds unchanged as the receipt kernel
-    call's ``arrivals``. ``future_sales`` is a
+    call's ``events`` output feeds unchanged as the receipt call's
+    ``arrivals``. ``initiation``/``receipt`` are ``StageParameters`` or
+    ``StageFit`` values. ``future_sales`` is a
     :class:`~ttenet.integration.SalesForecast`, or a plain DataFrame parsed
     via ``SalesForecast.from_frame`` (requiring ``sale_date``/``quantity``
     columns). See the module docstring for the sequential-simulation
-    mechanics and the exact receipt tail assumption behind
-    ``expected_*_receipts``.
+    mechanics and the tail assumptions behind ``expected_*_receipts``.
     """
     if horizon < 1:
         raise ValueError("horizon must be a positive number of days")
 
-    init_params, d_init = _normalize_stage_parameters(initiation, "initiation")
-    recv_params, d_recv = _normalize_stage_parameters(receipt, "receipt")
-
-    frame = history.frame.reset_index(drop=True)
-    n_hist = len(frame)
+    init_stage = _resolve_stage(initiation, "initiation")
+    recv_stage = _resolve_stage(receipt, "receipt")
     as_of = np.datetime64(history.as_of, "D")
     policy_days = history.policy_days
+    init_end = _window_end(init_stage.tail, policy_days, "initiation")
+    _window_end(recv_stage.tail, None, "receipt")
 
-    history_item_ids = frame["item_id"].to_numpy() if n_hist else np.array([])
+    rows = _history_rows(history)
+    n_hist = rows.sale.shape[0]
     sales_forecast = _prepare_sales_forecast(future_sales)
     future_frame, sale_dates_future, counts_array = _future_cohorts_from_sales(
-        sales_forecast, history_item_ids, as_of, horizon
+        sales_forecast, rows.item_ids, as_of, horizon
     )
     n_future = len(future_frame)
-    d_counts = counts_array.shape[0]
-
-    d = _align_draws(d_init, d_recv, d_counts)
-    init_params = _broadcast_stage(init_params, d)
-    recv_params = _broadcast_stage(recv_params, d)
+    d = _align_draws(init_stage.draws, recv_stage.draws, counts_array.shape[0])
     counts_array = np.broadcast_to(counts_array, (d, n_future)).astype(np.int64)
-
     n_total = n_hist + n_future
-    p_init = int(init_params.beta.shape[-1])
-    p_recv = int(recv_params.beta.shape[-1])
-    q_init = int(init_params.cure_beta.shape[-1])
-    q_recv = int(recv_params.cure_beta.shape[-1])
 
-    # -- historical row classification ---------------------------------------------------
-    if n_hist:
-        sale_date_hist = np.asarray(to_day(frame["sale_date"].to_numpy()))
-        initiation_date_hist = np.asarray(to_day(frame["initiation_date"].to_numpy()))
-        receipt_date_hist = np.asarray(to_day(frame["receipt_date"].to_numpy()))
-        eligible_mask = frame["eligible"].to_numpy(dtype=bool)
-    else:
-        sale_date_hist = np.zeros(0, dtype="datetime64[D]")
-        initiation_date_hist = np.zeros(0, dtype="datetime64[D]")
-        receipt_date_hist = np.zeros(0, dtype="datetime64[D]")
-        eligible_mask = np.zeros(0, dtype=bool)
-
-    elig_positions = np.where(eligible_mask)[0]
-    n_elig = int(elig_positions.size)
-    elig_sale_date = sale_date_hist[elig_positions]
-
-    # -- calendar coverage (historical eligible deadlines only, per the retail contract:
+    # -- calendar coverage (historical eligible windows only, per the retail contract:
     # future cohorts' own deadlines are not required, since forecast_events needs no
     # calendar beyond as_of + horizon) --------------------------------------------------
-    deadline_candidates = []
-    if n_elig and policy_days is not None:
-        deadline_candidates.append((elig_sale_date + np.timedelta64(int(policy_days), "D")).max())
-    latest_deadline = max(deadline_candidates) if deadline_candidates else as_of
-    earliest_origin = sale_date_hist.min() if n_hist else as_of
-
-    cal = _validate_calendar(calendar, as_of, horizon, earliest_origin, latest_deadline)
+    latest_required = _required_calendar_end(rows.sale[rows.eligible], init_end, as_of)
+    earliest_origin = rows.sale.min() if n_hist else as_of
+    cal = _validate_calendar(calendar, as_of, horizon, earliest_origin, latest_required)
     calendar_len = int(cal.size)
-
-    # -- features / cure features / allowed --------------------------------------------------
-    init_features = _prepare_features(
-        initiation_features, n_total, calendar_len, p_init, "initiation_features"
+    init = _stage_inputs(
+        init_stage,
+        initiation_features,
+        initiation_cure_features,
+        initiation_allowed,
+        n_total,
+        calendar_len,
+        prefix="initiation_",
     )
-    recv_features = _prepare_features(
-        receipt_features, n_total, calendar_len, p_recv, "receipt_features"
+    recv = _stage_inputs(
+        recv_stage,
+        receipt_features,
+        receipt_cure_features,
+        receipt_allowed,
+        n_total,
+        calendar_len,
+        prefix="receipt_",
     )
-    init_cure = _prepare_cure_features(
-        initiation_cure_features, n_total, q_init, "initiation_cure_features"
-    )
-    recv_cure = _prepare_cure_features(
-        receipt_cure_features, n_total, q_recv, "receipt_cure_features"
-    )
-    init_allowed = _prepare_allowed(initiation_allowed, n_total, calendar_len, "initiation_allowed")
-    recv_allowed = _prepare_allowed(receipt_allowed, n_total, calendar_len, "receipt_allowed")
 
     output_dates = np.asarray(
         date_grid(as_of + np.timedelta64(1, "D"), as_of + np.timedelta64(horizon, "D"))
     )
 
-    nat = np.datetime64("NaT", "D")
-    future_nat = np.full(n_future, nat, dtype="datetime64[D]")
+    future_nat = np.full(n_future, np.datetime64("NaT", "D"), dtype="datetime64[D]")
 
-    # -- initiation kernel call: parent = sale, own event = initiation --------------------
-    init_origins = np.concatenate([sale_date_hist, future_nat])
-    init_observed = np.concatenate([initiation_date_hist, future_nat])
+    # -- initiation call: parent = sale, own event = initiation --------------------------
     init_arrivals = np.zeros((d, horizon, n_total), dtype=np.int64)
     if n_future:
         future_day = _elapsed(as_of, sale_dates_future)  # 1..horizon, validated above
@@ -964,38 +1297,35 @@ def forecast_returns(
     init_seed, recv_seed = seed_seq.spawn(2)
 
     init_result = forecast_events(
-        init_params,
-        origins=init_origins,
-        observed=init_observed,
+        init_stage.fit,
+        origins=np.concatenate([rows.sale, future_nat]),
+        observed=np.concatenate([rows.initiation, future_nat]),
         arrivals=init_arrivals,
         calendar=cal,
         as_of=as_of,
         horizon=horizon,
-        features=init_features,
-        cure_features=init_cure,
-        allowed=init_allowed,
+        features=init.features,
+        cure_features=init.cure_features,
+        allowed=init.allowed,
         deadline_days=policy_days,
         seed=init_seed,
     )
 
-    # -- receipt kernel call: parent = initiation, own event = receipt --------------------
+    # -- receipt call: parent = initiation, own event = receipt --------------------------
     # A child uses the upstream EventForecast.events unchanged as its arrivals, so every
     # initiated unit (historical or future, on whatever day it actually initiates)
     # immediately keeps its own independently correct receipt-age clock.
-    recv_origins = np.concatenate([initiation_date_hist, future_nat])
-    recv_observed = np.concatenate([receipt_date_hist, future_nat])
-
     recv_result = forecast_events(
-        recv_params,
-        origins=recv_origins,
-        observed=recv_observed,
+        recv_stage.fit,
+        origins=np.concatenate([rows.initiation, future_nat]),
+        observed=np.concatenate([rows.receipt, future_nat]),
         arrivals=init_result.events,
         calendar=cal,
         as_of=as_of,
         horizon=horizon,
-        features=recv_features,
-        cure_features=recv_cure,
-        allowed=recv_allowed,
+        features=recv.features,
+        cure_features=recv.cure_features,
+        allowed=recv.allowed,
         deadline_days=None,  # retail receipts have no imposed deadline
         seed=recv_seed,
     )
@@ -1007,16 +1337,18 @@ def forecast_returns(
 
     expected_uninitiated_receipts, expected_open_receipts = expected_return_receipts(
         history,
-        init_params,
-        recv_params,
+        init_stage.fit,
+        recv_stage.fit,
         calendar=cal,
-        initiation_features=init_features[:n_hist],
-        receipt_features=recv_features[:n_hist],
-        initiation_cure_features=init_cure[:n_hist],
-        receipt_cure_features=recv_cure[:n_hist],
-        initiation_allowed=init_allowed[:n_hist],
-        receipt_allowed=recv_allowed[:n_hist],
+        initiation_features=init.features[:n_hist],
+        receipt_features=recv.features[:n_hist],
+        initiation_cure_features=init.cure_features[:n_hist],
+        receipt_cure_features=recv.cure_features[:n_hist],
+        initiation_allowed=init.allowed[:n_hist],
+        receipt_allowed=recv.allowed[:n_hist],
     )
+    expected_uninitiated_receipts = np.broadcast_to(expected_uninitiated_receipts, (d,))
+    expected_open_receipts = np.broadcast_to(expected_open_receipts, (d,))
     expected_existing_receipts = expected_uninitiated_receipts + expected_open_receipts
 
     return ReturnForecast(

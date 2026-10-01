@@ -1,14 +1,16 @@
-"""Synthetic ledger and independent TTENet likelihood reference for the convolution demo."""
+"""Synthetic ledger and structural path checks for the production convolution demo."""
 
 from dataclasses import dataclass
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import numpyro
 import numpyro.distributions as dist
 import pandas as pd
+from jax import random
 
+from ttenet import EventTime, TimingInputs, survival_kernel
+from ttenet.event_times import default_timing
 from ttenet.models import make_event_observations, stage_log_likelihood
 from ttenet.survival import StageParameters
 
@@ -63,27 +65,13 @@ class CalendarCase:
         )
         return stage_log_likelihood(parameters(theta), obs)
 
-    def arrays(self, theta, duration=None):
-        duration = len(self.calendar) if duration is None else duration
-        p = parameters(theta)
-        ages = jnp.arange(duration)[:, None] - jnp.asarray(self.origin)[None, :]
-        logits = p.age_logits[jnp.clip(ages, 0, len(p.age_logits) - 1)]
-        logits = logits + jnp.einsum("ntp,p->tn", jnp.asarray(self.features[:, :duration]), p.beta)
-        eligible = (ages >= 0) & (ages <= self.deadline) & jnp.asarray(self.allowed[:, :duration].T)
-        log_survival_day = jnp.where(eligible, jax.nn.log_sigmoid(-logits), 0.0)
-        log_s_before = jnp.cumsum(log_survival_day, axis=0) - log_survival_day
-        cure = p.cure_intercept + jnp.asarray(self.cure_features) @ p.cure_beta
-        # Effective hazard conditional on remaining event-free; cure is marginalized.
-        q = jax.nn.sigmoid(cure[None, :] + log_s_before) * jax.nn.sigmoid(logits)
-        entered = jnp.arange(duration)[:, None] >= jnp.asarray(self.entry)[None, :]
-        return jnp.where(eligible & entered, q, 0.0), eligible & entered
-
-    def analytic_future(self, theta):
-        q, _ = self.arrays(theta)
-        q = np.asarray(q)[self.t_obs :]
-        pending = ~self.data[: self.t_obs].any(axis=0)
-        survival = np.concatenate([np.ones((1, q.shape[1])), np.cumprod(1 - q, axis=0)[:-1]])
-        return q * survival * pending[None, :]
+    def exposure(self):
+        ages = np.arange(len(self.calendar))[None, :] - self.origin[:, None]
+        return (
+            (ages >= 0)
+            & (ages <= self.deadline)
+            & (np.arange(len(self.calendar))[None, :] >= self.entry[:, None])
+        ).T
 
 
 def make_case():
@@ -115,13 +103,23 @@ def make_case():
         np.zeros((len(day), len(origin)), dtype=np.int32),
         24,
     )
-    q = np.asarray(case.arrays(jnp.asarray(TRUTH))[0])
-    rng = np.random.default_rng(31)
-    alive = np.ones(len(origin), dtype=bool)
-    for t in day:
-        event = alive & (rng.random(len(origin)) < q[t])
-        case.data[t] = event
-        alive &= ~event
+    ages = np.arange(len(day))[:, None] - origin[None, :]
+    valid = (ages >= 0) & (ages <= case.deadline)
+    pre_entry = valid & (day[:, None] < entry[None, :])
+    timing, logits = default_timing(
+        parameters(jnp.asarray(TRUTH)),
+        TimingInputs(ages, features.transpose(1, 0, 2), case.cure_features),
+    )
+    law = EventTime.from_kernel(
+        survival_kernel(
+            timing,
+            logits,
+            allowed=allowed.T,
+            exposure=valid & ~pre_entry,
+            pre_entry=pre_entry,
+        )
+    )
+    case.data = np.array(law.sample(random.key(31)), copy=True)
     return case
 
 
@@ -131,8 +129,6 @@ def check_paths(case, draws):
     assert np.isin(values, [0, 1]).all(), "non-binary unit events"
     prefix = case.data[: case.t_obs].sum(axis=0)
     assert np.all(values.sum(axis=1) + prefix[None, :] <= 1), "repeat event"
-    _, eligible = case.arrays(jnp.asarray(TRUTH))
-    assert np.all(values[:, ~np.asarray(eligible)[case.t_obs :]] == 0), (
-        "event on closed/ineligible day"
-    )
+    eligible = case.exposure() & case.allowed.T
+    assert np.all(values[:, ~eligible[case.t_obs :]] == 0), "event on closed/ineligible day"
     return {"shape": list(values.shape), "repeat_events": 0, "closed_day_events": 0}

@@ -400,6 +400,20 @@ def test_float_counts_are_range_checked_before_any_integer_cast():
     assert not jax.config.jax_enable_x64
 
 
+@pytest.mark.parametrize("dtype", [jnp.uint8, jnp.uint16, jnp.uint32])
+def test_unsigned_jax_pools_cannot_wrap_impossible_draws_into_positive_counts(dtype):
+    def sample(total):
+        law = CohortEventTime(jnp.full((1, 1), -jnp.inf), jnp.array([-jnp.inf]), total)
+        return law.sample(random.PRNGKey(0))
+
+    total = jnp.array([3], dtype)
+    for execute in (sample, jax.jit(sample)):
+        with pytest.raises(TypeError, match="signed"):
+            execute(total)
+    # Host integers are range-checked and converted to the signed native dtype.
+    np.testing.assert_array_equal(sample(np.array([3], np.uint32)), [[-1]])
+
+
 def test_tiny_expected_counts_keep_finite_log_mass():
     law = CohortEventTime(jnp.array([[-95.0]]), jnp.array([0.0]), jnp.asarray([1]))
     np.testing.assert_allclose(law.log_prob(jnp.array([[1]], dtype=jnp.int32)), -95.0, atol=1e-4)
@@ -760,6 +774,113 @@ def test_ten_million_unit_pool_samples_and_scores_at_default_precision():
     )(jnp.log(jnp.array([0.2, 0.3, 0.5])))
     assert bool(jnp.all(jnp.isfinite(gradient)))
     np.testing.assert_allclose(gradient, [-1000.0, 2000.0, -1000.0], rtol=2e-3)
+
+
+def _binomial_pmf(trials, probability):
+    """Exact Binomial(trials, probability) mass over 0..trials from integer combinations."""
+    return np.array(
+        [
+            math.comb(trials, k) * probability**k * (1 - probability) ** (trials - k)
+            for k in range(trials + 1)
+        ]
+    )
+
+
+def test_pool_marginals_follow_exact_binomial_frequencies():
+    # Each date's marginal of Multinomial(40, (0.3, 0.2, 0.5)) is binomial, as is
+    # the residual; a date at expected count 8 and one near 12 of the remaining
+    # pool exercise both small- and large-mean sampling regimes.
+    trials, draws = 40, 40_000
+    law = _pool_law([0.3, 0.2, 0.5], trials)
+    samples = np.asarray(law.sample(random.PRNGKey(17), (draws,))[:, :, 0], dtype=np.int64)
+    assert samples.min() >= 0 and samples.sum(axis=1).max() <= trials
+    residual = trials - samples.sum(axis=1)
+    for counts, probability in ((samples[:, 0], 0.3), (samples[:, 1], 0.2), (residual, 0.5)):
+        pmf = _binomial_pmf(trials, probability)
+        frequency = np.bincount(counts, minlength=trials + 1) / draws
+        resolved = pmf * draws >= 25
+        error = np.sqrt(pmf * (1 - pmf) / draws)
+        z = ((frequency - pmf) / error)[resolved]
+        assert np.abs(z).max() <= 5, f"p = {probability}: cell deviations {z}"
+        rest, rest_expected = frequency[~resolved].sum(), pmf[~resolved].sum()
+        rest_error = math.sqrt(rest_expected * (1 - rest_expected) / draws)
+        assert abs(rest - rest_expected) <= 5 * rest_error
+
+
+THIRTEEN = (0.005, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1, 0.11, 0.12, 0.225)
+
+
+def test_thirteen_category_pool_reproduces_every_multinomial_moment():
+    trials, draws = 1000, 4000
+    probabilities = np.array(THIRTEEN)
+    law = _pool_law(THIRTEEN, trials)
+    assert law.event_shape == (12, 1)
+    samples = np.asarray(law.sample(random.PRNGKey(13), (draws,))[:, :, 0], dtype=np.int64)
+    assert samples.min() >= 0 and samples.sum(axis=1).max() <= trials
+    occupancy = np.concatenate([samples, trials - samples.sum(axis=1, keepdims=True)], axis=1)
+    mean = trials * probabilities
+    variance = mean * (1 - probabilities)
+    covariance = -trials * np.outer(probabilities, probabilities)
+    z_mean = (occupancy.mean(axis=0) - mean) / np.sqrt(variance / draws)
+    assert np.abs(z_mean).max() <= 6, z_mean
+    excess_kurtosis = (1 - 6 * probabilities * (1 - probabilities)) / variance
+    z_variance = (occupancy.var(axis=0) - variance) / (
+        variance * np.sqrt((2 + excess_kurtosis) / draws)
+    )
+    assert np.abs(z_variance).max() <= 6, z_variance
+    off_diagonal = ~np.eye(len(THIRTEEN), dtype=bool)
+    sample_covariance = np.cov(occupancy.T, bias=True)
+    error = np.sqrt((np.outer(variance, variance) + covariance**2) / draws)
+    z_covariance = ((sample_covariance - covariance) / error)[off_diagonal]
+    assert np.abs(z_covariance).max() <= 6, z_covariance
+
+
+def test_year_long_pool_allocations_respect_closures_and_date_masses():
+    # 365 dates with weekend closures and a sawtooth date weight: every date has
+    # a distinct neighbour, so any misrouting between dates or into the no-event
+    # category moves a per-date mean by many standard errors.
+    days, draws = 365, 600
+    day = np.arange(days)
+    open_day = (day % 7) < 5
+    weight = np.where(open_day, 1.0 + day % 11, 0.0)
+    probabilities = 0.7 * weight / weight.sum()
+    pools = np.array([0, 1, 2, 3, 5, 8, 13, 21, 50, 300, 1000], dtype=np.int32)
+    log_mass = np.where(open_day, np.log(np.where(open_day, probabilities, 1.0)), -np.inf)
+    law = CohortEventTime(
+        jnp.broadcast_to(jnp.asarray(log_mass)[:, None], (days, len(pools))),
+        jnp.full((len(pools),), math.log(0.3)),
+        pools,
+    )
+    samples = law.sample(random.PRNGKey(23), (draws,))
+    assert samples.shape == (draws, days, len(pools))
+    assert jnp.issubdtype(samples.dtype, jnp.integer)
+    counts = np.asarray(samples, dtype=np.int64)
+    assert counts.min() >= 0
+    assert np.all(counts.sum(axis=1) <= pools)
+    assert counts[:, :, 0].sum() == 0
+    assert counts[:, ~open_day, :].sum() == 0
+    population = pools.sum()
+    per_date = counts.sum(axis=2).mean(axis=0)[open_day]
+    expected = population * probabilities[open_day]
+    z_date = (per_date - expected) / np.sqrt(expected * (1 - probabilities[open_day]) / draws)
+    assert np.abs(z_date).max() <= 6, z_date
+    total = counts.sum(axis=(1, 2)).mean()
+    z_total = (total - 0.7 * population) / math.sqrt(0.7 * 0.3 * population / draws)
+    assert abs(z_total) <= 6, z_total
+
+
+def test_vmapped_pool_draws_equal_individual_draws():
+    law = CohortEventTime(
+        jnp.log(jnp.array([[0.2, 0.45], [0.3, 0.45]])),
+        jnp.log(jnp.array([0.5, 0.1])),
+        jnp.array([7, 1000], dtype=jnp.int32),
+    )
+    keys = random.split(random.PRNGKey(29), 6)
+    batched = jax.vmap(law.sample)(keys)
+    single = jnp.stack([law.sample(key) for key in keys])
+    assert batched.shape == (6, 2, 2)
+    np.testing.assert_array_equal(batched, single)
+    assert int(single[:, 0, 1].min()) < int(single[:, 0, 1].max())
 
 
 @pytest.mark.parametrize("quantity", [2**32 + 1, 2**32 + 2, -(2**32) + 1])

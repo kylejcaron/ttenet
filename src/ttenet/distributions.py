@@ -28,7 +28,6 @@ changes global configuration.
 from __future__ import annotations
 
 import math
-from decimal import Decimal, localcontext
 
 import jax
 import jax.numpy as jnp
@@ -40,7 +39,7 @@ from numpyro.distributions.util import lazy_property
 from numpyro.util import not_jax_tracer
 from numpyro_forecast.surgery import prefix_condition, slice_time
 
-from ttenet._count_sampling import allocate_counts
+from ttenet._count_sampling import _stirling_error, allocate_counts
 from ttenet.event_times import SurvivalKernel, _logaddexp, kernel_unit_log_prob, log1mexp
 
 
@@ -170,31 +169,7 @@ class EventTime(dist.Distribution):
                 raise ValueError(
                     "EventTime takes either log_mass and log_tail or a kernel, not both"
                 )
-            if not isinstance(kernel, SurvivalKernel):
-                raise TypeError("kernel must be a SurvivalKernel")
-            hazard = jnp.asarray(kernel.log_hazard)
-            stay = jnp.asarray(kernel.log_survival_step)
-            logits = jnp.asarray(kernel.susceptibility_logits)
-            if hazard.ndim < 2 or stay.ndim < 2:
-                raise ValueError(
-                    "kernel log_hazard and log_survival_step must be [..., time, cohort]"
-                )
-            if hazard.shape[-2] != stay.shape[-2]:
-                raise ValueError("kernel log_hazard and log_survival_step must share the time axis")
-            massless = jnp.asarray(False if massless is None else massless, dtype=bool)
-            batch_shape = jnp.broadcast_shapes(
-                hazard.shape[:-2], stay.shape[:-2], logits.shape[:-1], massless.shape[:-1]
-            )
-            cohorts = jnp.broadcast_shapes(
-                hazard.shape[-1:], stay.shape[-1:], logits.shape[-1:], massless.shape[-1:]
-            )
-            event_shape = (hazard.shape[-2],) + cohorts
-            self.kernel = SurvivalKernel(
-                jnp.broadcast_to(hazard, batch_shape + event_shape),
-                jnp.broadcast_to(stay, batch_shape + event_shape),
-                jnp.broadcast_to(logits, batch_shape + cohorts),
-            )
-            self.massless = jnp.broadcast_to(massless, batch_shape + cohorts)
+            batch_shape, event_shape = self._set_kernel(kernel, massless)
         else:
             if massless is not None:
                 raise ValueError("massless units are a kernel-route property; pass a kernel")
@@ -214,6 +189,33 @@ class EventTime(dist.Distribution):
             self.log_mass = jnp.broadcast_to(log_mass, batch_shape + event_shape)
             self.log_tail = jnp.broadcast_to(log_tail, batch_shape + cohorts)
         super().__init__(batch_shape, event_shape, validate_args=validate_args)
+
+    def _set_kernel(self, kernel, massless):
+        """Validate and broadcast the compact kernel's batch and event axes."""
+        if not isinstance(kernel, SurvivalKernel):
+            raise TypeError("kernel must be a SurvivalKernel")
+        hazard = jnp.asarray(kernel.log_hazard)
+        stay = jnp.asarray(kernel.log_survival_step)
+        logits = jnp.asarray(kernel.susceptibility_logits)
+        if hazard.ndim < 2 or stay.ndim < 2:
+            raise ValueError("kernel log_hazard and log_survival_step must be [..., time, cohort]")
+        if hazard.shape[-2] != stay.shape[-2]:
+            raise ValueError("kernel log_hazard and log_survival_step must share the time axis")
+        massless = jnp.asarray(False if massless is None else massless, dtype=bool)
+        batch_shape = jnp.broadcast_shapes(
+            hazard.shape[:-2], stay.shape[:-2], logits.shape[:-1], massless.shape[:-1]
+        )
+        cohorts = jnp.broadcast_shapes(
+            hazard.shape[-1:], stay.shape[-1:], logits.shape[-1:], massless.shape[-1:]
+        )
+        event_shape = (hazard.shape[-2],) + cohorts
+        self.kernel = SurvivalKernel(
+            jnp.broadcast_to(hazard, batch_shape + event_shape),
+            jnp.broadcast_to(stay, batch_shape + event_shape),
+            jnp.broadcast_to(logits, batch_shape + cohorts),
+        )
+        self.massless = jnp.broadcast_to(massless, batch_shape + cohorts)
+        return batch_shape, event_shape
 
     @classmethod
     def from_kernel(cls, kernel, *, validate_args=None):
@@ -430,6 +432,8 @@ def _integer_counts(total_count):
     Host arrays are cast deliberately: JAX would otherwise truncate an int64
     ``2**53 + 1`` to int32 ``1`` with only a warning when x64 is disabled, and
     wrap a negative value below the int32 range into a plausible pool.
+    Direct JAX pools must be signed so impossible-prefix/draw sentinels remain
+    negative instead of wrapping into a plausible large population.
     """
     if isinstance(total_count, jax.Array):
         counts = total_count
@@ -447,53 +451,12 @@ def _integer_counts(total_count):
                 "current JAX precision; build the law inside jax.enable_x64(True)"
             )
         counts = jnp.asarray(host.astype(dtype))
-    if not jnp.issubdtype(counts.dtype, jnp.integer):
-        raise TypeError(f"total_count must be integer-typed, got dtype {counts.dtype}")
+    if not jnp.issubdtype(counts.dtype, jnp.signedinteger):
+        raise TypeError(f"total_count must be signed integer-typed, got dtype {counts.dtype}")
     return counts
 
 
 _LOG_2PI = math.log(2.0 * math.pi)
-_STIRLING_SERIES = (1.0 / 12.0, 1.0 / 360.0, 1.0 / 1260.0, 1.0 / 1680.0, 1.0 / 1188.0)
-
-
-def _stirling_table(last):
-    """delta(m) for m = 1..last from exact factorials, correctly rounded to float64."""
-    with localcontext() as context:
-        context.prec = 40
-        half_log_2pi = (2 * Decimal("3.141592653589793238462643383279502884197")).ln() / 2
-        return np.array(
-            [
-                float(
-                    Decimal(math.factorial(m)).ln()
-                    - ((Decimal(m) + Decimal("0.5")) * Decimal(m).ln() - m + half_log_2pi)
-                )
-                for m in range(1, last + 1)
-            ]
-        )
-
-
-_STIRLING_TABLE = _stirling_table(15)
-
-
-def _stirling_error(count):
-    """delta(m) = log(m!) - [(m + 1/2) log m - m + log(2 pi) / 2] for m >= 1.
-
-    Tabulated through 15 and the asymptotic series beyond, so no factorial or
-    lgamma of a large argument is ever formed: delta(2**53) is ~1e-17 while
-    the lgamma values it replaces are ~3e17 with an ulp of 64.
-    """
-    tabulated = count <= 15
-    index = jnp.clip(count, 1, 15).astype(jnp.int32) - 1
-    safe = jnp.where(tabulated, 16.0, count)
-    inverse_square = 1.0 / (safe * safe)
-    s0, s1, s2, s3, s4 = _STIRLING_SERIES
-    nested = s3 - s4 * inverse_square
-    nested = s2 - nested * inverse_square
-    nested = s1 - nested * inverse_square
-    series = (s0 - nested * inverse_square) / safe
-    table = jnp.asarray(_STIRLING_TABLE, count.dtype)
-    return jnp.where(tabulated, table[index], series)
-
 
 _DEVIANCE_TERMS = 10
 """Series terms for the near-mode deviance; the ratio v**2 is below 0.01 there."""

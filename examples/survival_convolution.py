@@ -1,11 +1,11 @@
-"""Focused experimental survival-convolution model, native NumPyro Forecast end to end.
+"""Production survival-convolution components, native NumPyro Forecast end to end.
 
 Run: uv run python examples/survival_convolution.py
 
 The fixture is 12 identified units on 42 calendar days with an observed prefix
 of 24 days. It includes selected survivors, future births, heterogeneous
-covariates, a deadline and closures. No Markov/Poisson/adapter alternatives are
-included. This is not a production API cutover or a calibration benchmark.
+covariates, a deadline and closures. It uses the package probability law directly,
+including native inference, prefix conditioning and chained posterior predictions.
 """
 
 import argparse
@@ -25,8 +25,9 @@ from numpyro.infer.autoguide import AutoNormal
 from numpyro.infer.util import log_density
 from numpyro_forecast import Horizon, draw_posterior, forecast, predict, predict_in_sample
 from numpyro_forecast.surgery import prefix_condition, slice_time
-from survival_convolution_model import EventTime, convolve_event_times, survival_kernel
 
+from ttenet import EventTime, TimingInputs, survival_kernel
+from ttenet.event_times import default_timing
 from ttenet.models import StageObservations, stage_log_likelihood
 
 
@@ -38,14 +39,27 @@ def covariates(case):
 
 def kernel(case, theta, x, origin, *, entry=None, deadline=None):
     inputs = x.reshape(x.shape[0], len(case.origin), -1)
-    return survival_kernel(
+    ages = jnp.arange(x.shape[0])[:, None] - jnp.asarray(origin)[..., None, :]
+    exposed = ages >= 0
+    if deadline is not None:
+        exposed = exposed & (ages <= deadline)
+    if entry is None:
+        pre_entry = None
+    else:
+        pre_entry = exposed & (jnp.arange(x.shape[0])[:, None] < jnp.asarray(entry)[..., None, :])
+        exposed = exposed & ~pre_entry
+    timing, logits = default_timing(
         parameters(theta),
-        origin,
-        inputs[..., :-1],
-        jnp.asarray(case.cure_features),
-        inputs[..., -1] > 0.5,
-        entry=entry,
-        deadline=deadline,
+        TimingInputs(ages, inputs[..., :-1], jnp.asarray(case.cure_features)),
+    )
+    return EventTime.from_kernel(
+        survival_kernel(
+            timing,
+            logits,
+            allowed=inputs[..., -1] > 0.5,
+            exposure=exposed,
+            pre_entry=pre_entry,
+        )
     )
 
 
@@ -259,7 +273,7 @@ def chain_experiment(case, x, steps, draws):
     parent_mass = jnp.concatenate([jnp.zeros((stop, n)), future_mass])
     origins = jnp.broadcast_to(jnp.arange(len(x))[:, None], (len(x), n))
     receipt_kernel = kernel(case, theta_receipt, x, origins)
-    expected = convolve_event_times(parent_mass, receipt_kernel)[stop:]
+    expected = jnp.einsum("sn,stn->tn", parent_mass, receipt_kernel.mean)[stop:]
     open_law = kernel(case, theta_receipt, x, origin)
     expected += prefix_condition(open_law, jnp.asarray(receipt)).mean
     empirical = paths[:, :, n:].mean(axis=0)
@@ -297,10 +311,13 @@ def run(steps=100, draws=128):
     fixed = {"theta": jnp.broadcast_to(jnp.asarray(TRUTH), (8192, 5))}
     samples = np.asarray(forecast(random.PRNGKey(105), model, fixed, history, x))
     check_paths(case, samples)
-    law = kernel(case, TRUTH, x, case.origin, entry=case.entry, deadline=case.deadline)
-    np.testing.assert_allclose(
-        prefix_condition(law, history).mean, case.analytic_future(TRUTH), atol=2e-6
+    expected = np.asarray(
+        prefix_condition(
+            kernel(case, TRUTH, x, case.origin, entry=case.entry, deadline=case.deadline), history
+        ).mean
     )
+    standard_error = np.sqrt(expected * (1 - expected) / len(samples))
+    np.testing.assert_array_less(abs(samples.mean(axis=0) - expected), 6 * standard_error + 0.002)
     short = forecast(random.PRNGKey(106), model, posterior, history, x[: case.t_obs + 3])
     assert short.shape == (draws, 3, len(case.origin))
     # Future outcomes are not model inputs; verify that changing hidden fixture
