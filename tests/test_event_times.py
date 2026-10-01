@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from ttenet.event_times import (
+    EventLaw,
     SurvivalKernel,
     TimingInputs,
     TimingLaw,
@@ -22,6 +23,7 @@ from ttenet.event_times import (
     log1mexp,
     survival_kernel,
     timing_from_log_masses,
+    timing_from_log_survival,
 )
 from ttenet.survival import StageParameters, stage_hazard, susceptibility
 
@@ -307,6 +309,102 @@ def test_timing_from_log_masses_proper_grid_exhausts_support_with_finite_gradien
     assert all(bool(jnp.all(jnp.isfinite(value))) for value in gradients)
 
 
+# --- Boundary log-survival adapter -------------------------------------------
+
+
+def test_timing_from_log_survival_matches_discretized_continuous_law():
+    # Weibull(scale 6, shape 2) on ages 0..4 for one cohort and an exponential
+    # (rate 1/2) for another: each bin's stay is S(a+1)/S(a), the hazard its
+    # complement, and the two add to one on every cell.
+    ages = np.arange(5)[:, None]
+    log_survival = np.where(np.array([[True, False]]), -((ages / 6.0) ** 2), -ages / 2.0)
+    log_survival_next = np.where(
+        np.array([[True, False]]), -(((ages + 1) / 6.0) ** 2), -(ages + 1) / 2.0
+    )
+    timing = timing_from_log_survival(jnp.array(log_survival), jnp.array(log_survival_next))
+    stay = np.exp(log_survival_next - log_survival)
+    np.testing.assert_allclose(_probabilities(timing.log_survival_step), stay, rtol=1e-6)
+    np.testing.assert_allclose(_probabilities(timing.log_hazard), 1 - stay, rtol=1e-6)
+    np.testing.assert_allclose(
+        _probabilities(timing.log_hazard) + _probabilities(timing.log_survival_step), 1.0, rtol=1e-6
+    )
+    np.testing.assert_allclose(_probabilities(timing.log_hazard[:, 1]), 1 - np.exp(-0.5), rtol=1e-6)
+
+
+def test_timing_from_log_survival_structural_endpoints_keep_exact_values_and_finite_gradients():
+    # Finite -> finite is an ordinary bin, finite -> -inf a certain terminal
+    # bin (stay exactly zero, hazard one) and -inf -> -inf an exhausted cell
+    # with nothing left to fire (hazard zero, stay one, never -inf - -inf).
+    start = jnp.array([0.0, -1.0, -jnp.inf])
+    end = jnp.array([-0.5, -jnp.inf, -jnp.inf])
+    timing = timing_from_log_survival(start, end)
+    np.testing.assert_allclose(
+        _probabilities(timing.log_hazard), [1 - np.exp(-0.5), 1.0, 0.0], rtol=1e-6
+    )
+    np.testing.assert_allclose(
+        _probabilities(timing.log_survival_step), [np.exp(-0.5), 0.0, 1.0], rtol=1e-6
+    )
+    assert np.isneginf(float(timing.log_survival_step[1]))
+    assert np.isneginf(float(timing.log_hazard[2]))
+    assert float(timing.log_hazard[1]) == 0.0 and float(timing.log_survival_step[2]) == 0.0
+
+    def total(field):
+        return lambda s, e: jnp.sum(getattr(timing_from_log_survival(s, e), field))
+
+    for field in ("log_hazard", "log_survival_step"):
+        gradients = jax.grad(total(field), argnums=(0, 1))(start, end)
+        assert all(bool(jnp.all(jnp.isfinite(value))) for value in gradients)
+    # Interior gradient of the hazard in the end-point: d/dx log(1 - e^-x) = 1 / expm1(x).
+    derivative = jax.grad(lambda x: timing_from_log_survival(jnp.array(0.0), -x).log_hazard)(
+        jnp.array(0.5)
+    )
+    np.testing.assert_allclose(float(derivative), 1 / np.expm1(0.5), rtol=1e-6)
+    compiled = jax.jit(timing_from_log_survival)(start, end)
+    np.testing.assert_array_equal(np.array(compiled.log_hazard), np.array(timing.log_hazard))
+    np.testing.assert_array_equal(
+        np.array(compiled.log_survival_step), np.array(timing.log_survival_step)
+    )
+
+
+def test_timing_from_log_survival_keeps_invalid_inputs_invalid():
+    # NaN propagates through both fields; a survival that rises across a bin
+    # is not a probability and must not be laundered into one, whether the
+    # rise is finite (stay above one) or from an exhausted start (stay +inf).
+    timing = timing_from_log_survival(
+        jnp.array([jnp.nan, -0.5, -1.0, -jnp.inf]), jnp.array([-0.5, jnp.nan, -0.5, -1.0])
+    )
+    assert np.isnan(np.array(timing.log_hazard[:2])).all()
+    assert np.isnan(np.array(timing.log_survival_step[:2])).all()
+    assert float(timing.log_survival_step[2]) > 0.0
+    assert np.isposinf(float(timing.log_survival_step[3]))
+
+
+def test_timing_from_log_survival_broadcasts_cells_and_feeds_the_kernel():
+    # One continuous curve per cohort evaluated at the cells' own bin edges:
+    # ``[T, 1]`` starts against ``[T, C]`` ends broadcast to ``[T, C]``, and
+    # the kernel turns the law into the mixture masses pi * (S(a) - S(a+1))
+    # with residual (1 - pi) + pi * S(T); exposure is the kernel's job alone.
+    days, pi = 4, 0.7
+    ages = np.arange(days)[:, None]
+    scale = np.array([[3.0, 5.0]])
+    log_survival = -((ages / scale) ** 1.5)
+    log_survival_next = -(((ages + 1) / scale) ** 1.5)
+    timing = timing_from_log_survival(jnp.array(log_survival[:, :1]), jnp.array(log_survival_next))
+    assert timing.log_hazard.shape == (days, 2) and timing.log_survival_step.shape == (days, 2)
+    timing = timing_from_log_survival(jnp.array(log_survival), jnp.array(log_survival_next))
+    kernel = survival_kernel(
+        timing,
+        jnp.full(2, _logit(pi)),
+        allowed=_full_masks(days, 2),
+        exposure=_full_masks(days, 2),
+    )
+    masses = pi * (np.exp(log_survival) - np.exp(log_survival_next))
+    np.testing.assert_allclose(_probabilities(kernel.log_mass), masses, rtol=1e-5)
+    np.testing.assert_allclose(
+        _probabilities(kernel.log_tail), (1 - pi) + pi * np.exp(log_survival_next[-1]), rtol=1e-5
+    )
+
+
 # --- Default StageParameters adapter -----------------------------------------
 
 
@@ -322,7 +420,9 @@ def test_default_timing_matches_stage_parameter_primitives():
     ages = jnp.array(np.arange(days)[:, None] + rng.integers(0, 6, size=(1, cohorts)))
     features = jnp.array(rng.normal(size=(days, cohorts, p)))
     cure_features = jnp.array(rng.normal(size=(cohorts, q)))
-    timing, logits = default_timing(params, TimingInputs(ages, features, cure_features))
+    law = default_timing(params, TimingInputs(ages, features, cure_features))
+    assert isinstance(law, EventLaw)
+    timing, logits = law.timing, law.susceptibility_logits
     hazard = np.array(stage_hazard(params, ages, features))
     np.testing.assert_allclose(_probabilities(timing.log_hazard), hazard, rtol=1e-5)
     np.testing.assert_allclose(

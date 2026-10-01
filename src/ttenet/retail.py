@@ -8,6 +8,7 @@ from typing import Callable
 import numpy as np
 
 from .data import RetailHistory, prepare_history
+from .families import FiniteTail, validate_family
 from .forecast import ReturnForecast, expected_return_receipts
 from .network import FittedNetwork, ForecastNetwork
 from .processes import (
@@ -16,7 +17,6 @@ from .processes import (
     CureProcess,
     EventNode,
     _positive_integer,
-    tail_behavior,
 )
 
 
@@ -115,11 +115,12 @@ class FittedRetailReturnModel:
         _positive_integer("horizon", horizon)
         through = self.history.as_of + np.timedelta64(int(horizon), "D")
         policy = self.model.initiation.deadline_days
-        factory = self.model.initiation.event_time_model
-        if factory is not None:
-            tail = tail_behavior(factory)
-            if tail["kind"] == "finite":
-                policy = tail["last_age"] if policy is None else min(policy, tail["last_age"])
+        family = self.model.initiation.family
+        if family is not None:
+            validate_family(family)
+            if isinstance(family.tail, FiniteTail):
+                last_age = family.tail.last_age
+                policy = last_age if policy is None else min(policy, last_age)
         eligible = self.history.frame.loc[self.history.frame.eligible, "sale_date"]
         if policy is not None and len(eligible) and self.model.receipt.allowed_weekdays:
             deadline = np.asarray(eligible, dtype="datetime64[D]").max() + np.timedelta64(

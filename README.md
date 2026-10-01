@@ -318,8 +318,8 @@ It samples and returns shared latent values under the `shared` scope:
   `(observations, shared)` and returns one `StageParameters` value. It may
   sample conditional NumPyro priors or use `sample_stage_parameters` and
   transform those parameters with shared values.
-- A custom `CureProcess(event_time_model=...)` callback receives
-  `(TimingInputs, shared)` and returns `(TimingLaw, susceptibility_logits)`;
+- A custom `CureProcess(family=...)` calls `family.model(inputs, shared)` with
+  `TimingInputs` and receives a named `EventLaw(timing, susceptibility_logits)`;
   its real named sample and optimized parameter sites are replayed per draw.
 - The same shared posterior draw reaches every process during prediction.
 - Shared effects require joint mode; modular mode rejects them.
@@ -437,10 +437,65 @@ arbitrary-int64 distributional accuracy above `2**53`.
 
 ## Interchangeable event-time families
 
-`CureProcess(event_time_model=factory)` and
-`fit_stage(observations, event_time_model=factory)` select a timing law without
-changing inference, calendar bookkeeping, or network propagation. The factory
-receives `(inputs, shared)`:
+Select a packaged family without changing inference, calendar bookkeeping, or
+network propagation:
+
+```python
+import math
+
+import numpyro.distributions as dist
+
+from ttenet import CureProcess, WeibullFamily
+
+receipt = CureProcess(
+    family=WeibullFamily(
+        scale_prior=dist.LogNormal(math.log(6.0), 0.3),
+        shape_prior=dist.LogNormal(math.log(2.0), 0.2),
+        susceptibility_prior=dist.Normal(1.0, 1.0),
+    ),
+    allowed_weekdays=(0, 1, 2, 3, 4),
+)
+```
+
+`WeibullFamily` discretizes susceptible survival at daily bin boundaries. Its
+priors can also be fixed real scalars; scale and shape must be positive. Named
+sites are `scale`, `shape`, `cure_intercept`, and, when regressors are present,
+`beta` and `cure_beta`. Fixed parameters create no sample sites. Distribution
+priors must be scalar and have suitable support. `family=None` retains the default regularized
+random-walk hazard; its `parameter_model` callback still customizes those priors.
+Combining `family` with `parameter_model` is ambiguous and rejected.
+
+Custom plain NumPyro functions use the frozen `EventFamily` wrapper:
+
+```python
+import jax.numpy as jnp
+import numpyro
+import numpyro.distributions as dist
+
+from ttenet import (
+    CureProcess,
+    EventFamily,
+    EventLaw,
+    ProperTail,
+    timing_from_log_survival,
+)
+
+
+def exponential_delay(inputs, shared):
+    rate = numpyro.sample("rate", dist.LogNormal(-1.0, 0.3))
+    susceptibility = numpyro.sample("susceptibility", dist.Normal(0.0, 1.0))
+    ages = jnp.maximum(inputs.ages, 0)
+    return EventLaw(
+        timing=timing_from_log_survival(-rate * ages, -rate * (ages + 1)),
+        susceptibility_logits=jnp.broadcast_to(susceptibility, ages.shape[:-2] + ages.shape[-1:]),
+    )
+
+
+family = EventFamily(model=exponential_delay, tail=ProperTail())
+custom_receipt = CureProcess(family=family, allowed_weekdays=(0, 1, 2, 3, 4))
+```
+
+`family.model(inputs, shared)` receives only ages and regressors:
 
 | Input | Shape and meaning |
 | --- | --- |
@@ -448,31 +503,30 @@ receives `(inputs, shared)`:
 | `inputs.features` | `[day, cohort, feature]`, time-varying regressors |
 | `inputs.cure_features` | `[cohort, feature]`, static susceptibility regressors |
 
-It returns `TimingLaw(log_hazard, log_survival_step)` for susceptible units
-and susceptibility logits `[cohort]`. The common kernel applies cure,
-administrative exposure, elapsed-age closures and selected-survivor conditioning.
-The factory receives no observed outcomes or administrative masks.
-Re-evaluating it at a new horizon replays its fitted named NumPyro sites;
-missing posterior sites are errors, not new prior draws.
-Combining `event_time_model` and the default-family `parameter_model` is ambiguous
-and rejected.
+It returns `EventLaw(timing=TimingLaw(log_hazard, log_survival_step),
+susceptibility_logits=...)`, with susceptibility logits `[cohort]`. The common
+kernel applies cure, administrative exposure, elapsed-age closures and
+selected-survivor conditioning. Families receive no observed outcomes or
+administrative masks. Re-evaluating a family at a new horizon replays its fitted
+named NumPyro sites; missing posterior sites are errors, not new prior draws.
+`fit_stage(observations, family=family)` uses the same contract.
 
 Default `StageFit.parameters` remains `StageParameters`. For a custom family
 it is a mapping from local sample/optimized parameter names to arrays with a
 leading draw axis. `StageFit.shared` contains the actual resolved shared values
 from those same draws; `.draws` also preserves requested draws for fixed,
-zero-latent factories without inventing posterior sites.
-`.timing(inputs, draw=i)` replays one fitted law.
-Pass the whole `StageFit` to forecasting so the factory and shared metadata survive.
+zero-latent families without inventing posterior sites.
+`.timing(inputs, draw=i)` returns a replayed `EventLaw`.
+Pass the whole `StageFit` to forecasting so the family and shared metadata survive.
 
-Every factory declares static `tail_behavior`:
+Every family carries an explicit, immutable tail declaration:
 
-- `{"kind": "proper"}`: susceptible units eventually fire under continuing
-  exposure and reopening.
-- `{"kind": "finite", "last_age": a}`: integrate the masked law through inclusive
-  age `a`; a terminal atom on a closure does not imply eventual completion.
-- `{"kind": "unknown"}`: finite-horizon forecasts are supported, but eventual
-  receipt estimates are refused.
+- `ProperTail()`: susceptible units eventually fire under continuing exposure
+  and reopening.
+- `FiniteTail(last_age=a)`: integrate the masked law through inclusive age `a`;
+  a terminal atom on a closure does not imply eventual completion.
+- `UnknownTail()`: finite-horizon forecasts are supported, but eventual receipt
+  estimates are refused.
 
 Eventual finite-support receipt estimates honor supplied calendar covariates and
 closures; beyond that calendar they explicitly assume all-open continuation
@@ -480,12 +534,17 @@ with the last regressors held constant. They contract each possible initiation
 date with the receipt law, rather than substituting a finite output horizon
 for an eventual probability.
 
-Run `uv run python examples/event_time_families.py` for a discretized Weibull
-plugin with sampled scale/shape, native in-sample predictions and a mixed
-default → Weibull → default network forecasting beyond its training window.
+`timing_from_log_survival(log_S_a, log_S_next)` forms daily conditional survival
+and hazard from susceptible log survival at bin boundaries, including terminal
+and exhausted-support cells. It does not discretize arbitrary NumPyro
+distributions automatically or accept non-monotone survival as a valid law.
 `timing_from_log_masses` adapts discrete masses and a residual tail to the same
-interface. This is a nonparametric-compatible seam, not a shipped nonparametric
+interface. These are nonparametric-compatible seams, not a shipped nonparametric
 prior or estimator.
+
+Run `uv run python examples/event_time_families.py` for sampled Weibull parameters,
+native in-sample predictions and a mixed default → Weibull → default network
+forecasting beyond its training window.
 
 ## Statistical limits
 

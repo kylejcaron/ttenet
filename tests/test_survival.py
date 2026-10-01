@@ -728,7 +728,7 @@ def test_fit_stage_default_family_keeps_stage_parameters_with_draw_axes():
     )
     observations = make_observations(history, "initiation", date_grid("2026-01-01", "2026-01-25"))
     fit = fit_stage(observations, age_bins=4, num_steps=30, num_samples=7, seed=1)
-    assert fit.event_time_model is None and fit.shared is None
+    assert fit.family is None and fit.shared is None
     assert fit.num_samples == 7 and fit.draws == 7
     assert fit.parameters.age_logits.shape == (7, 4)
     assert fit.parameters.cure_intercept.shape == (7,)

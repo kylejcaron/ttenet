@@ -5,7 +5,7 @@ plain NumPy/pandas and runs before inference: it converts a history's dates
 into calendar-indexed arrays and validates coverage, so it never touches
 JAX tracers. Everything downstream is ordinary differentiable JAX/NumPyro:
 a timing family (the default `StageParameters` adapter or a custom
-`event_time_model`) produces a `TimingLaw`, the shared `event_times` kernel
+`family`) produces a `TimingLaw`, the shared `event_times` kernel
 masks it by the stage's administrative exposure and closures and conditions
 entry, and the native `EventTime` distribution registers every unit's
 observed trajectory through NumPyro Forecast's `Horizon`/`predict`. The
@@ -17,7 +17,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Mapping
 from functools import partial
-from typing import Any, Callable
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -34,6 +34,7 @@ from numpyro_forecast import Horizon, predict
 from .dates import to_day
 from .distributions import EventTime
 from .event_times import (
+    EventLaw,
     SurvivalKernel,
     TimingInputs,
     TimingLaw,
@@ -41,7 +42,7 @@ from .event_times import (
     kernel_unit_log_prob,
     survival_kernel,
 )
-from .processes import tail_behavior
+from .families import Family, validate_family
 from .survival import StageParameters
 
 _STAGES = ("initiation", "receipt")
@@ -119,23 +120,22 @@ class StageObservations:
 _DRAW_AXES = {"age_logits": 2, "beta": 2, "cure_intercept": 1, "cure_beta": 2}
 
 
-def _fit_parameter_leaves(parameters, event_time_model):
+def _fit_parameter_leaves(parameters, family):
     """Validate the family-specific posterior container without copying its arrays."""
-    if event_time_model is None:
+    if family is None:
         if not isinstance(parameters, StageParameters):
             raise TypeError(
                 "a default-family StageFit carries StageParameters; a custom family "
-                "needs its event_time_model alongside its named posterior mapping"
+                "needs its family alongside its named posterior mapping"
             )
         for name, value in zip(StageParameters._fields, parameters, strict=True):
             if jnp.ndim(value) != _DRAW_AXES[name]:
                 raise ValueError(f"StageFit.parameters.{name} must carry a leading draw axis")
         return list(parameters)
-    if not callable(event_time_model):
-        raise TypeError("event_time_model must be callable")
+    validate_family(family)
     if not isinstance(parameters, Mapping) or any(not isinstance(name, str) for name in parameters):
         raise TypeError(
-            "a custom-family StageFit carries a mapping from the factory's site "
+            "a custom-family StageFit carries a mapping from the family's site "
             "names to posterior arrays"
         )
     return tree_util.tree_leaves(dict(parameters))
@@ -144,25 +144,25 @@ def _fit_parameter_leaves(parameters, event_time_model):
 @partial(
     register_dataclass,
     data_fields=["parameters", "losses", "shared"],
-    meta_fields=["event_time_model", "num_samples"],
+    meta_fields=["family", "num_samples"],
 )
 @dataclasses.dataclass(frozen=True)
 class StageFit:
     """Fit result: posterior draws of one stage's timing family and the loss trace.
 
     For the default family ``parameters`` is a ``StageParameters`` whose
-    every field carries a leading posterior-draw axis and
-    ``event_time_model`` is ``None``. For a custom family ``event_time_model``
-    is the fitted factory and ``parameters`` maps the factory's own sample
-    sites and optimized ``numpyro.param`` values (node scope stripped) to
-    arrays with the same leading draw axis; ``shared`` is the shared model's
-    returned mapping resolved at those same draws (``None`` without one), so
-    replaying the factory never re-samples shared values. ``num_samples``
-    records the fit's actual draw count; it is what lets a fully fixed
-    factory with no arrays at all replay the requested number of draws. The
-    two-argument form ``StageFit(parameters, losses)`` remains valid for the
-    default family and takes its draw count from the arrays. ``losses`` is
-    the per-step ELBO trace from ``SVI.run`` (empty when nothing was fitted).
+    every field carries a leading posterior-draw axis and ``family`` is
+    ``None``. For a custom family ``family`` is the fitted family object and
+    ``parameters`` maps the family's own sample sites and optimized
+    ``numpyro.param`` values (node scope stripped) to arrays with the same
+    leading draw axis; ``shared`` is the shared model's returned mapping
+    resolved at those same draws (``None`` without one), so replaying the
+    family never re-samples shared values. ``num_samples`` records the fit's
+    actual draw count; it is what lets a fully fixed family with no arrays at
+    all replay the requested number of draws. The two-argument form
+    ``StageFit(parameters, losses)`` remains valid for the default family and
+    takes its draw count from the arrays. ``losses`` is the per-step ELBO
+    trace from ``SVI.run`` (empty when nothing was fitted).
 
     ``timing`` replays one draw's law at new ages and regressors; the draw
     index may be traced, so ``jax.vmap`` over ``jnp.arange(fit.draws)``
@@ -171,12 +171,12 @@ class StageFit:
 
     parameters: Any
     losses: Any
-    event_time_model: Callable | None = None
+    family: Family | None = None
     shared: Any = None
     num_samples: int | None = None
 
     def __post_init__(self):
-        leaves = _fit_parameter_leaves(self.parameters, self.event_time_model)
+        leaves = _fit_parameter_leaves(self.parameters, self.family)
         leaves += tree_util.tree_leaves(self.shared)
         if any(isinstance(leaf, jax.core.Tracer) for leaf in leaves):
             return
@@ -205,31 +205,31 @@ class StageFit:
         """Number of posterior draws this fit replays."""
         if self.num_samples is not None:
             return int(self.num_samples)
-        if self.event_time_model is None:
+        if self.family is None:
             return int(np.shape(self.parameters.cure_intercept)[0])
         return int(np.shape(tree_util.tree_leaves((dict(self.parameters), self.shared))[0])[0])
 
-    def timing(self, inputs: TimingInputs, *, draw, key=None) -> tuple[TimingLaw, Any]:
+    def timing(self, inputs: TimingInputs, *, draw, key=None) -> EventLaw:
         """Timing law and susceptibility logits of posterior draw ``draw`` at ``inputs``.
 
         The default family evaluates ``default_timing`` on that draw's
-        ``StageParameters``. A custom family reruns its factory with the
+        ``StageParameters``. A custom family reruns ``family.model`` with the
         draw's named values substituted at its sample and ``numpyro.param``
-        sites and the draw's resolved shared values passed through; a factory
+        sites and the draw's resolved shared values passed through; a family
         that reaches a site absent from the fitted mapping is refused rather
         than silently sampled from its prior. ``key`` seeds that replay (every
-        site is substituted, so it only matters for factories with other
+        site is substituted, so it only matters for families with other
         NumPyro randomness).
         """
 
         def select(leaf):
             return jnp.asarray(leaf)[draw]
 
-        if self.event_time_model is None:
+        if self.family is None:
             return default_timing(tree_util.tree_map(select, self.parameters), inputs)
         parameters = tree_util.tree_map(select, dict(self.parameters))
         shared = tree_util.tree_map(select, self.shared)
-        return _replay_family(self.event_time_model, parameters, shared, inputs, key)
+        return _replay_family(self.family, parameters, shared, inputs, key)
 
 
 def _select_rows(
@@ -636,10 +636,10 @@ def _observe(
     )
 
 
-def _validated_law(law: Any, inputs: TimingInputs) -> tuple[TimingLaw, Any]:
-    """Check a factory's ``(TimingLaw, susceptibility_logits)`` and broadcast it to the inputs."""
-    if not isinstance(law, tuple) or len(law) != 2 or not isinstance(law[0], TimingLaw):
-        raise TypeError("event_time_model must return (TimingLaw, susceptibility_logits)")
+def _validated_law(law: Any, inputs: TimingInputs) -> EventLaw:
+    """Check a family's :class:`EventLaw` and broadcast it to the inputs."""
+    if not isinstance(law, EventLaw) or not isinstance(law.timing, TimingLaw):
+        raise TypeError("family.model must return an EventLaw(timing, susceptibility_logits)")
     timing, logits = law
     cells = tuple(np.shape(inputs.ages))
     units = cells[:-2] + cells[-1:]
@@ -654,16 +654,16 @@ def _validated_law(law: Any, inputs: TimingInputs) -> tuple[TimingLaw, Any]:
             resolved.append(jnp.broadcast_to(value, shape))
         except ValueError:
             raise ValueError(
-                f"event_time_model {name} has shape {value.shape}, which does not "
+                f"family {name} has shape {value.shape}, which does not "
                 f"broadcast to the {shape} inputs"
             ) from None
-    return TimingLaw(resolved[0], resolved[1]), resolved[2]
+    return EventLaw(TimingLaw(resolved[0], resolved[1]), resolved[2])
 
 
-def _replay_family(event_time_model, parameters, shared, inputs, key) -> tuple[TimingLaw, Any]:
-    """Run a factory with one draw's named values substituted at its sites."""
+def _replay_family(family, parameters, shared, inputs, key) -> EventLaw:
+    """Run a family with one draw's named values substituted at its sites."""
     key = random.PRNGKey(0) if key is None else key
-    model = handlers.substitute(handlers.seed(event_time_model, key), data=dict(parameters))
+    model = handlers.substitute(handlers.seed(family.model, key), data=dict(parameters))
     with handlers.trace() as trace:
         law = model(inputs, shared)
     missing = sorted(
@@ -674,9 +674,7 @@ def _replay_family(event_time_model, parameters, shared, inputs, key) -> tuple[T
         and name not in parameters
     )
     if missing:
-        raise ValueError(
-            f"event_time_model reaches sites absent from the fitted posterior: {missing}"
-        )
+        raise ValueError(f"family reaches sites absent from the fitted posterior: {missing}")
     return _validated_law(law, inputs)
 
 
@@ -751,23 +749,23 @@ def sample_stage_parameters(
 
 
 def stage_model(
-    observations: StageObservations, *, age_bins: int = 30, event_time_model=None
+    observations: StageObservations, *, age_bins: int = 30, family: Family | None = None
 ) -> None:
     """NumPyro model for one mixture-cure stage.
 
-    Without ``event_time_model`` the prior of :func:`sample_stage_parameters`
-    feeds the default timing adapter; with one, the factory is called as
-    ``event_time_model(timing_inputs(observations), None)`` and samples its
+    Without ``family`` the prior of :func:`sample_stage_parameters`
+    feeds the default timing adapter; with one, ``family.model`` is called as
+    ``family.model(timing_inputs(observations), None)`` and samples its
     own named sites. Either law is masked by the stage's exposure, closures
     and pre-entry survival and observed at the native ``"obs"`` site as an
     integer ``[T, N]`` trajectory grid through ``Horizon``/``predict``.
     """
     inputs = timing_inputs(observations)
-    if event_time_model is None:
+    if family is None:
         parameters = sample_stage_parameters(observations, age_bins=age_bins)
         timing, logits = default_timing(parameters, inputs)
     else:
-        timing, logits = _validated_law(event_time_model(inputs, None), inputs)
+        timing, logits = _validated_law(family.model(inputs, None), inputs)
     data, impossible = _trajectories(observations)
     _observe(observation_kernel(timing, logits, observations), inputs, data, massless=impossible)
 
@@ -875,7 +873,7 @@ def _fit_program(program, resolver, return_sites, *, num_steps, num_samples, see
 
 
 def _named_posterior(posterior, params, *, prefix, num_samples):
-    """A factory's local sample-site draws and optimized values, scope stripped, per draw."""
+    """A family's local sample-site draws and optimized values, scope stripped, per draw."""
     local = {
         name[len(prefix) :]: jnp.asarray(value)
         for name, value in posterior.items()
@@ -892,7 +890,7 @@ def fit_stage(
     observations: StageObservations,
     *,
     age_bins: int = 30,
-    event_time_model=None,
+    family: Family | None = None,
     num_steps: int = 500,
     num_samples: int = 100,
     seed: int = 0,
@@ -905,9 +903,9 @@ def fit_stage(
     ``Trace_ELBO``; ``num_samples`` guide draws are then resolved through
     the model. For the default family the result's ``parameters`` is a
     ``StageParameters`` (including the deterministic ``age_logits``) with a
-    leading draw axis. With ``event_time_model`` the factory's own sample
-    sites and optimized ``numpyro.param`` values form the named posterior
-    mapping instead, and the factory itself is kept for replay. A family
+    leading draw axis. With ``family`` its own sample sites and optimized
+    ``numpyro.param`` values form the named posterior mapping instead, and
+    the family itself is kept for replay. A family
     with nothing to fit still records ``num_samples`` draws. Advanced users
     can call ``stage_model`` directly with any NumPyro inference algorithm
     (e.g. MCMC) instead of this convenience.
@@ -928,13 +926,11 @@ def fit_stage(
         or not np.isfinite(observations.cure_features).all()
     ):
         raise ValueError("fitting requires finite feature values")
-    if event_time_model is not None:
-        tail_behavior(event_time_model)
-    program = partial(
-        stage_model, observations, age_bins=age_bins, event_time_model=event_time_model
-    )
+    if family is not None:
+        validate_family(family)
+    program = partial(stage_model, observations, age_bins=age_bins, family=family)
     resolver = partial(sample_stage_parameters, observations, age_bins=age_bins)
-    sites = list(StageParameters._fields) if event_time_model is None else []
+    sites = list(StageParameters._fields) if family is None else []
     posterior, params, losses, resolved = _fit_program(
         program,
         resolver,
@@ -944,13 +940,13 @@ def fit_stage(
         seed=seed,
         learning_rate=learning_rate,
     )
-    if event_time_model is None:
+    if family is None:
         parameters = StageParameters(*[resolved[name] for name in StageParameters._fields])
         return StageFit(parameters, losses, num_samples=num_samples)
     return StageFit(
         _named_posterior(posterior, params, prefix="", num_samples=num_samples),
         losses,
-        event_time_model=event_time_model,
+        family=family,
         num_samples=num_samples,
     )
 

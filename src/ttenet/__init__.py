@@ -5,11 +5,23 @@ from .dataset import RetailData
 from .dates import allowed_days, calendar_features, date_grid, elapsed_days, to_day
 from .distributions import CohortEventTime, EventTime
 from .event_times import (
+    EventLaw,
     SurvivalKernel,
     TimingInputs,
     TimingLaw,
     survival_kernel,
     timing_from_log_masses,
+    timing_from_log_survival,
+)
+from .families import (
+    EventFamily,
+    Family,
+    FiniteTail,
+    ProperTail,
+    TailBehavior,
+    UnknownTail,
+    WeibullFamily,
+    validate_family,
 )
 from .forecast import EventForecast, ReturnForecast, forecast_events, forecast_returns
 from .integration import SalesForecast
@@ -39,12 +51,17 @@ __all__ = [
     "CountNode",
     "CountProcess",
     "CureProcess",
+    "EventFamily",
     "EventForecast",
+    "EventLaw",
     "EventNode",
     "EventTime",
+    "Family",
+    "FiniteTail",
     "FittedNetwork",
     "ForecastNetwork",
     "NetworkForecast",
+    "ProperTail",
     "RetailData",
     "SalesForecast",
     "FittedRetailReturnModel",
@@ -55,8 +72,11 @@ __all__ = [
     "StageObservations",
     "StageParameters",
     "SurvivalKernel",
+    "TailBehavior",
     "TimingInputs",
     "TimingLaw",
+    "UnknownTail",
+    "WeibullFamily",
     "allowed_days",
     "calendar_features",
     "conditional_susceptibility",
@@ -77,5 +97,7 @@ __all__ = [
     "susceptibility",
     "survival_kernel",
     "timing_from_log_masses",
+    "timing_from_log_survival",
     "to_day",
+    "validate_family",
 ]

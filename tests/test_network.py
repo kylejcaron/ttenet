@@ -249,24 +249,24 @@ def test_optimized_event_parameters_are_resolved_before_simulating():
     assert result.counts["initiations"].mean() > 500
 
 
-def _weibull_receipts(inputs, shared):
+def _weibull_receipts_model(inputs, shared):
     """Shape-2 Weibull receipt timing with a sampled scale and certain susceptibility."""
     scale = numpyro.sample("scale", dist.LogNormal(np.log(3.0), 0.3))
     age = jnp.maximum(inputs.ages, 0)
     log_stay = -(((age + 1) / scale) ** 2 - (age / scale) ** 2)
-    return ttenet.TimingLaw(log1mexp(log_stay), log_stay), jnp.full(inputs.ages.shape[-1], 50.0)
+    return ttenet.EventLaw(
+        ttenet.TimingLaw(log1mexp(log_stay), log_stay), jnp.full(inputs.ages.shape[-1], 50.0)
+    )
 
 
-_weibull_receipts.tail_behavior = {"kind": "proper"}
+_weibull_receipts = ttenet.EventFamily(_weibull_receipts_model, ttenet.ProperTail())
 
 
 def test_mixed_family_network_propagates_through_the_custom_stage():
     """Default -> Weibull -> default: the custom stage keeps its own named posterior."""
     root = ttenet.CountNode("sales")
     initiation = ttenet.EventNode("initiations", root, _certain_process(deadline_days=1))
-    receipt = ttenet.EventNode(
-        "receipts", initiation, ttenet.CureProcess(event_time_model=_weibull_receipts)
-    )
+    receipt = ttenet.EventNode("receipts", initiation, ttenet.CureProcess(family=_weibull_receipts))
     inspection = ttenet.EventNode(
         "inspections", receipt, _certain_process(deadline_days=1), event_column="inspection_date"
     )
@@ -288,7 +288,7 @@ def test_mixed_family_network_propagates_through_the_custom_stage():
     )
     fitted = model.fit(data, num_steps=20, num_samples=5, seed=4)
     fit = fitted.stage_fits["receipts"]
-    assert fit.event_time_model is _weibull_receipts
+    assert fit.family is _weibull_receipts
     assert set(fit.parameters) == {"scale"} and fit.parameters["scale"].shape == (5,)
     assert fit.num_samples == 5 and fit.draws == 5 and fit.shared is None
     assert isinstance(fitted.stage_fits["initiations"].parameters, ttenet.StageParameters)
@@ -329,12 +329,14 @@ def _derived_shared_model():
     return {"demand": demand, "rate": jnp.exp(demand)}
 
 
-def _shared_rate_family(inputs, shared):
+def _shared_rate_model(inputs, shared):
     log_stay = jnp.broadcast_to(-shared["rate"], inputs.ages.shape)
-    return ttenet.TimingLaw(log1mexp(log_stay), log_stay), jnp.full(inputs.ages.shape[-1], 0.0)
+    return ttenet.EventLaw(
+        ttenet.TimingLaw(log1mexp(log_stay), log_stay), jnp.full(inputs.ages.shape[-1], 0.0)
+    )
 
 
-_shared_rate_family.tail_behavior = {"kind": "proper"}
+_shared_rate_family = ttenet.EventFamily(_shared_rate_model, ttenet.ProperTail())
 
 
 def test_custom_family_fit_records_the_shared_models_derived_values_per_draw():
@@ -342,7 +344,7 @@ def test_custom_family_fit_records_the_shared_models_derived_values_per_draw():
     child = ttenet.EventNode(
         "initiations",
         root,
-        ttenet.CureProcess(deadline_days=3, event_time_model=_shared_rate_family),
+        ttenet.CureProcess(deadline_days=3, family=_shared_rate_family),
     )
     model = ttenet.ForecastNetwork([root, child], shared_model=_derived_shared_model)
     units = pd.DataFrame(
@@ -355,7 +357,7 @@ def test_custom_family_fit_records_the_shared_models_derived_values_per_draw():
     data = ttenet.RetailData.from_units(units, as_of="2026-01-04", calendar=["2026-01-04"])
     fitted = model.fit(data, num_steps=40, num_samples=6, seed=5)
     fit = fitted.stage_fits["initiations"]
-    assert fit.event_time_model is _shared_rate_family
+    assert fit.family is _shared_rate_family
     assert dict(fit.parameters) == {}
     assert fit.num_samples == 6 and fit.draws == 6
     assert set(fit.shared) == {"demand", "rate"}

@@ -1,18 +1,17 @@
-"""Pluggable event-time families: a discretized Weibull plugin through the public API.
+"""Pluggable event-time families: the packaged discretized Weibull through the public API.
 
-A timing family is a callable ``(inputs, shared) -> (TimingLaw, susceptibility_logits)``
-that samples its own named NumPyro sites from ``TimingInputs`` (ages and regressors
-only) and declares static ``tail_behavior``. The package core applies administrative
+A timing family is an object with a NumPyro ``model(inputs, shared) -> EventLaw``
+that samples its own named sites from ``TimingInputs`` (ages and regressors only)
+and a static ``tail`` declaration. The package core applies administrative
 exposure, calendar closures, cure marginalization, entry conditioning, native
 observation and count propagation, so swapping the family never touches fitting,
 the native distributions or the network.
 
-``weibull_family`` below is that plugin for a discretized Weibull: with scale
-``lambda`` and shape ``k`` the continuous survival is ``log S(a) = -(a / lambda) ** k``
-for ``a >= 0``, so each day's log stay is ``log S(a + 1) - log S(a)`` and the hazard is
-its stable log complement. The ``[a, a + 1)`` bin gives a nonzero same-day trial, and
-shape 2 makes the hazard rise with age -- a genuinely different law from the default
-piecewise-constant logistic baseline, not a renamed constant hazard.
+``WeibullFamily`` is the packaged law: with scale ``lambda`` and shape ``k`` the
+continuous survival is ``log S(a) = -(a / lambda) ** k`` for ``a >= 0``, so each
+day's law is the ``[a, a + 1)`` bin of that curve -- a nonzero same-day trial, and
+shape 2 makes the hazard rise with age -- a genuinely different law from the
+default piecewise-constant logistic baseline, not a renamed constant hazard.
 
 Run::
 
@@ -23,7 +22,6 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import numpy as np
-import numpyro
 import numpyro.distributions as dist
 import pandas as pd
 
@@ -36,74 +34,12 @@ from ttenet import (
     SalesForecast,
     StageParameters,
     TimingInputs,
-    TimingLaw,
+    WeibullFamily,
     date_grid,
     fit_stage,
     make_event_observations,
 )
-from ttenet.event_times import log1mexp
 from ttenet.models import predict_stage
-
-
-def _site(name, value):
-    """Sample ``name`` from a distribution, or use a fixed value without a site."""
-    if isinstance(value, dist.Distribution):
-        return numpyro.sample(name, value)
-    return jnp.asarray(value, dtype=float)
-
-
-def weibull_log_stay(ages, scale, shape):
-    """``log S(a + 1) - log S(a)`` of a Weibull at integer ages, in log space.
-
-    The cumulative hazard ``(a / scale) ** shape`` is formed as
-    ``exp(shape * (log a - log scale))`` with age zero handled explicitly, so
-    gradients in ``scale`` and ``shape`` stay finite at the first bin for any
-    positive shape. Negative ages look up age zero; the core masks them.
-    """
-    age = jnp.maximum(ages, 0)
-    positive = age > 0
-    safe_age = jnp.where(positive, age, 1)
-    log_scale = jnp.log(scale)
-    cumulative = jnp.where(positive, jnp.exp(shape * (jnp.log(safe_age) - log_scale)), 0.0)
-    following = jnp.exp(shape * (jnp.log(age + 1) - log_scale))
-    return -(following - cumulative)
-
-
-def weibull_family(scale, shape=2.0, cure=dist.Normal(0.0, 2.0)):
-    """A discretized Weibull timing family with named ``scale``/``shape``/cure sites.
-
-    ``scale`` and ``shape`` are positive numbers (fixed, no site) or NumPyro
-    distributions (sampled at sites ``"scale"`` and ``"shape"``); ``cure`` is the
-    susceptibility logit intercept, likewise fixed or sampled at
-    ``"cure_intercept"``. Time-varying regressors enter as a proportional
-    scaling ``exp(x_t @ beta)`` of each day's cumulative-hazard increment
-    (``beta ~ Normal(0, 1)``) and static cure regressors as ``z @ cure_beta``
-    (``cure_beta ~ Normal(0, 1)``); both sites exist only when regressors are
-    supplied. The family declares a proper tail: under continuing exposure
-    every susceptible unit eventually fires.
-    """
-
-    def event_time_model(inputs: TimingInputs, shared):
-        lam = _site("scale", scale)
-        k = _site("shape", shape)
-        log_stay = weibull_log_stay(inputs.ages, lam, k)
-        width = inputs.features.shape[-1]
-        if width:
-            beta = numpyro.sample("beta", dist.Normal(0.0, 1.0).expand([width]).to_event(1))
-            log_stay = log_stay * jnp.exp(jnp.tensordot(inputs.features, beta, axes=([-1], [-1])))
-        logits = _site("cure_intercept", cure)
-        cure_width = inputs.cure_features.shape[-1]
-        if cure_width:
-            cure_beta = numpyro.sample(
-                "cure_beta", dist.Normal(0.0, 1.0).expand([cure_width]).to_event(1)
-            )
-            logits = logits + jnp.tensordot(inputs.cure_features, cure_beta, axes=([-1], [-1]))
-        logits = jnp.broadcast_to(logits, inputs.ages.shape[-1:])
-        return TimingLaw(log1mexp(log_stay), log_stay), logits
-
-    event_time_model.tail_behavior = {"kind": "proper"}
-    return event_time_model
-
 
 # --- Synthetic sale -> initiation -> receipt -> inspection history ----------------
 
@@ -160,13 +96,14 @@ def main():
         f"{int((receipts.event_index >= 0).sum())} observed receipts"
     )
 
-    # 1. Native fitting: the default family and the Weibull plugin fit the same
+    # 1. Native fitting: the default family and the packaged Weibull fit the same
     #    observations; only the family argument differs.
     default = fit_stage(receipts, age_bins=12, num_steps=300, num_samples=60, seed=1)
-    family = weibull_family(
-        scale=dist.LogNormal(np.log(5.0), 0.5), shape=dist.LogNormal(np.log(2.0), 0.3)
+    family = WeibullFamily(
+        scale_prior=dist.LogNormal(np.log(5.0), 0.5),
+        shape_prior=dist.LogNormal(np.log(2.0), 0.3),
     )
-    weibull = fit_stage(receipts, event_time_model=family, num_steps=300, num_samples=60, seed=1)
+    weibull = fit_stage(receipts, family=family, num_steps=300, num_samples=60, seed=1)
     assert isinstance(default.parameters, StageParameters)
     print("default family posterior:", _summary("cure", default.parameters.cure_intercept))
     print("weibull family posterior sites:", sorted(weibull.parameters))
@@ -202,7 +139,7 @@ def main():
     )
     sales = CountNode("sales")
     initiations = EventNode("initiations", sales, CureProcess(age_bins=12, deadline_days=30))
-    receipt_node = EventNode("receipts", initiations, CureProcess(event_time_model=family))
+    receipt_node = EventNode("receipts", initiations, CureProcess(family=family))
     inspections = EventNode(
         "inspections",
         receipt_node,
@@ -215,10 +152,10 @@ def main():
     print(
         "network receipt fit:",
         f"{receipt_fit.draws} draws of {sorted(receipt_fit.parameters)}; "
-        f"tail {receipt_fit.event_time_model.tail_behavior}",
+        f"tail {receipt_fit.family.tail}",
     )
 
-    # 4. Longer horizon than training: the factory is re-evaluated at ages the
+    # 4. Longer horizon than training: the family is re-evaluated at ages the
     #    training window never contained, under the same posterior draws.
     horizon = 90
     first_day = as_of + np.timedelta64(1, "D")
@@ -243,10 +180,10 @@ def main():
         features=jnp.zeros((2, 1, 0)),
         cure_features=jnp.zeros((1, 0)),
     )
-    timing, _ = receipt_fit.timing(late_ages, draw=0)
+    law = receipt_fit.timing(late_ages, draw=0)
     print(
         "  receipt hazard replayed at ages 80 and 120 (never observed in training):",
-        np.round(np.exp(np.asarray(timing.log_hazard[:, 0])), 4),
+        np.round(np.exp(np.asarray(law.timing.log_hazard[:, 0])), 4),
     )
     open_returns = int((units["initiation_date"].notna() & units["receipt_date"].isna()).sum())
     conserved = (

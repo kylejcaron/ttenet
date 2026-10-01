@@ -106,7 +106,7 @@ def _parameter_sites(nodes):
     return [
         f"{node.name}/__resolved_{name}"
         for node in nodes
-        if node.process.event_time_model is None
+        if node.process.family is None
         for name in StageParameters._fields
     ]
 
@@ -149,11 +149,11 @@ def _event_model(node, observations, shared, *, likelihood=True):
     """One node's timing law under its scope, observed at the native site when fitting."""
     inputs = timing_inputs(observations)
     with handlers.scope(prefix=node.name):
-        if node.process.event_time_model is None:
+        if node.process.family is None:
             parameters = _default_parameters(node, observations, shared)
             timing, logits = default_timing(parameters, inputs)
         else:
-            timing, logits = _validated_law(node.process.event_time_model(inputs, shared), inputs)
+            timing, logits = _validated_law(node.process.family.model(inputs, shared), inputs)
         if likelihood:
             kernel = observation_kernel(timing, logits, observations)
             data, impossible = _trajectories(observations)
@@ -171,8 +171,8 @@ class _Prepared:
 
 
 def _resolved_stage_fit(node, posterior, params, losses, resolved, shared, num_samples):
-    """Keep default parameters or the custom family's own named posterior and factory."""
-    if node.process.event_time_model is None:
+    """Keep default parameters or the custom family's own named posterior and object."""
+    if node.process.family is None:
         parameters = StageParameters(
             *[resolved[f"{node.name}/__resolved_{name}"] for name in StageParameters._fields]
         )
@@ -180,7 +180,7 @@ def _resolved_stage_fit(node, posterior, params, losses, resolved, shared, num_s
     return StageFit(
         _named_posterior(posterior, params, prefix=f"{node.name}/", num_samples=num_samples),
         losses,
-        event_time_model=node.process.event_time_model,
+        family=node.process.family,
         shared=shared,
         num_samples=num_samples,
     )
@@ -194,7 +194,7 @@ class ForecastNetwork:
     observed parents still factorize. For cross-stage learning, ``shared_model()``
     samples shared latent values; a count model receives ``shared=values`` and
     each custom event ``parameter_model(observations, values)`` or timing family
-    ``event_time_model(inputs, values)`` receives them too. Every event node
+    ``family.model(inputs, values)`` receives them too. Every event node
     observes its units at one native event-time site under its own scope; a
     custom family's fit keeps its named posterior and the resolved shared
     values per draw. Shared effects require joint mode. Branches are distinct,
@@ -322,7 +322,7 @@ class ForecastNetwork:
 
     def _programs(self, prepared, selected):
         events = [node for node in self.event_nodes if node.name in selected]
-        record_shared = any(node.process.event_time_model is not None for node in events)
+        record_shared = any(node.process.family is not None for node in events)
 
         def program():
             shared = self._shared()
@@ -350,7 +350,7 @@ class ForecastNetwork:
     def _fit_selection(self, prepared, selected, structure, **options):
         """Fit one joint/modular block and resolve its real local/shared draw values."""
         program, resolver, events = self._programs(prepared, selected)
-        custom = any(node.process.event_time_model is not None for node in events)
+        custom = any(node.process.family is not None for node in events)
         record = custom and structure is not None
         shared_sites = _shared_sites(structure.num_leaves) if record else []
         post, params, loss, resolved = _fit_program(

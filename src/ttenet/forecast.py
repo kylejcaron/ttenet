@@ -20,7 +20,7 @@ Stage parameters
 Each stage is a ``StageParameters`` (one draw, or a leading draw axis) or a
 ``StageFit``. Both replay through ``StageFit.timing``: the default family
 evaluates ``event_times.default_timing`` on the draw's parameters; a custom
-family reruns its ``event_time_model`` factory with the draw's named sites
+family reruns its ``family.model`` with the draw's named sites
 and resolved shared values substituted, so new ages, features and horizons
 re-evaluate the family rather than extend a frozen training grid. The host
 only prepares ``TimingInputs`` (ages, regressors) and administrative masks
@@ -59,19 +59,19 @@ the subset still within the deadline.
 
 Tail assumptions
 ----------------
-Eventual expectations need each family's declared ``tail_behavior``:
-``{"kind": "proper"}`` means a susceptible unit eventually fires under the
+Eventual expectations need each family's typed ``tail`` declaration:
+``ProperTail()`` means a susceptible unit eventually fires under the
 documented continuing-exposure assumption (positive hazard keeps running and
 closed days eventually reopen); the default family's final fitted baseline
-bin continues beyond the learned ages and is proper. ``{"kind": "finite",
-"last_age": a}`` integrates the calendar-masked kernel through age ``a``,
+bin continues beyond the learned ages and is proper. ``FiniteTail(last_age=a)``
+integrates the calendar-masked kernel through age ``a``,
 closures included -- a terminal atom falling on a closure does not fire.
-``{"kind": "unknown"}`` cannot support an eventual expectation and is
+``UnknownTail()`` cannot support an eventual expectation and is
 refused unless a deadline bounds the stage. Beyond the supplied calendar,
 finite windows continue all-open with each row's last calendar features
 held constant; proper initiation mass that remains after the calendar ends
 completes with the stationary receipt probability computed under that same
-continuation from the same factory.
+continuation from the same family.
 
 The ``expected_*_receipts`` fields concern the historical population at the
 forecast origin, not future sales. Their initiation component depends on the
@@ -85,7 +85,6 @@ population eventual expectation. No receipt deadline is invented.
 from __future__ import annotations
 
 import functools
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
@@ -101,12 +100,11 @@ from numpyro_forecast import Horizon, predict
 from .dates import date_grid, elapsed_days, to_day
 from .distributions import CohortEventTime, EventTime
 from .event_times import TimingInputs, survival_kernel
+from .families import FiniteTail, ProperTail, TailBehavior, validate_family
 from .integration import SalesForecast, _validate_counts
 from .models import StageFit
 from .survival import StageParameters
 
-_DEFAULT_TAIL = {"kind": "proper"}
-_TAIL_KINDS = ("proper", "finite", "unknown")
 _BLOCK_CELLS = 1 << 22
 """Per-block budget of ``[time, pool]`` cells: draws are mapped in blocks this size."""
 
@@ -205,23 +203,12 @@ def _align_draws(*counts):
     return unique[0] if unique else 1
 
 
-def _tail_behavior(fit):
-    """The family's static tail declaration; the default family is proper."""
-    if fit.event_time_model is None:
-        return _DEFAULT_TAIL
-    tail = getattr(fit.event_time_model, "tail_behavior", None)
-    if not isinstance(tail, Mapping) or tail.get("kind") not in _TAIL_KINDS:
-        raise ValueError(
-            "event_time_model.tail_behavior must be {'kind': 'proper'}, "
-            "{'kind': 'finite', 'last_age': a} or {'kind': 'unknown'}"
-        )
-    if tail["kind"] == "finite":
-        last_age = tail.get("last_age")
-        if isinstance(last_age, bool) or not isinstance(last_age, (int, np.integer)):
-            raise ValueError("a finite tail_behavior must declare an integer last_age")
-        if last_age < 0:
-            raise ValueError("tail_behavior last_age must be nonnegative")
-    return tail
+def _stage_tail(fit) -> TailBehavior:
+    """The family's typed tail declaration; the default family is proper."""
+    if fit.family is None:
+        return ProperTail()
+    validate_family(fit.family)
+    return fit.family.tail
 
 
 class _Stage(NamedTuple):
@@ -230,7 +217,7 @@ class _Stage(NamedTuple):
     fit: StageFit
     draws: int
     widths: tuple[int, int] | None  # (P, Q) for the default family, None for a custom one
-    tail: Mapping
+    tail: TailBehavior
 
 
 def _resolve_stage(parameters, name):
@@ -241,9 +228,9 @@ def _resolve_stage(parameters, name):
         normalized, draws = _normalize_stage_parameters(parameters, name)
         fit = StageFit(_broadcast_stage(normalized, draws), np.zeros(0))
     widths = None
-    if fit.event_time_model is None:
+    if fit.family is None:
         widths = (int(fit.parameters.beta.shape[-1]), int(fit.parameters.cure_beta.shape[-1]))
-    return _Stage(fit, fit.draws, widths, _tail_behavior(fit))
+    return _Stage(fit, fit.draws, widths, _stage_tail(fit))
 
 
 def _x64(tree):
@@ -860,11 +847,11 @@ def forecast_events(
 def _window_end(tail, deadline, stage):
     """Last age at which ``stage`` can still fire, or ``None`` for an unbounded proper tail."""
     bounds = [deadline] if deadline is not None else []
-    if tail["kind"] == "finite":
-        bounds.append(int(tail["last_age"]))
+    if isinstance(tail, FiniteTail):
+        bounds.append(int(tail.last_age))
     if bounds:
         return int(min(bounds))
-    if tail["kind"] == "proper":
+    if isinstance(tail, ProperTail):
         return None
     raise ValueError(
         f"the {stage} family declares an unknown tail, so its eventual {stage} probability "
@@ -952,7 +939,7 @@ def _draw_expectations(
             uninitiated, _ = lax.scan(day, jnp.float64(0.0), jnp.arange(future_days))
             if not init_bounded:
                 # Proper initiation mass left after the calendar completes under the
-                # stationary continuation of the same receipt factory.
+                # stationary continuation of the same receipt family.
                 remaining = jnp.exp(
                     kernel.log_susceptible + jnp.sum(kernel.log_survival_step, axis=-2)
                 )

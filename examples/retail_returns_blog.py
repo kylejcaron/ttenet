@@ -946,16 +946,18 @@ def _(mo):
     Ordinary convolution shifts one lag curve along time. Here, storms and weekends can
     change the curve for each source date. We compose it **within each posterior draw**;
     simulated paths still allocate whole units and carry their actual parent dates forward.
-    The interface does not prescribe a delay family: the default daily hazard or a
-    discretized Weibull factory supplies the same kernel. A learned nonparametric
-    survival curve can use that interface without changing the graph.
+    The interface does not prescribe a delay family: the default daily hazard or the
+    packaged `WeibullFamily` supplies the same kernel. Select one with
+    `CureProcess(family=WeibullFamily(scale_prior=6.0))`; custom NumPyro models use an `EventFamily`
+    wrapper with an explicit tail declaration. A learned nonparametric survival curve
+    can use that interface without changing the graph.
 
     TTENet's native `EventTime` distribution implements the same law for fitting and
     forecasting. Its `slice_time` and `prefix_condition` registrations tell
     `numpyro_forecast.predict` how to score an observed prefix and sample what remains:
 
     ```python
-    # TTENet components; timing comes from the selected family's factory.
+    # TTENet components; timing comes from the selected family's model.
     h = Horizon.from_data(calendar_covariates, observed_events)
     kernel = survival_kernel(timing, susceptibility_logits, **exposure_inputs)
     predict(
@@ -1423,7 +1425,10 @@ def _(
         "Daily forecasts against what actually happened",
         f"Bands are 50% and 90% predictive intervals; {swatch(INK)}dots are held-out actuals "
         "the model never saw. The storm in early July is a supplied weather input, not a "
-        "forecast: receipts dip during it, then the backlog lands as soon as it clears. "
+        "forecast: receipts slow during it, then the backlog drains over subsequent open "
+        "days. The peak's day and size are uncertain: here the July 10 observed count is "
+        "below the forecast's 90% interval, "
+        "while the largest observed catch-up is on July 13. "
         "Weekend receipts are exactly zero in every draw.",
     )
     return
@@ -1797,8 +1802,8 @@ def _(
         f"panel, {swatch(AMBER, block=True)}shading marks the scenario's storm days and the "
         "dashed amber outline marks the baseline's storm. Sales changes show up in "
         "<b>initiations</b> within days (top), then in receipts as those returns ship back. "
-        "Weather only touches <b>receipts</b> (bottom): a storm slows them to a trickle, and the "
-        "backlog lands on the first open weekday after it clears.",
+        "Weather only touches <b>receipts</b> (bottom): a storm slows them to a trickle, and "
+        "the backlog starts draining over open days after it clears, not all at once.",
     )
     return
 
@@ -1921,8 +1926,8 @@ def _(
     ).properties(height=240, width="container")
     figure(
         _chart,
-        "The baseline doesn't know about the storm or the backlog. Notice the returns spike "
-        "and overall increase the week after the storm.",
+        "The baseline doesn't know about the storm or the backlog. The model forecasts "
+        "a post-storm catch-up, but does not guarantee a one-day spike.",
         f"{swatch(RED)}The weekday average repeats the recent past. {swatch(ACCENT)}ttenet "
         "knows which units are in transit, how old they are, and that the storm will hold "
         f"them up. {swatch(INK)}Dots: held-out actuals.",

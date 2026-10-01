@@ -1,15 +1,13 @@
 """Pluggable event-time families through the standalone fitting API.
 
-A family factory samples its own named NumPyro sites and returns a timing law;
-the fitting core applies exposure, closures, cure and conditioning. These
-tests pin the consumer-visible contract: real named posteriors, exact
-likelihoods against closed-form survival, and refusals of ambiguous setups.
+A family samples its own named NumPyro sites in ``model`` and returns an
+``EventLaw``; the fitting core applies exposure, closures, cure and
+conditioning. These tests pin the consumer-visible contract: real named
+posteriors, exact likelihoods against closed-form survival, and refusals of
+ambiguous or undeclared setups.
 """
 
 from __future__ import annotations
-
-import importlib.util
-from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -20,12 +18,11 @@ import pytest
 from numpyro import handlers
 from numpyro.infer.util import log_density
 
-from ttenet.event_times import TimingInputs, TimingLaw, log1mexp
+from ttenet.event_times import EventLaw, TimingInputs, TimingLaw, log1mexp
+from ttenet.families import EventFamily, FiniteTail, ProperTail, UnknownTail, WeibullFamily
 from ttenet.models import StageFit, StageObservations, fit_stage, predict_stage, stage_model
 from ttenet.processes import CureProcess
 from ttenet.survival import StageParameters
-
-_EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "event_time_families.py"
 
 
 def _weibull_log_stay(ages, scale, shape):
@@ -38,17 +35,18 @@ def _weibull_log_stay(ages, scale, shape):
     return -(following - cumulative)
 
 
-def _weibull_family(*, scale=None, shape=2.0, cure_logit=None):
+def _weibull_family(*, scale=None, shape=2.0, cure_logit=None, tail=ProperTail()):
     """Discrete shape-``shape`` Weibull: sampled ``scale`` unless fixed, optional ``cure``."""
 
-    def event_time_model(inputs, shared):
+    def model(inputs, shared):
         lam = scale if scale is not None else numpyro.sample("scale", dist.LogNormal(1.0, 0.5))
         pi = cure_logit if cure_logit is not None else numpyro.sample("cure", dist.Normal(0.0, 2.0))
         log_stay = _weibull_log_stay(inputs.ages, lam, shape)
-        return TimingLaw(log1mexp(log_stay), log_stay), jnp.broadcast_to(pi, inputs.ages.shape[-1:])
+        return EventLaw(
+            TimingLaw(log1mexp(log_stay), log_stay), jnp.broadcast_to(pi, inputs.ages.shape[-1:])
+        )
 
-    event_time_model.tail_behavior = {"kind": "proper"}
-    return event_time_model
+    return EventFamily(model, tail)
 
 
 def _observations(ages, event_index, **overrides):
@@ -83,7 +81,7 @@ def test_weibull_family_likelihood_and_gradient_match_closed_form_survival():
         model = handlers.block(
             handlers.substitute(stage_model, data={"scale": scale}), hide=["scale"]
         )
-        return log_density(model, (observations,), {"event_time_model": family}, {})[0]
+        return log_density(model, (observations,), {"family": family}, {})[0]
 
     def oracle(scale):
         event = 0.7 * (_survival(2, scale) - _survival(3, scale))
@@ -109,7 +107,7 @@ def test_weibull_family_respects_closures_and_delayed_entry_from_the_core():
         exposure=jnp.array([[False, False, True, True]]),
         pre_entry=jnp.array([[True, True, False, False]]),
     )
-    value = log_density(stage_model, (observations,), {"event_time_model": family}, {})[0]
+    value = log_density(stage_model, (observations,), {"family": family}, {})[0]
     stay = _survival(1, 3.0) / _survival(0, 3.0)  # only age 0 is open before entry
     pre = 0.7 * stay / (0.3 + 0.7 * stay)
     post = _survival(4, 3.0) / _survival(2, 3.0)
@@ -117,21 +115,23 @@ def test_weibull_family_respects_closures_and_delayed_entry_from_the_core():
 
 
 def test_fit_stage_custom_family_exposes_named_posterior_and_optimized_values():
-    def family(inputs, shared):
+    def model(inputs, shared):
         scale = numpyro.sample("scale", dist.LogNormal(1.0, 0.3))
         shape = numpyro.param("shape", jnp.array(1.5), constraint=dist.constraints.positive)
         log_stay = _weibull_log_stay(inputs.ages, scale, shape)
-        return TimingLaw(log1mexp(log_stay), log_stay), jnp.full(inputs.ages.shape[-1:], 1.0)
+        return EventLaw(
+            TimingLaw(log1mexp(log_stay), log_stay), jnp.full(inputs.ages.shape[-1:], 1.0)
+        )
 
-    family.tail_behavior = {"kind": "proper"}
+    family = EventFamily(model, ProperTail())
     rng = np.random.default_rng(0)
     n, t = 30, 12
     ages = np.broadcast_to(np.arange(t), (n, t))
     delays = np.floor(3.0 * np.sqrt(-np.log(rng.random(n)))).astype(int)
     event_index = np.where(delays < t, delays, -1)
     observations = _observations(ages=ages, event_index=event_index)
-    fit = fit_stage(observations, event_time_model=family, num_steps=40, num_samples=9, seed=2)
-    assert fit.event_time_model is family and fit.shared is None
+    fit = fit_stage(observations, family=family, num_steps=40, num_samples=9, seed=2)
+    assert fit.family is family and fit.shared is None
     assert fit.num_samples == 9 and fit.draws == 9
     assert set(fit.parameters) == {"scale", "shape"}
     assert fit.parameters["scale"].shape == (9,) and fit.parameters["shape"].shape == (9,)
@@ -144,17 +144,18 @@ def test_fit_stage_custom_family_exposes_named_posterior_and_optimized_values():
         features=jnp.zeros((2, 2, 0)),
         cure_features=jnp.zeros((2, 0)),
     )
-    timing, logits = fit.timing(inputs, draw=4)
+    law = fit.timing(inputs, draw=4)
+    assert isinstance(law, EventLaw)
     scale, shape = fit.parameters["scale"][4], fit.parameters["shape"][4]
     expected = _weibull_log_stay(inputs.ages, scale, shape)
-    np.testing.assert_allclose(timing.log_survival_step, expected, rtol=1e-5)
-    np.testing.assert_allclose(logits, [1.0, 1.0])
+    np.testing.assert_allclose(law.timing.log_survival_step, expected, rtol=1e-5)
+    np.testing.assert_allclose(law.susceptibility_logits, [1.0, 1.0])
 
 
 def test_fit_stage_fixed_family_keeps_the_requested_draw_count():
     family = _weibull_family(scale=3.0, cure_logit=0.5)
     observations = _observations(ages=[[0, 1, 2]] * 3, event_index=[1, -1, 2])
-    fit = fit_stage(observations, event_time_model=family, num_steps=5, num_samples=4)
+    fit = fit_stage(observations, family=family, num_steps=5, num_samples=4)
     assert dict(fit.parameters) == {}
     assert fit.num_samples == 4 and fit.draws == 4
     laws = jax.vmap(
@@ -163,13 +164,14 @@ def test_fit_stage_fixed_family_keeps_the_requested_draw_count():
             draw=draw,
         )
     )(jnp.arange(fit.draws))
-    assert laws[0].log_hazard.shape == (4, 2, 1) and laws[1].shape == (4, 1)
-    np.testing.assert_allclose(laws[0].log_survival_step[:, 0, 0], -1 / 9, rtol=1e-6)
+    assert laws.timing.log_hazard.shape == (4, 2, 1)
+    assert laws.susceptibility_logits.shape == (4, 1)
+    np.testing.assert_allclose(laws.timing.log_survival_step[:, 0, 0], -1 / 9, rtol=1e-6)
 
 
 def test_custom_fit_timing_refuses_sites_missing_from_its_posterior():
     family = _weibull_family()
-    fit = StageFit({"cure": jnp.zeros(3)}, jnp.zeros(0), event_time_model=family, num_samples=3)
+    fit = StageFit({"cure": jnp.zeros(3)}, jnp.zeros(0), family=family, num_samples=3)
     inputs = TimingInputs(jnp.array([[0], [1]]), jnp.zeros((2, 1, 0)), jnp.zeros((1, 0)))
     with pytest.raises(ValueError, match="scale"):
         fit.timing(inputs, draw=0)
@@ -182,7 +184,7 @@ def test_stage_fit_validates_draw_metadata_against_its_arrays():
     with pytest.raises(ValueError, match="num_samples"):
         StageFit(parameters, jnp.zeros(0), num_samples=5)
     with pytest.raises(ValueError, match="num_samples"):
-        StageFit({}, jnp.zeros(0), event_time_model=_weibull_family(scale=1.0, cure_logit=0.0))
+        StageFit({}, jnp.zeros(0), family=_weibull_family(scale=1.0, cure_logit=0.0))
     with pytest.raises(TypeError, match="StageParameters"):
         StageFit({"scale": jnp.ones(3)}, jnp.zeros(0))
 
@@ -192,54 +194,75 @@ def test_ambiguous_family_configuration_is_rejected():
         return StageParameters(jnp.zeros(1), jnp.empty(0), 0.0, jnp.empty(0))
 
     with pytest.raises(ValueError, match="ambiguous"):
-        CureProcess(parameter_model=prior, event_time_model=_weibull_family())
+        CureProcess(parameter_model=prior, family=_weibull_family())
     with pytest.raises(TypeError):
-        CureProcess(event_time_model="not callable")
+        CureProcess(family="not a family")
 
 
-def test_family_without_declared_tail_behavior_is_refused():
-    def family(inputs, shared):
-        return _weibull_family(scale=2.0, cure_logit=0.0)(inputs, shared)
-
-    with pytest.raises(ValueError, match="tail_behavior"):
-        CureProcess(event_time_model=family)
+def test_family_without_valid_tail_declaration_is_refused():
     observations = _observations(ages=[[0, 1]], event_index=[-1])
-    with pytest.raises(ValueError, match="tail_behavior"):
-        fit_stage(observations, event_time_model=family, num_steps=1, num_samples=1)
-    family.tail_behavior = {"kind": "finite"}
-    with pytest.raises(ValueError, match="last_age"):
-        CureProcess(event_time_model=family)
-    family.tail_behavior = {"kind": "finite", "last_age": 4}
-    assert CureProcess(event_time_model=family).event_time_model is family
+    model = _weibull_family(scale=2.0, cure_logit=0.0).model
+
+    def bare_function(inputs, shared):
+        return model(inputs, shared)
+
+    class DictTail:
+        tail = {"kind": "proper"}
+
+        @staticmethod
+        def model(inputs, shared):
+            return model(inputs, shared)
+
+    for undeclared in (bare_function, DictTail()):
+        with pytest.raises((TypeError, ValueError)):
+            CureProcess(family=undeclared)
+        with pytest.raises((TypeError, ValueError)):
+            fit_stage(observations, family=undeclared, num_steps=1, num_samples=1)
+    for last_age in (-1, True, 2.5):
+        with pytest.raises(ValueError, match="last_age"):
+            CureProcess(family=EventFamily(model, FiniteTail(last_age=last_age)))
+        with pytest.raises(ValueError, match="last_age"):
+            fit_stage(
+                observations,
+                family=EventFamily(model, FiniteTail(last_age=last_age)),
+                num_steps=1,
+                num_samples=1,
+            )
+    finite = _weibull_family(scale=2.0, cure_logit=0.0, tail=FiniteTail(last_age=4))
+    assert CureProcess(family=finite).family is finite
+    unknown = _weibull_family(scale=2.0, cure_logit=0.0, tail=UnknownTail())
+    assert CureProcess(family=unknown).family is unknown
 
 
-def test_example_weibull_plugin_is_a_proper_shape_two_family():
-    spec = importlib.util.spec_from_file_location("event_time_families", _EXAMPLE)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    family = module.weibull_family(scale=4.0, shape=2.0, cure=float(np.log(0.8 / 0.2)))
-    assert family.tail_behavior == {"kind": "proper"}
-    inputs = TimingInputs(
-        ages=jnp.array([[-1, 0], [0, 1], [1, 2]]),
-        features=jnp.zeros((3, 2, 0)),
-        cure_features=jnp.zeros((2, 0)),
-    )
-    with handlers.seed(rng_seed=0):
-        timing, logits = family(inputs, None)
-    stay = np.exp(np.asarray(timing.log_survival_step, dtype=np.float64))
-    expected = _survival(np.maximum(np.asarray(inputs.ages), 0) + 1, 4.0) / _survival(
-        np.maximum(np.asarray(inputs.ages), 0), 4.0
-    )
-    np.testing.assert_allclose(stay, expected, rtol=1e-6)
-    np.testing.assert_allclose(np.exp(timing.log_hazard) + stay, 1.0, rtol=1e-6)
-    np.testing.assert_allclose(logits, np.log(0.8 / 0.2), rtol=1e-6)
-    sampled = module.weibull_family(scale=dist.LogNormal(1.0, 0.3), shape=dist.LogNormal(0.5, 0.2))
-    trace = handlers.trace(handlers.seed(sampled, rng_seed=1)).get_trace(inputs, None)
-    assert {name for name, site in trace.items() if site["type"] == "sample"} == {
-        "scale",
-        "shape",
-        "cure_intercept",
-    }
+def test_family_model_must_return_a_named_event_law():
+    law_model = _weibull_family(scale=2.0, cure_logit=0.0).model
+
+    def unnamed(inputs, shared):
+        return tuple(law_model(inputs, shared))
+
+    observations = _observations(ages=[[0, 1]], event_index=[-1])
+    with pytest.raises(TypeError, match="EventLaw"):
+        fit_stage(
+            observations, family=EventFamily(unnamed, ProperTail()), num_steps=1, num_samples=1
+        )
+
+
+def test_packaged_weibull_family_fits_and_replays_through_the_public_api():
+    family = WeibullFamily(scale_prior=dist.LogNormal(1.0, 0.3), susceptibility_prior=1.0)
+    assert isinstance(family.tail, ProperTail)
+    rng = np.random.default_rng(1)
+    n, t = 40, 10
+    ages = np.broadcast_to(np.arange(t), (n, t))
+    delays = np.floor(3.0 * np.sqrt(-np.log(rng.random(n)))).astype(int)
+    observations = _observations(ages, np.where(delays < t, delays, -1))
+    fit = fit_stage(observations, family=family, num_steps=30, num_samples=6, seed=3)
+    assert fit.family is family and set(fit.parameters) == {"scale"}
+    assert len(np.unique(np.asarray(fit.parameters["scale"]))) > 1
+    inputs = TimingInputs(jnp.array([[0, 3], [1, 4]]), jnp.zeros((2, 2, 0)), jnp.zeros((2, 0)))
+    law = fit.timing(inputs, draw=2)
+    expected = _weibull_log_stay(inputs.ages, fit.parameters["scale"][2], 2.0)
+    np.testing.assert_allclose(law.timing.log_survival_step, expected, rtol=1e-5)
+    np.testing.assert_allclose(law.susceptibility_logits, [1.0, 1.0], rtol=1e-6)
 
 
 @pytest.mark.parametrize("index,days", [(2, 2), (-2, 2), (0.5, 2), (0, 0)])
@@ -247,7 +270,7 @@ def test_invalid_event_indices_are_not_fitted_as_censoring(index, days):
     observations = _observations([list(range(days))], [index])
     family = _weibull_family(scale=3.0, cure_logit=1.0)
     with pytest.raises(ValueError, match="event_index"):
-        log_density(stage_model, (observations,), {"event_time_model": family}, {})
+        log_density(stage_model, (observations,), {"family": family}, {})
 
 
 def test_traced_invalid_event_indices_keep_impossible_likelihood():
@@ -255,7 +278,7 @@ def test_traced_invalid_event_indices_keep_impossible_likelihood():
 
     def score(index):
         observations = _observations([[0, 1]], jnp.reshape(index, (1,)))
-        return log_density(stage_model, (observations,), {"event_time_model": family}, {})[0]
+        return log_density(stage_model, (observations,), {"family": family}, {})[0]
 
     scores = np.asarray(jax.jit(jax.vmap(score))(jnp.array([-1, 0, 1, 2, -2])))
     assert np.isfinite(scores[:3]).all()
@@ -264,19 +287,20 @@ def test_traced_invalid_event_indices_keep_impossible_likelihood():
 
 @pytest.mark.parametrize("optimized", [False, True])
 def test_zero_size_latent_sites_remain_replayable_with_or_without_parameters(optimized):
-    def family(inputs, shared):
+    def model(inputs, shared):
         beta = numpyro.sample(
             "beta", dist.Normal(0, 1).expand([inputs.features.shape[-1]]).to_event(1)
         )
         rate = numpyro.param("rate", jnp.array(0.5)) if optimized else jnp.array(0.5)
         stay = -rate * jnp.exp(inputs.features @ beta)
-        return TimingLaw(log1mexp(stay), stay), jnp.full(inputs.ages.shape[-1], np.log(4.0))
+        logits = jnp.full(inputs.ages.shape[-1], np.log(4.0))
+        return EventLaw(TimingLaw(log1mexp(stay), stay), logits)
 
-    family.tail_behavior = {"kind": "proper"}
+    family = EventFamily(model, ProperTail())
     observations = _observations(
         [[0, 1, 2, 3]], [-1], allowed=jnp.array([[True, False, True, True]])
     )
-    fitted = fit_stage(observations, event_time_model=family, num_steps=2, num_samples=2048)
+    fitted = fit_stage(observations, family=family, num_steps=2, num_samples=2048)
     paths = np.asarray(predict_stage(fitted, observations, seed=19))
     assert not paths[:, 1].any()
     assert (paths.sum(axis=1) <= 1).all()

@@ -70,6 +70,19 @@ class TimingLaw(NamedTuple):
     log_survival_step: Any
 
 
+class EventLaw(NamedTuple):
+    """A family's complete law for one stage: susceptible timing plus susceptibility.
+
+    ``timing`` is the per-cell :class:`TimingLaw` and ``susceptibility_logits``
+    is ``[..., cohort]`` (or anything that broadcasts to it) -- the logit of
+    the probability that a unit is susceptible at all. Every family model,
+    packaged or custom, returns one of these.
+    """
+
+    timing: TimingLaw
+    susceptibility_logits: Any
+
+
 class SurvivalKernel(NamedTuple):
     """Exposure-masked timing law plus conditioned susceptibility logits.
 
@@ -191,7 +204,7 @@ def timing_from_log_masses(log_mass: Any, log_tail: Any, ages: Any) -> TimingLaw
     later -- whether they are known never to fire, fire at some
     unmodelled later age, or are simply unresolved -- and therefore
     cannot by itself justify an eventual expectation or a proper/finite
-    continuation. The family factory's ``tail_behavior`` declares that.
+    continuation. The family's typed tail declaration specifies that.
 
     Negative ages look up age ``0``; exposure masking is the caller's
     concern, as for every timing family.
@@ -223,7 +236,37 @@ def timing_from_log_masses(log_mass: Any, log_tail: Any, ages: Any) -> TimingLaw
     return TimingLaw(lookup(grid_log_hazard), lookup(grid_log_stay))
 
 
-def default_timing(parameters: StageParameters, inputs: TimingInputs) -> tuple[TimingLaw, Any]:
+def timing_from_log_survival(log_survival_start: Any, log_survival_end: Any) -> TimingLaw:
+    """Timing law of a susceptible continuous law from its log survival at bin edges.
+
+    ``log_survival_start`` is ``log S(a)`` and ``log_survival_end`` is
+    ``log S(a + 1)`` for the bin ``[a, a + 1)`` of every cell; the two arrays
+    broadcast against each other to the ``[..., time, cohort]`` cell axes.
+    The stay is the conditional probability of outliving the bin,
+    ``log S(a + 1) - log S(a)``, formed directly in log space, and the hazard
+    is its complement through :func:`log1mexp`; the two never go through
+    ``1 - p``.
+
+    Boundary values are exact. A finite ``log S(a)`` with ``log S(a + 1) ==
+    -inf`` is a certain terminal bin: stay ``-inf``, hazard ``0``. An exhausted
+    cell, ``-inf`` at both edges, has no susceptible unit left to fire: hazard
+    ``-inf`` and stay ``0`` by substitution, never ``-inf - -inf``. Gradients
+    are finite at every boundary. ``NaN`` propagates, and a pair that is not a
+    non-increasing log probability (``log S(a + 1) > log S(a)``) yields a stay
+    above one rather than a laundered law.
+
+    Callers evaluate the continuous law at elapsed ages only; exposure,
+    closures, entry conditioning and cure stay in the shared core.
+    """
+    start, end = jnp.broadcast_arrays(
+        jnp.asarray(log_survival_start), jnp.asarray(log_survival_end)
+    )
+    exhausted = jnp.isneginf(start) & jnp.isneginf(end)
+    log_stay = jnp.where(exhausted, 0.0, end) - jnp.where(exhausted, 0.0, start)
+    return TimingLaw(log_hazard=log1mexp(log_stay), log_survival_step=log_stay)
+
+
+def default_timing(parameters: StageParameters, inputs: TimingInputs) -> EventLaw:
     """Timing law and susceptibility logits of the default logistic stage family.
 
     Hazard logits are ``age_logits[min(age, K-1)] + x(t) @ beta`` and the
@@ -237,7 +280,7 @@ def default_timing(parameters: StageParameters, inputs: TimingInputs) -> tuple[T
     """
     logits = _hazard_logits(parameters, inputs.ages, inputs.features)
     timing = TimingLaw(log_hazard=log_sigmoid(logits), log_survival_step=log_sigmoid(-logits))
-    return timing, _cure_logits(parameters, inputs.cure_features)
+    return EventLaw(timing, _cure_logits(parameters, inputs.cure_features))
 
 
 def _require_disjoint(pre_entry: Any, exposure: Any) -> None:

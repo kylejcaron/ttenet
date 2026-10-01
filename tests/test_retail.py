@@ -124,8 +124,8 @@ def test_custom_receipt_family_preserves_eventual_outstanding_expectation():
             jnp.array([0.0]), jnp.empty(0), np.log(0.4 / 0.6), jnp.empty(0)
         )
 
-    def receipt_family(inputs, shared):
-        return (
+    def receipt_model(inputs, shared):
+        return ttenet.EventLaw(
             ttenet.TimingLaw(
                 jnp.full_like(inputs.ages, np.log(0.5), dtype=float),
                 jnp.full_like(inputs.ages, np.log(0.5), dtype=float),
@@ -133,12 +133,12 @@ def test_custom_receipt_family_preserves_eventual_outstanding_expectation():
             jnp.full(inputs.ages.shape[-1], np.log(0.4 / 0.6)),
         )
 
-    receipt_family.tail_behavior = {"kind": "proper"}
+    receipt_family = ttenet.EventFamily(receipt_model, ttenet.ProperTail())
     model = ttenet.RetailReturnModel(
         initiation=ttenet.CureProcess(
             age_bins=1, deadline_days=3, parameter_model=fixed_initiation
         ),
-        receipt=ttenet.CureProcess(event_time_model=receipt_family),
+        receipt=ttenet.CureProcess(family=receipt_family),
     )
     units = pd.DataFrame(
         {
@@ -160,18 +160,18 @@ def test_custom_receipt_family_preserves_eventual_outstanding_expectation():
 
 
 def test_finite_initiation_support_extends_eventual_retail_covariates():
-    def initiation_family(inputs, shared):
+    def initiation_model(inputs, shared):
         log_mass = jnp.concatenate([jnp.full(10, -jnp.inf), jnp.zeros(1)])
         law = ttenet.timing_from_log_masses(log_mass, -jnp.inf, inputs.ages)
-        return law, jnp.full(inputs.ages.shape[-1], 50.0)
+        return ttenet.EventLaw(law, jnp.full(inputs.ages.shape[-1], 50.0))
 
-    initiation_family.tail_behavior = {"kind": "finite", "last_age": 10}
+    initiation_family = ttenet.EventFamily(initiation_model, ttenet.FiniteTail(last_age=10))
 
     def receipt_parameters(observations, shared):
         return ttenet.StageParameters(jnp.zeros(1), jnp.empty(0), np.log(0.4 / 0.6), jnp.empty(0))
 
     model = ttenet.RetailReturnModel(
-        initiation=ttenet.CureProcess(event_time_model=initiation_family),
+        initiation=ttenet.CureProcess(family=initiation_family),
         receipt=ttenet.CureProcess(age_bins=1, parameter_model=receipt_parameters),
     )
     units = pd.DataFrame({"item_id": ["sold"], "sale_date": ["2026-01-04"]})

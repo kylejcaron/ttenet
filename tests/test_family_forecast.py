@@ -10,7 +10,8 @@ from jax.nn import log_sigmoid
 
 from ttenet.data import prepare_history
 from ttenet.dates import date_grid
-from ttenet.event_times import TimingLaw, log1mexp, timing_from_log_masses
+from ttenet.event_times import EventLaw, TimingLaw, log1mexp, timing_from_log_masses
+from ttenet.families import EventFamily, FiniteTail, ProperTail, UnknownTail
 from ttenet.forecast import expected_return_receipts, forecast_events, forecast_returns
 from ttenet.integration import SalesForecast
 from ttenet.models import StageFit
@@ -40,58 +41,53 @@ def _calendar(start="2025-01-01", horizon=120):
 
 
 def _fit(family, parameters, draws):
-    return StageFit(
-        parameters=parameters, losses=np.zeros(0), event_time_model=family, num_samples=draws
-    )
+    return StageFit(parameters=parameters, losses=np.zeros(0), family=family, num_samples=draws)
 
 
-def _constant_family(inputs, shared):
+def _constant_model(inputs, shared):
     """Constant-hazard family whose named sites are replayed from the fit."""
     hazard_logit = numpyro.sample("hazard_logit", dist.Normal(0.0, 1.0))
     cure_logit = numpyro.sample("cure_logit", dist.Normal(0.0, 1.0))
     logits = jnp.broadcast_to(hazard_logit, inputs.ages.shape)
     timing = TimingLaw(log_sigmoid(logits), log_sigmoid(-logits))
-    return timing, jnp.broadcast_to(cure_logit, inputs.ages.shape[-1:])
+    return EventLaw(timing, jnp.broadcast_to(cure_logit, inputs.ages.shape[-1:]))
 
 
-_constant_family.tail_behavior = {"kind": "proper"}
+_constant_family = EventFamily(_constant_model, ProperTail())
 
 
 def _fixed_constant_family(hazard, cure):
     """Zero-latent constant-hazard family: no sample or param sites at all."""
 
-    def family(inputs, shared):
+    def model(inputs, shared):
         logits = jnp.full(inputs.ages.shape, _logit(hazard))
         timing = TimingLaw(log_sigmoid(logits), log_sigmoid(-logits))
-        return timing, jnp.full(inputs.ages.shape[-1:], _logit(cure))
+        return EventLaw(timing, jnp.full(inputs.ages.shape[-1:], _logit(cure)))
 
-    family.tail_behavior = {"kind": "proper"}
-    return family
+    return EventFamily(model, ProperTail())
 
 
 def _weibull_family(scale, shape, cure):
     """Discretized Weibull: log S(a) = -(a / scale) ** shape on the [a, a + 1) bins."""
 
-    def family(inputs, shared):
+    def model(inputs, shared):
         ages = jnp.maximum(inputs.ages, 0).astype(jnp.float64)
         stay = -(((ages + 1.0) / scale) ** shape) + (ages / scale) ** shape
-        return TimingLaw(log1mexp(stay), stay), jnp.full(ages.shape[-1:], _logit(cure))
+        return EventLaw(TimingLaw(log1mexp(stay), stay), jnp.full(ages.shape[-1:], _logit(cure)))
 
-    family.tail_behavior = {"kind": "proper"}
-    return family
+    return EventFamily(model, ProperTail())
 
 
 def _grid_family(masses, atom, cure, tail):
     """Discrete susceptible masses on ages 0..A-1 plus a beyond-grid atom."""
 
-    def family(inputs, shared):
+    def model(inputs, shared):
         timing = timing_from_log_masses(
             jnp.log(jnp.asarray(masses, dtype=jnp.float64)), jnp.log(jnp.float64(atom)), inputs.ages
         )
-        return timing, jnp.full(inputs.ages.shape[-1:], _logit(cure))
+        return EventLaw(timing, jnp.full(inputs.ages.shape[-1:], _logit(cure)))
 
-    family.tail_behavior = tail
-    return family
+    return EventFamily(model, tail)
 
 
 def _future_arrivals(draws, horizon, cohorts, day, cohort, count):
@@ -152,7 +148,7 @@ def test_custom_family_replays_each_draws_named_sites():
     np.testing.assert_array_equal(result.eligible, result.pending)
 
 
-def test_zero_latent_factory_replays_the_requested_draw_count_and_seed():
+def test_zero_latent_family_replays_the_requested_draw_count_and_seed():
     fit = _fit(_weibull_family(scale=3.0, shape=2.0, cure=0.8), {}, 4)
     kwargs = dict(
         origins=[NAT],
@@ -182,7 +178,7 @@ def test_mass_grid_family_conditions_history_and_times_future_events():
     # A unit already at age one with no event is therefore known to be cured,
     # while a fresh 1000-unit cohort fires at age one with its prior
     # susceptibility 1/2 and nowhere else.
-    fit = _fit(_grid_family([0.0, 1.0], 0.0, 0.5, {"kind": "finite", "last_age": 1}), {}, 1)
+    fit = _fit(_grid_family([0.0, 1.0], 0.0, 0.5, FiniteTail(last_age=1)), {}, 1)
     result = forecast_events(
         fit,
         origins=[AS_OF - np.timedelta64(1, "D"), NAT],
@@ -296,7 +292,7 @@ def test_finite_receipt_family_integrates_through_last_age_with_closures():
             "receipt_date": [None],
         }
     )
-    receipt = _fit(_grid_family([0.5, 0.5], 0.0, 0.8, {"kind": "finite", "last_age": 1}), {}, 2)
+    receipt = _fit(_grid_family([0.5, 0.5], 0.0, 0.8, FiniteTail(last_age=1)), {}, 2)
     calendar = _calendar()
     _, open_receipts = expected_return_receipts(history, _params(), receipt, calendar=calendar)
     np.testing.assert_allclose(open_receipts, [2.0 / 3.0] * 2, rtol=1e-9)
@@ -315,7 +311,7 @@ def test_finite_receipt_contraction_streams_over_actual_initiation_days():
     # receiving closure on day 1 removes the day-1 initiations' receipts.
     history = _history({"item_id": ["sold"], "sale_date": [str(AS_OF)]}, policy_days=2)
     initiation = StageParameters(np.zeros(1), np.zeros(0), np.array(50.0), np.zeros(0))
-    receipt = _fit(_grid_family([1.0], 0.0, 0.5, {"kind": "finite", "last_age": 0}), {}, 1)
+    receipt = _fit(_grid_family([1.0], 0.0, 0.5, FiniteTail(last_age=0)), {}, 1)
     calendar = _calendar()
     uninitiated, _ = expected_return_receipts(history, initiation, receipt, calendar=calendar)
     np.testing.assert_allclose(uninitiated, [0.75 * 0.5], rtol=1e-9)
@@ -332,9 +328,7 @@ def test_finite_initiation_family_bounds_an_unbounded_policy_window():
     # fires there with certainty for susceptible units, so the eventual
     # initiation probability is the conditional susceptibility times one.
     history = _history({"item_id": ["sold"], "sale_date": [str(AS_OF)]}, policy_days=None)
-    initiation = _fit(
-        _grid_family([0.5, 0.5], 0.0, 1 - 1e-12, {"kind": "finite", "last_age": 1}), {}, 1
-    )
+    initiation = _fit(_grid_family([0.5, 0.5], 0.0, 1 - 1e-12, FiniteTail(last_age=1)), {}, 1)
     calendar = _calendar()
     uninitiated, _ = expected_return_receipts(
         history, initiation, _params(cure=0.5), calendar=calendar
@@ -361,7 +355,7 @@ def test_finite_receipt_beyond_the_calendar_uses_the_stated_continuation():
     # .5*(.5+.5) = .5. Total .5*.25 + .25*.5 + .25*.5 = .375.
     history = _history({"item_id": ["sold"], "sale_date": [str(AS_OF)]}, policy_days=None)
     initiation = StageParameters(np.zeros(1), np.zeros(0), np.array(50.0), np.zeros(0))
-    receipt = _fit(_grid_family([0.5, 0.5], 0.0, 0.5, {"kind": "finite", "last_age": 1}), {}, 2)
+    receipt = _fit(_grid_family([0.5, 0.5], 0.0, 0.5, FiniteTail(last_age=1)), {}, 2)
     calendar = _calendar(horizon=2)
     closed = np.ones((1, calendar.size), dtype=bool)
     closed[0, int(np.flatnonzero(calendar == AS_OF + np.timedelta64(2, "D"))[0])] = False
@@ -385,7 +379,7 @@ def test_finite_open_receipt_window_past_the_calendar_continues_all_open():
             "receipt_date": [None],
         }
     )
-    receipt = _fit(_grid_family([0.5, 0.5], 0.0, 0.8, {"kind": "finite", "last_age": 1}), {}, 1)
+    receipt = _fit(_grid_family([0.5, 0.5], 0.0, 0.8, FiniteTail(last_age=1)), {}, 1)
     _, open_receipts = expected_return_receipts(
         history, _params(), receipt, calendar=_calendar(horizon=0)
     )
@@ -401,7 +395,7 @@ def test_unknown_tail_refuses_eventual_expectations_but_not_finite_horizon_forec
             "receipt_date": [None],
         }
     )
-    receipt = _fit(_grid_family([0.3, 0.3], 0.4, 0.5, {"kind": "unknown"}), {}, 2)
+    receipt = _fit(_grid_family([0.3, 0.3], 0.4, 0.5, UnknownTail()), {}, 2)
     with pytest.raises(ValueError, match="eventual"):
         expected_return_receipts(history, _params(), receipt, calendar=_calendar())
     with pytest.raises(ValueError, match="eventual"):
@@ -422,7 +416,7 @@ def test_unknown_tail_refuses_eventual_expectations_but_not_finite_horizon_forec
 def test_post_calendar_receipt_atom_does_not_reuse_the_final_closure():
     history = _history({"item_id": ["sold"], "sale_date": [str(AS_OF)]}, policy_days=None)
     initiation = StageParameters(np.zeros(1), np.zeros(0), np.array(50.0), np.zeros(0))
-    receipt = _fit(_grid_family([1.0], 0.0, 0.5, {"kind": "finite", "last_age": 0}), {}, 1)
+    receipt = _fit(_grid_family([1.0], 0.0, 0.5, FiniteTail(last_age=0)), {}, 1)
     calendar = _calendar(horizon=2)
     closed = np.ones((1, calendar.size), dtype=bool)
     closed[:, -1] = False
