@@ -362,7 +362,7 @@ uvx nox -s tests-3.12 tests-3.13 tests-3.14 lint complexity
 
 - [x] Render the actual notebook in a browser, inspect the new prose/math/code at desktop and narrow widths, and exercise demand/weather controls. Confirm all displayed forecasts come from the migrated package and no errors are hidden by script-mode shortcuts.
 - [x] Repeat the Task 1 benchmark matrix against the recorded old revision. Append measured before/after results and confirm gates A–E on the completed package. Do not reset the complexity baseline just to conceal a regression.
-- [ ] Create a new draft PR with the real production scope, results, and any explicitly approved tradeoffs; commit and push. Close verified children with evidence, then the parent. Do not merge without authorization.
+- [x] Create a new draft PR with the real production scope, results, and any explicitly approved tradeoffs; commit and push. Close verified children with evidence, then the parent. Do not merge without authorization.
 
 ## Dependency order and review checkpoints
 

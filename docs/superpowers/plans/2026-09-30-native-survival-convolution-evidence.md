@@ -292,3 +292,9 @@ Final native joint loss `1492.475830078125`; all stage/sales losses finite, exac
 ### Final gate interpretation
 
 Gates A–C and E are supported by the executed analytic/gradient/entry/closure/count tests, native runtime surfaces, complete graph/factory integration, supported-version suites, focused final boundary regressions, independent reviews and lint/complexity results. Gate D is **measured, not a prospective performance pass**: bulk-count and raw-gradient overhead plus increased RSS remain. The explicit user approval permits the pure-native cutover with these recorded tradeoffs; no NumPy hybrid, alternative RNG or unverified performance claim is used to conceal them.
+
+## Delivery
+
+The completed implementation is committed as `6ed5cc9` and published in new **draft [PR #7](https://github.com/kylejcaron/ttenet/pull/7)** against `main`; GitHub reports `OPEN`, `Draft: true`. It replaces closed draft #6 and has not been merged. Verified implementation/review child issues are closed with commit evidence. The active implementation worktree is retained for PR feedback; temporary release harnesses and output files were removed after recording results.
+
+Removing the pinned-reference benchmark worktree was safely refused because `/tmp/ttenet-native-release-baseline` contains an untracked `.worktrees/` tree. That content is preserved rather than force-deleted. Its tracked reference source was unchanged; this cleanup exception does not change the source used for comparisons or the delivered implementation.
