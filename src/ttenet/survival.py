@@ -12,6 +12,10 @@ differentiate. They perform no host-side validation and never attempt to
 convert traced values to concrete NumPy arrays; shape/shape-compatibility
 checks that require concrete inspection belong to host-side callers
 (``models.make_observations``, ``models.fit_stage``).
+
+``event_times`` composes the private ``_hazard_logits``/``_cure_logits``
+primitives into the shared mixture-cure kernel; the hazard and
+susceptibility formulas are defined once, here.
 """
 
 from __future__ import annotations
@@ -106,18 +110,16 @@ def conditional_susceptibility(probability: Any, log_survival: Any) -> Any:
     a unit was at risk and event-free through the conditioning point,
     returns ``pi * S / ((1 - pi) + pi * S)`` where ``S = exp(log_survival)``:
     the probability the unit remains susceptible (has not been cured) given
-    it has not yet had the event. Computed in log-space via
-    ``logaddexp`` for numerical stability rather than forming ``S``
-    directly, so it stays accurate for long, deeply-survived histories
-    where ``S`` itself would underflow to zero.
+    it has not yet had the event. In logit space this is the shift
+    ``logit(pi) + log_survival``, the same conditioning the event-time
+    kernel applies to known pre-entry survival; the sigmoid of that shifted
+    logit never forms ``S`` directly, so it stays accurate for long,
+    deeply-survived histories where ``S`` itself would underflow to zero.
 
     Conditioning on a zero-probability history (``pi=1`` and ``S=0``) is
     undefined and returns NaN. Host-side forecasting must reject that
     contradiction rather than arbitrarily relabel a certain return as cured.
     """
     probability = jnp.asarray(probability)
-    log_pi = jnp.log(probability)
-    log_not_pi = jnp.log1p(-probability)
-    log_numerator = log_pi + log_survival
-    log_denominator = jnp.logaddexp(log_not_pi, log_numerator)
-    return jnp.exp(log_numerator - log_denominator)
+    logits = jnp.log(probability) - jnp.log1p(-probability)
+    return sigmoid(logits + log_survival)

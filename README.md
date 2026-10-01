@@ -47,7 +47,7 @@ This focused example expresses cure-capable return stages through
 `Horizon`, `predict`, `draw_posterior`, `forecast`, and `predict_in_sample` APIs:
 
 ```bash
-uv run --extra forecast python examples/survival_convolution.py
+uv run python examples/survival_convolution.py
 ```
 
 The [model](examples/survival_convolution_model.py) builds first-event

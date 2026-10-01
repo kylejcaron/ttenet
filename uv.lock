@@ -1898,6 +1898,7 @@ dependencies = [
     { name = "jax" },
     { name = "numpy" },
     { name = "numpyro" },
+    { name = "numpyro-forecast" },
     { name = "pandas" },
 ]
 
@@ -1907,10 +1908,6 @@ examples = [
     { name = "coeftable" },
     { name = "marimo" },
     { name = "matplotlib" },
-    { name = "numpyro-forecast" },
-]
-forecast = [
-    { name = "numpyro-forecast" },
 ]
 
 [package.dev-dependencies]
@@ -1929,11 +1926,10 @@ requires-dist = [
     { name = "matplotlib", marker = "extra == 'examples'", specifier = ">=3.8" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "numpyro", specifier = ">=0.22.0" },
-    { name = "numpyro-forecast", marker = "extra == 'examples'", specifier = ">=0.4.0,<0.5" },
-    { name = "numpyro-forecast", marker = "extra == 'forecast'", specifier = ">=0.4.0,<0.5" },
+    { name = "numpyro-forecast", specifier = ">=0.4.0,<0.5" },
     { name = "pandas", specifier = ">=2.2" },
 ]
-provides-extras = ["forecast", "examples"]
+provides-extras = ["examples"]
 
 [package.metadata.requires-dev]
 dev = [

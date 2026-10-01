@@ -2,25 +2,31 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace every package survival-model execution path with one cure-capable event-time kernel and native NumPyro Forecast distributions, but only after demonstrating correctness, cohort scalability, and a worthwhile integration benefit.
+**Goal:** Replace duplicated survival-model mathematics with one cure-capable, family-agnostic probability kernel; use native NumPyro Forecast observations and retain exact, scalable count forecasting without accepting a material steady-state regression.
 
-**Architecture:** Keep `CureProcess` and existing default-model contracts, but make the shared survival kernel independent of the time-to-event family. The current `StageParameters` hazard model, alternative parametric families, and eventually learned nonparametric laws all feed the same cure/conditioning/cohort machinery. Use upstream `Horizon`, `predict`, `draw_posterior`, `forecast`, and `predict_in_sample`; do not introduce another forecasting driver or leave two production backends.
+**Architecture:** Keep `CureProcess` and existing default-model contracts. The current `StageParameters` hazard model, alternative parametric families, and eventually learned nonparametric laws all feed the same cure/conditioning/cohort machinery. Use one native NumPyro Forecast model for observation, conditioning, posterior replay and count forecasting. NumPy remains an independent oracle and the existing-backend benchmark; it is not an allowed production allocation path.
 
 **Tech Stack:** Python >=3.12, NumPy >=2.0, pandas >=2.2, JAX >=0.10.0,<0.11.3, NumPyro >=0.22.0, numpyro-forecast >=0.4.0,<0.5, pytest, marimo, Ruff, nox.
 
 ## Global constraints
 
-- This change currently delivers a plan and a blog explanation, not the production migration.
-- Worktree: `/Users/kylejcaron/ttenet/.worktrees/native-survival-convolution`; branch: `prototype/native-survival-convolution`; draft PR: https://github.com/kylejcaron/ttenet/pull/6.
+- The user has authorized full implementation of this plan, followed by a draft PR containing the verified package cutover.
+- Worktree: `/Users/kylejcaron/ttenet/.worktrees/native-survival-convolution`; branch: `prototype/native-survival-convolution`. Prototype/planning PR #6 is closed; create its replacement only after implementation and acceptance.
 - Durable parent: `5jvf`. Task references and real prerequisites appear below. Leave implementation children open until their deliverables are verified.
-- Task 1 is a go/no-go gate. A failed gate stops the cutover; do not relax it, narrow integer support, substitute independent Poisson counts, or call a partially migrated package complete.
+- Task 1 gates the execution design. After reviewing the native performance evidence and the multinomial/calendar semantics, the user explicitly said “ok then proceed!” The accepted design is pure-JAX unified NumPyro execution, with no NumPy hybrid or compiled extension. Record the measured performance tradeoffs without claiming the original prospective target passed. Correctness and integer-support gates remain binding.
 - Preserve existing public call signatures, result shapes, validations, custom priors, optimized `numpyro.param` values, and the default regularized random-walk age prior. Additive family-selection configuration is in scope. The prototype's five-parameter prior is a fixture, not the replacement package model.
 - Preserve Python 3.12/3.13/3.14 coverage and existing dependency version ranges. Promote numpyro-forecast to a required dependency only when introducing the accepted native backend.
 - No global JAX precision mutation at import, hidden host callbacks masquerading as native forecasting, unit expansion of count cohorts, or mandatory dense all-origin kernels.
 - Existing random seeds must remain reproducible within the new implementation. Different sampling algorithms need distributional parity, not bit-identical draws against the old generator.
 - Keep tests of public behavior. Remove tests tied only to obsolete implementation details rather than re-pinning those details.
-- Existing unrelated work and PRs remain untouched. Do not merge PR #6 as part of this plan.
+- Existing unrelated work and PRs remain untouched. Do not merge the replacement implementation PR without authorization.
 - Distribution-family interchangeability is a cutover requirement, not a documentation promise. Ship the current default plus one demonstrably different family through the same backend; reserve a compatible seam for nonparametric models without implementing a full nonparametric inference framework in this migration.
+
+### Approved execution-design revision
+
+The user's latest clarification requires one unified NumPyro model. Fitting, conditioning, posterior replay and counted forecasting must execute the shared native distributions. Earlier approval to investigate a shared-kernel/NumPy fallback remains useful benchmark and oracle evidence, but does not authorize that split execution as production architecture. There must be one implementation of hazard, cure, calendar masking, entry conditioning, tail semantics and count-allocation law, with no legacy/new backend selector or native-looking host callback.
+
+Task 1 measured fitting, native count sampling and the rejected fallback. The user subsequently authorized implementation after discussing the measured overhead and the 365-day/storm use cases. This is **GO for implementation with recorded tradeoffs**, not a claim of performance parity or completed release acceptance. Remeasure the fully native retail workflow and completed package; do not promote the unvalidated experimental RBG sampler.
 
 ---
 
@@ -33,9 +39,9 @@ Current production paths are split:
 | Stage likelihood and SVI | `models.stage_log_likelihood`, `stage_model`, `fit_stage` | Shared event-time law; native observation sites |
 | Network likelihood | `network._event_model` adds a separate `numpyro.factor` | The same native law under each node's scope |
 | Survival mathematics | `survival.py` JAX primitives; repeated host formulas in `forecast.py` | One log-space mathematical implementation |
-| Cohort simulation | `forecast.forecast_events`, NumPy binomial depletion of actual parent-date pools | Exact cohort allocation from the shared kernel, driven through native predictions |
+| Cohort simulation | `forecast.forecast_events`, NumPy binomial depletion of actual parent-date pools | Native `CohortEventTime` allocation from the shared probability kernel |
 | Historical eventual expectations | `forecast.expected_return_receipts` | Shared probabilities and explicit tail assumptions |
-| Network / retail forecast | `FittedNetwork._forecast`, `FittedRetailReturnModel.forecast` | Native cure stages preserving existing graph and result semantics |
+| Network / retail forecast | `FittedNetwork._forecast`, `FittedRetailReturnModel.forecast` | Shared-law cure stages preserving existing graph and result semantics |
 | Demonstration | `examples/survival_convolution_model.py` and its fixture | Examples importing the package implementation |
 
 On 2026-09-30, this command passed on the current draft branch:
@@ -117,7 +123,7 @@ def survival_kernel(
 
 The backend consumes a `TimingLaw`, not `StageParameters.age_logits`. Any discrete event-time law can be expressed as conditional event/no-event probabilities; using this representation does **not** require a logistic hazard model or a finite-dimensional parametric family.
 
-Proposed public extension: `CureProcess(event_time_model=callable)`. Like the existing prior callback, the factory receives aligned exposure inputs and shared latents, samples named NumPyro parameters, and returns `(TimingLaw, susceptibility_logits)`. Its inputs include `ages`, `features`, `cure_features`, `allowed`, `exposure`, and `pre_entry`; it must not use realized outcome labels to construct the timing law. Calling the model at a longer horizon re-evaluates the factory under the same posterior parameter sites, rather than extending a frozen training-grid array. Reject simultaneous `event_time_model` and legacy `parameter_model` configuration as ambiguous; the legacy callback remains fully supported for the default family.
+Proposed public extension: `CureProcess(event_time_model=callable)`. Like the existing prior callback, the factory receives timing inputs and shared latents, samples named NumPyro parameters, and returns `(TimingLaw, susceptibility_logits)`. Its inputs include only `ages`, `features`, and `cure_features`; administrative `allowed`, `exposure`, and `pre_entry` masks and realized outcome labels remain exclusively in the shared core. Calling the model at a longer horizon re-evaluates the factory under the same posterior parameter sites, rather than extending a frozen training-grid array. Reject simultaneous `event_time_model` and legacy `parameter_model` configuration as ambiguous; the legacy callback remains fully supported for the default family.
 
 The callable also declares static `tail_behavior`: `{"kind": "proper"}` for a family whose event probability tends to one under the documented continuing-exposure assumption; `{"kind": "finite", "last_age": a}` for fully specified finite support; or `{"kind": "unknown"}` for an unresolved residual category. Keep this metadata outside traced array leaves. A declared continuation must be evaluable by replaying the same factory at future ages; the default constant final-hazard continuation and Weibull both use the proper case. For finite support, integrate the calendar-masked kernel through `last_age`: a terminal atom falling on a closure does not justify assuming all remaining units eventually fire.
 
@@ -156,24 +162,24 @@ Task 1 requires gates A–D on the candidate/prototype, using adapters to exerci
 ### C. Genuine native integration
 
 - Real SVI and upstream `draw_posterior`, `forecast`, and `predict_in_sample` execute the custom distributions. The registered surgeries must handle multiple observed-prefix and future-horizon lengths without monkeypatching upstream.
-- Observed likelihood and generated suffix come from upstream `predict`; no second day-by-day simulation hidden behind a deterministic `forecast` site.
+- Observed likelihood comes from upstream `predict`. Native forecasts must obtain generated suffixes from upstream rather than hiding host sampling behind a native-looking site. NumPy allocation is permitted only as an independent oracle and benchmark.
 - Demonstrate fit-time and forecast-time shape changes, integer observed data, zero future arrivals, sparse versus dense parent dates, arbitrary descendant nodes, and no hidden-outcome leakage.
 - Avoid a dynamically growing unit axis inside a traced model. Host cohort preparation may remain, but native sampling must consume fixed-shape pool data; prove how pools and lineage map back to public results.
-- Run the default and discretized Weibull families through native fit, posterior replay at new horizons, conditioning and joint cohort forecasts. Add a finite-mass adapter contract test with an explicit terminal atom and an unknown-tail case; prove the backend has no required age-logit representation.
+- Run the default and discretized Weibull families through native fitting and posterior replay at new horizons, then conditioning and joint native cohort forecasts. Add a finite-mass adapter contract test with an explicit terminal atom and an unknown-tail case; prove the backend has no required age-logit representation.
 
 ### D. Measured engineering benefit
 
 - Benchmark the old committed implementation and candidate in separate processes on the same machine, using identical parameters and inputs. Do not compare the prototype's whole 20-second script against one forecast call.
 - Measure cold compile+first call, median of five warmed calls after synchronization, and peak RSS. Include the native driver, conditioning, packing, and output aggregation in end-to-end forecast timing.
 - Baseline matrix: `(cohorts, history_days, horizon, draws)` = `(100,60,28,32)`, `(1000,180,90,128)`, `(5000,365,365,32)`. Include sparse and multi-day parent arrivals, homogeneous quantities 1 and 10,000,000, heterogeneous closures, and both unit-history and future-cohort populations.
-- Proposed acceptance budget: warmed forecast and peak RSS each <=1.25x the old implementation for every matrix case; cold wall time <=2x. Measure fitting/gradient timing separately and reject a >1.25x warmed regression there too. These are prospective budgets, not measured claims; changing them requires a recorded user-approved tradeoff.
+- Keep warmed forecast and fitting/gradient regression ratios <=1.25x as prospective optimization targets, not falsely passed gates. The user authorized proceeding with the unified native design after the overhead was explained. Measure peak RSS and mitigate scalable regressions; report absolute cold costs, fixed runtime footprint and scalable memory independently. Shared-kernel/NumPy measurements remain diagnostics only. The draft PR must report actual package/native retail timings and any remaining regressions.
 - The candidate must demonstrate one reusable mathematical implementation and native observation sites, plus identify the exact legacy callers/formulas it can replace. Production deletion is not a prerequisite for Task 1; it is required by final release gate E.
 - If dense kernels exceed the budget, stream or batch actual-origin pools and mean contractions. Do not assume an FFT is valid for weather-, calendar-, or unit-dependent hazards.
 
 ### E. Final release gate (Task 6 only)
 
-- Every public survival execution path uses the accepted native backend, and gates A–D pass again against the actual package rather than prototype adapters.
-- Duplicated likelihood/hazard/conditioning implementations and the example-only backend are removed after their final callers migrate. No legacy backend switch or custom simulator hidden behind a native-looking wrapper remains.
+- Every public survival execution path uses the accepted shared native probability distributions; correctness/native gates A–C pass again against the actual package, and gate D supplies measured final performance evidence under the approved tradeoff.
+- Duplicated likelihood/hazard/conditioning implementations, the host event simulator and the example-only backend are removed after their final callers migrate. No legacy/new backend selector or host simulator hidden behind a native-looking wrapper remains.
 - Full public-contract checks, all supported Python versions, real examples, the rendered blog, and the measured final benchmark report pass. Task 1's GO authorizes implementation, not a claim that this release gate already passed.
 
 ## 4. File ownership and scope
@@ -187,7 +193,7 @@ Task 1 requires gates A–D on the candidate/prototype, using adapters to exerci
 | `tests/test_event_times.py` (new) | Family adapters, terminal atoms, continuation semantics and plug-in behavior |
 | `src/ttenet/models.py` | Observation adapters, existing priors, standalone native stage fitting |
 | `src/ttenet/forecast.py` | Host validation/pool preparation, public result assembly, shared-kernel expectations; no second cure formula |
-| `src/ttenet/network.py` | Scoped graph composition, shared priors, posterior/draw alignment and native cure forecasting |
+| `src/ttenet/network.py` | Scoped graph composition, shared priors, posterior/draw alignment and shared-law cure forecasting |
 | `src/ttenet/processes.py`, `src/ttenet/retail.py`, `src/ttenet/__init__.py` | Preserve public facade, configuration, contracts and exports |
 | `src/ttenet/integration.py` | Preserve source counts and draw identity; only change if needed to connect the native path |
 | `pyproject.toml`, `uv.lock`, `noxfile.py` | Required native dependency, clean optional-extra cutover and verification environments |
@@ -201,7 +207,7 @@ Task 1 requires gates A–D on the candidate/prototype, using adapters to exerci
 
 ## Task 0: Deliver the plan and a truthful blog explanation
 
-**Issue:** `ersy`. **Depends on:** nothing. **Scope of the current change.**
+**Issue:** `ersy`. **Depends on:** nothing. **Completed planning phase.**
 
 **Files:** this plan; `examples/retail_returns_blog.py`, immediately after the censoring callout in Part 2.
 
@@ -217,21 +223,21 @@ Task 1 requires gates A–D on the candidate/prototype, using adapters to exerci
 
 **Files:** `examples/survival_convolution.py`, `examples/survival_convolution_model.py`; create the evidence document specified above after measurements. Benchmark/reproduction scripts may remain throwaway unless they provide a reproducible consumer-relevant check worth retaining.
 
-**Consumes:** current production `StageParameters`, `forecast_events`, `stage_log_likelihood`; native 0.4.0 API. **Produces:** a pass/fail report and a demonstrated count-cohort allocation/shape/precision strategy satisfying all adoption gates.
+**Consumes:** current production `StageParameters`, `forecast_events`, `stage_log_likelihood`; native 0.4.0 API. **Produces:** a pass/fail report and demonstrated count-cohort allocation/shape/precision strategy satisfying candidate gates A–D under the approved execution-design revision.
 
-- [ ] Re-run the current example and existing focused contracts before choosing a sampler:
+- [x] Re-run the current example and existing focused contracts before choosing a sampler:
 
 ```bash
 uv run --extra forecast python examples/survival_convolution.py
 uv run --extra forecast pytest -q tests/test_survival.py tests/test_forecast.py tests/test_integration.py tests/test_network.py tests/test_retail.py
 ```
 
-- [ ] Exercise the candidate native count distribution, not just unit trajectories. For one homogeneous pool with `n=7` and category probabilities `[0.2,0.3,0.5]`, compare event means `[1.4,2.1]`, variances `[1.12,1.47]`, and covariance `-0.42`; require integer nonnegative samples and total observed events <=7. After observing two events in category one, the remaining two categories have probabilities `[0.375,0.625]` for the five remaining units.
-- [ ] Run the existing `test_int64_cohort_counts_do_not_round_through_float64` against the candidate end-to-end path. Also check exact total preservation in non-degenerate allocations; a near-certain special case alone does not establish safe integer accounting.
-- [ ] Prove native tracing with real count draws, delayed entry, changing horizon lengths and actual-origin pools. Record whether precision and static-shape requirements are compatible with the package, not merely with a specially configured demo.
-- [ ] Validate the family boundary using the existing hazard model, a discretized Weibull law with shape 2, and a discrete-mass adapter with a terminal atom. Require native posterior replay at a longer horizon without assuming `age_logits`; retain evidence that cure, closures and conditioning behave identically across adapters.
-- [ ] Run gates A–D and write actual timings, memory, correctness results, and the chosen allocation strategy. Preserve the old baseline revision in the report so later tasks can rerun it after obsolete code is removed.
-- [ ] Record **GO** only if candidate gates A–D pass. If not, finish with **NO-GO**, exact failing scenarios, and a concrete alternative for review; downstream tasks remain blocked. Do not treat a failed gate as successful completion of a prerequisite. Production retirement/release gate E is deliberately deferred to Task 6.
+- [x] Exercise the candidate native count distribution, not just unit trajectories. For one homogeneous pool with `n=7` and category probabilities `[0.2,0.3,0.5]`, compare event means `[1.4,2.1]`, variances `[1.12,1.47]`, and covariance `-0.42`; require integer nonnegative samples and total observed events <=7. After observing two events in category one, the remaining two categories have probabilities `[0.375,0.625]` for the five remaining units.
+- [x] Run the existing `test_int64_cohort_counts_do_not_round_through_float64` contract against the candidate end-to-end path. Exact near-certain completion and conservation pass; float-proposal support limitations above `2**53` are recorded rather than overstated.
+- [x] Prove native tracing with real count draws, delayed entry, changing horizon lengths and actual-origin pools. Record precision/static-shape compatibility and the unresolved native performance regression.
+- [x] Validate the family boundary using the existing hazard model, a discretized Weibull law with shape 2, and a discrete-mass adapter with a terminal atom. Require native posterior replay at a longer horizon without assuming `age_logits`; retain evidence that cure, closures and conditioning behave identically across adapters.
+- [x] Run gates A–D and write actual forecast, fitting, gradient, retail-workflow timings, memory and correctness results. Compare the optimized native sampler with the shared-kernel/NumPy diagnostic to isolate the sampler regression. Preserve the old baseline revision so later tasks can rerun it after obsolete code is removed.
+- [x] Record **GO for implementation with documented tradeoffs** after the user's explicit “ok then proceed!” following native-performance and model-semantics explanations. Do not claim the original prospective warm target passed. NumPy hybrid and compiled extensions are excluded; retain pure JAX and the validated precision strategy. Production retirement/release gate E remains deferred to Task 6.
 
 ## Task 2: Implement the shared survival law and native distribution
 
@@ -239,9 +245,9 @@ uv run --extra forecast pytest -q tests/test_survival.py tests/test_forecast.py 
 
 **Files:** `src/ttenet/survival.py`; new `src/ttenet/distributions.py`, `src/ttenet/event_times.py`, `tests/test_distributions.py`, `tests/test_event_times.py`; `tests/test_survival.py`; dependency/configuration files and existing commands referring to the removed extra.
 
-**Consumes:** the validated kernel/count/family contracts and precision strategy. **Produces:** `TimingLaw`, `SurvivalKernel`, `survival_kernel`, default and Weibull adapters, `EventTime`, `CohortEventTime`, native surgery registrations, and a default installation capable of executing them.
+**Consumes:** the validated kernel/count/family contracts and precision strategy. **Produces:** `TimingLaw`, `SurvivalKernel`, `survival_kernel`, the default timing adapter, `EventTime`, `CohortEventTime`, native surgery registrations, and a default installation capable of executing them. Task 1's exploratory Weibull probe is promoted to a runnable public plugin in Task 3.
 
-- [ ] Establish regression cases before implementation. This tiny law has an independent exact oracle:
+- [x] Establish regression cases before implementation. This tiny law has an independent exact oracle:
 
 ```python
 def test_event_time_prefix_keeps_observed_units_absorbed():
@@ -259,11 +265,11 @@ def test_event_time_prefix_keeps_observed_units_absorbed():
     )
 ```
 
-- [ ] Add the count-pool moment/conditioning cases from Task 1, impossible repeated events, empty-prefix/full-prefix/empty-window cases, batched laws, sample axes, structural-zero gradients, and underflow-resistant delayed entry. Retain failing-before evidence for defects found while promoting the prototype.
-- [ ] Implement log masses from log hazards and log survival; condition entry by shifting susceptibility logits. Share the numerical calculation between both distributions. Implement the native surgeries according to the contract above, including absorbing zero remaining counts.
-- [ ] Move `numpyro-forecast>=0.4.0,<0.5` into required dependencies. Remove the redundant `forecast` extra rather than leave an empty compatibility shim; update README, example invocations/docstrings, CI/nox and installation guidance in the same change. Keep the `examples` extra for notebook/plot dependencies. Update the lockfile normally.
-- [ ] Run `uv run pytest -q tests/test_survival.py tests/test_distributions.py`, followed by an actual fit/native forecast and in-sample draw using the new production distributions. Confirm both default precision and the approved large-count strategy.
-- [ ] Commit only this independently usable probability/distribution layer and the installation migration.
+- [x] Add the count-pool moment/conditioning cases from Task 1, impossible repeated events, empty-prefix/full-prefix/empty-window cases, batched laws, sample axes, structural-zero gradients, and underflow-resistant delayed entry. Retain failing-before evidence for defects found while promoting the prototype.
+- [x] Implement log masses from log hazards and log survival; condition entry by shifting susceptibility logits. Share the numerical calculation between both distributions. Implement the native surgeries according to the contract above, including absorbing zero remaining counts.
+- [x] Move `numpyro-forecast>=0.4.0,<0.5` into required dependencies. Remove the redundant `forecast` extra rather than leave an empty compatibility shim; update README, example invocations/docstrings, CI/nox and installation guidance in the same change. Keep the `examples` extra for notebook/plot dependencies. Update the lockfile normally.
+- [x] Run `uv run pytest -q tests/test_survival.py tests/test_distributions.py tests/test_event_times.py`, followed by an actual fit/native forecast and in-sample draw using the new production distributions. Confirm both default precision and the approved large-count strategy.
+- [x] Commit only this independently usable probability/distribution layer and the installation migration.
 
 ## Task 3: Route all survival fitting through native observation sites
 
@@ -280,7 +286,7 @@ def test_event_time_prefix_keeps_observed_units_absorbed():
 ```python
 h = Horizon.from_data(covariates, data)
 kernel = survival_kernel(timing, susceptibility_logits, **exposure_inputs)
-predict(h, lambda log_mass: EventTime(log_mass, kernel.log_tail), kernel.log_mass)
+predict(h, lambda log_hazard: EventTime(kernel=kernel._replace(log_hazard=log_hazard)), kernel.log_hazard)
 ```
 
 `covariates` and `data` are aligned calendar arrays, not a time-length-only dummy standing in for real feature data. `exposure_inputs` contains only the common kernel's `allowed`, `exposure` and optional `pre_entry` masks; the family adapter has already consumed ages and regressors. Do not also add the old `numpyro.factor`, which would double-count observations.
@@ -296,17 +302,17 @@ predict(h, lambda log_mass: EventTime(log_mass, kernel.log_tail), kernel.log_mas
 
 **Files:** `src/ttenet/forecast.py`; `tests/test_forecast.py`, `tests/test_integration.py`.
 
-**Consumes:** native cohort law and exact integer strategy accepted in Task 1. **Produces:** the existing `EventForecast` / `ReturnForecast` contracts through shared-kernel sampling and expectations.
+**Consumes:** the common probability law and native integer strategy accepted in Task 1. **Produces:** existing `EventForecast` / `ReturnForecast` contracts through native shared-kernel sampling and expectations.
 
 - [ ] Retain host validation and actual parent-date pool preparation. Each pool retains root-cohort identity, immediate parent date, and integer population; split heterogeneous covariates into distinct pools instead of applying an averaged hazard.
-- [ ] For native forecast input, represent surviving historical pools as selected populations conditioned at the forecast boundary; represent future pools with no exposure before their source day. Do not materialize unobserved full historical event paths simply to satisfy a fixed array shape.
-- [ ] Sample event-date allocations jointly from `CohortEventTime` through upstream `forecast`. Derive public pending/eligible totals from exactly the same allocations and deadlines. Pool counts and residual counts remain integers throughout.
+- [ ] Represent surviving historical pools as selected populations conditioned at the forecast boundary; future pools have no exposure before their source day. Do not materialize unobserved full historical event paths simply to satisfy a fixed array shape.
+- [ ] Allocate event dates jointly through native `CohortEventTime` and upstream NumPyro Forecast execution. Host code may validate and pack actual-origin pools, then map native integer allocations back to public results; it must not sample event dates. Derive pending/eligible totals from the same allocations and deadlines, preserving integer pools and residuals.
 - [ ] Compute finite expected downstream counts by streaming the contraction over actual parent-day blocks. For uninitiated historical units add conditional initiation-to-receipt composition; for known open returns use conditional receipt residual life. Do not condition twice or count already-received units again.
 - [ ] Preserve eventual receipt assumptions explicitly: the tail baseline is reused, and unbounded susceptible stages eventually fire only under the documented continuing-exposure/reopening assumption. Do not replace eventual expectations with a finite-horizon sum.
 - [ ] Remove host `_hazard_logit`, `_cure_logit`, and independent conditional-survival mathematics when their final callers migrate. Keep validation/pool utilities that still serve the public API.
 - [ ] Run `uv run pytest -q tests/test_forecast.py tests/test_integration.py`, including exact int64 counts, overflow rejection, tail behavior and old-origin histories. Smoke the real retail CLI and rerun forecast performance gates before committing.
 
-## Task 5: Integrate native cure stages across full forecast networks
+## Task 5: Integrate shared-law cure stages across full forecast networks
 
 **Issue:** `kz91`. **Depends on:** Tasks 3 and 4.
 
@@ -314,12 +320,12 @@ predict(h, lambda log_mass: EventTime(log_mass, kernel.log_tail), kernel.log_mas
 
 **Consumes:** migrated fitting and cohort propagation. **Produces:** one complete production path for every EventNode, not only the retail two-stage special case.
 
-- [ ] Retain host graph validation, calendar/covariate resolution and observed populations. Wire each node to native distribution execution; use its actual immediate-parent allocations, not an aggregate mean or the original sales date.
+- [ ] Retain host graph validation, calendar/covariate resolution and observed populations. Wire each node to the common native probability distributions; use its actual immediate-parent allocations, not an aggregate mean or original sales date.
 - [ ] Preserve model-generated and externally supplied `SalesForecast` paths, draw labels and posterior pairing. Reordered same-fit scenario draws must remain paired; unrelated externally supplied draws retain the documented row-pairing semantics.
 - [ ] Exercise sale → initiation → receipt → inspection and sibling events; retain root-cohort labels and immediate-parent deadlines at every depth. Siblings are not competing risks.
 - [ ] Run real joint and modular fitting plus default-sales, fixed-sales and uncertain-sales scenarios. Change only future weather/closures and verify historical evidence is unchanged and future predictions change accordingly.
 - [ ] Run a mixed-family graph: default initiation, Weibull receipt, and default inspection. Confirm shape-2 Weibull likelihood/gradients against its analytic survival, then forecast the same cohort inputs and closures without a family-specific graph branch. Include a native in-sample prediction and a horizon longer than training.
-- [ ] Run `uv run pytest -q tests/test_network.py tests/test_retail.py tests/test_integration.py`, the full native example, and `uv run --extra examples python examples/retail_returns.py --steps 150 --draws 40`. Require all conservation assertions and gate budgets to pass before committing.
+- [ ] Run `uv run pytest -q tests/test_network.py tests/test_retail.py tests/test_integration.py`, the full native example, and `uv run --extra examples python examples/retail_returns.py --steps 150 --draws 40`. Require conservation/native correctness assertions and record real workflow timings before committing.
 
 ## Task 6: Retire duplicate implementations and verify the public cutover
 
@@ -327,7 +333,7 @@ predict(h, lambda log_mass: EventTime(log_mass, kernel.log_tail), kernel.log_mas
 
 **Files:** obsolete internals in migrated source files; `examples/survival_convolution.py`, `examples/survival_convolution_model.py`, `examples/_survival_convolution_fixture.py`; README, blog, installation commands and evidence document.
 
-**Consumes:** the working complete native path. **Produces:** one maintainable backend, accurate examples/documentation and measured end-to-end acceptance evidence.
+**Consumes:** the complete accepted shared-law execution path. **Produces:** one maintainable probability implementation, accurate examples/documentation and measured end-to-end acceptance evidence.
 
 - [ ] Make the focused example import production kernel/distributions. Delete `examples/survival_convolution_model.py` once no callers remain. Remove duplicate legacy likelihood formulas from the synthetic fixture; retain independent analytic oracles in tests rather than a second production implementation.
 - [ ] Check every public survival entry point from `src/ttenet/__init__.py`, including low-level `fit_stage`, `stage_model`, `stage_log_likelihood`, `forecast_events`, `forecast_returns`, and all network/retail methods. No unmigrated execution path, backend selector, dead private helper, or obsolete alias remains.
@@ -350,7 +356,7 @@ uvx nox -s tests-3.12 tests-3.13 tests-3.14 lint complexity
 
 - [ ] Render the actual notebook in a browser, inspect the new prose/math/code at desktop and narrow widths, and exercise demand/weather controls. Confirm all displayed forecasts come from the migrated package and no errors are hidden by script-mode shortcuts.
 - [ ] Repeat the Task 1 benchmark matrix against the recorded old revision. Append measured before/after results and confirm gates A–E on the completed package. Do not reset the complexity baseline just to conceal a regression.
-- [ ] Update draft PR #6 with the real production scope, results, and any explicitly approved tradeoffs; commit and push. Close verified children with evidence, then the parent. Do not merge without authorization.
+- [ ] Create a new draft PR with the real production scope, results, and any explicitly approved tradeoffs; commit and push. Close verified children with evidence, then the parent. Do not merge without authorization.
 
 ## Dependency order and review checkpoints
 
@@ -363,4 +369,4 @@ Task 0: plan + honest blog explanation
                                        -> Task 6: clean cutover + final evidence
 ```
 
-Only Tasks 3 and 4 are independent implementation slices after the shared law exists. A reviewer may reject either without invalidating the other's file ownership. Before each task, rehydrate its issue, record the intended approach, and record consequential divergences before editing. Keep scope and status truthful: completing this planning change does not close the migration parent.
+Only Tasks 3 and 4 are independent implementation slices after the shared law exists. A reviewer may reject either without invalidating the other's file ownership. Before each task, rehydrate its issue, record the intended approach, and record consequential divergences before editing. Close the migration parent only after the complete implementation is verified and its new draft PR exists.

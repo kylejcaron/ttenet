@@ -3,6 +3,14 @@
 from .data import RetailHistory, expand_covariates, prepare_history
 from .dataset import RetailData
 from .dates import allowed_days, calendar_features, date_grid, elapsed_days, to_day
+from .distributions import CohortEventTime, EventTime
+from .event_times import (
+    SurvivalKernel,
+    TimingInputs,
+    TimingLaw,
+    survival_kernel,
+    timing_from_log_masses,
+)
 from .forecast import EventForecast, ReturnForecast, forecast_events, forecast_returns
 from .integration import SalesForecast
 from .models import (
@@ -26,11 +34,13 @@ from .survival import (
 )
 
 __all__ = [
+    "CohortEventTime",
     "CountNode",
     "CountProcess",
     "CureProcess",
     "EventForecast",
     "EventNode",
+    "EventTime",
     "FittedNetwork",
     "ForecastNetwork",
     "NetworkForecast",
@@ -43,6 +53,9 @@ __all__ = [
     "StageFit",
     "StageObservations",
     "StageParameters",
+    "SurvivalKernel",
+    "TimingInputs",
+    "TimingLaw",
     "allowed_days",
     "calendar_features",
     "conditional_susceptibility",
@@ -60,5 +73,7 @@ __all__ = [
     "stage_log_likelihood",
     "stage_model",
     "susceptibility",
+    "survival_kernel",
+    "timing_from_log_masses",
     "to_day",
 ]

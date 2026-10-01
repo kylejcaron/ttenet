@@ -1,6 +1,6 @@
 """Focused experimental survival-convolution model, native NumPyro Forecast end to end.
 
-Run: uv run --extra forecast python examples/survival_convolution.py
+Run: uv run python examples/survival_convolution.py
 
 The fixture is 12 identified units on 42 calendar days with an observed prefix
 of 24 days. It includes selected survivors, future births, heterogeneous
