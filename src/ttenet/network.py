@@ -22,6 +22,7 @@ from .forecast import EventForecast, forecast_events
 from .integration import SalesForecast
 from .models import (
     StageFit,
+    _feature_widths,
     _fit_program,
     _named_posterior,
     _observe,
@@ -175,19 +176,26 @@ class _Prepared:
     observations: dict[str, Any]
 
 
-def _resolved_stage_fit(node, posterior, params, losses, resolved, shared, num_samples):
-    """Keep default parameters or the custom family's own named posterior and object."""
+def _resolved_stage_fit(
+    node, observations, posterior, params, losses, resolved, shared, num_samples
+):
+    """Keep default parameters or the custom family's own named posterior and object.
+
+    Either fit records the regressor widths of the node's observations.
+    """
+    widths = _feature_widths(observations)
     if node.process.family is None:
         parameters = StageParameters(
             *[resolved[f"{node.name}/__resolved_{name}"] for name in StageParameters._fields]
         )
-        return StageFit(parameters, losses, num_samples=num_samples)
+        return StageFit(parameters, losses, num_samples=num_samples, feature_widths=widths)
     return StageFit(
         _named_posterior(posterior, params, prefix=f"{node.name}/", num_samples=num_samples),
         losses,
         family=node.process.family,
         shared=shared,
         num_samples=num_samples,
+        feature_widths=widths,
     )
 
 
@@ -364,7 +372,14 @@ class ForecastNetwork:
         shared = structure.unflatten([resolved[name] for name in shared_sites]) if record else None
         stages = {
             node.name: _resolved_stage_fit(
-                node, post, params, loss, resolved, shared, options["num_samples"]
+                node,
+                prepared.observations[node.name],
+                post,
+                params,
+                loss,
+                resolved,
+                shared,
+                options["num_samples"],
             )
             for node in events
         }

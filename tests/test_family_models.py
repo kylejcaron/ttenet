@@ -9,6 +9,8 @@ ambiguous or undeclared setups.
 
 from __future__ import annotations
 
+import dataclasses
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -255,7 +257,13 @@ def test_fit_stage_refuses_a_latent_free_family_that_gives_the_data_no_density(o
 
 def test_custom_fit_timing_refuses_sites_missing_from_its_posterior():
     family = _weibull_family()
-    fit = StageFit({"susceptibility": jnp.zeros(3)}, jnp.zeros(0), family=family, num_samples=3)
+    fit = StageFit(
+        {"susceptibility": jnp.zeros(3)},
+        jnp.zeros(0),
+        family=family,
+        num_samples=3,
+        feature_widths=(0, 0),
+    )
     inputs = TimingInputs(jnp.array([[0], [1]]), jnp.zeros((2, 1, 0)), jnp.zeros((1, 0)))
     with pytest.raises(ValueError, match="scale"):
         fit.timing(inputs, draw=0)
@@ -279,20 +287,19 @@ def _regressor_fit():
     return fit, observations
 
 
-@pytest.mark.parametrize(
-    "omitted,site",
-    [("features", "beta"), ("susceptibility_features", "susceptibility_beta")],
-)
-def test_custom_fit_timing_refuses_replay_that_never_reaches_a_fitted_site(omitted, site):
-    # The packaged Weibull samples its regressor coefficients only when the
-    # inputs carry regressors. Replaying the fit without them would drop the
-    # fitted effect silently, so a fitted site the family never reaches is
-    # refused exactly like a site it reaches without a fitted value.
-    fit, observations = _regressor_fit()
-    inputs = timing_inputs(observations)
-    width = {"features": inputs.features.shape[:-1] + (0,), "susceptibility_features": (12, 0)}
-    with pytest.raises(ValueError, match=site):
-        fit.timing(inputs._replace(**{omitted: jnp.zeros(width[omitted])}), draw=0)
+@pytest.mark.parametrize("widths", [(0, 1), (2, 0)])
+def test_hand_built_custom_fit_refuses_unused_posterior_coefficients(widths):
+    # A mistaken manual width declaration cannot silently discard fitted
+    # coefficients; the named-site replay check still refuses unused values.
+    fit, _ = _regressor_fit()
+    stale = StageFit(
+        fit.parameters, fit.losses, family=fit.family, num_samples=2, feature_widths=widths
+    )
+    inputs = TimingInputs(
+        jnp.array([[0], [1]]), jnp.zeros((2, 1, widths[0])), jnp.zeros((1, widths[1]))
+    )
+    with pytest.raises(ValueError):
+        stale.timing(inputs, draw=0)
 
 
 def test_custom_fit_timing_with_the_fitted_regressor_widths_applies_their_coefficients():
@@ -310,6 +317,92 @@ def test_custom_fit_timing_with_the_fitted_regressor_widths_applies_their_coeffi
     )
 
 
+def _regressor_law_family():
+    """A fixed law read straight off the regressors, sampling no site of its own.
+
+    Stay ``-exp(-2 + sum(features))`` per cell and susceptibility logit
+    ``0.5 + sum(susceptibility_features)`` per unit: a column dropped or
+    added at replay changes the law without any named site noticing.
+    """
+
+    def model(inputs, shared):
+        stay = -jnp.exp(-2.0 + inputs.features.sum(axis=-1))
+        logits = 0.5 + inputs.susceptibility_features.sum(axis=-1)
+        return EventLaw(TimingLaw(log1mexp(stay), stay), logits)
+
+    return EventFamily(model, ProperTail())
+
+
+def _regressor_law_fit(p, q):
+    """``_regressor_law_family`` fitted on two units with ``p`` timing and ``q`` static regressors."""
+    rng = np.random.default_rng(5)
+    observations = _observations(
+        np.broadcast_to(np.arange(3), (2, 3)),
+        [0, -1],
+        features=jnp.asarray(rng.normal(size=(2, 3, p))),
+        susceptibility_features=jnp.asarray(rng.normal(size=(2, q))),
+    )
+    fit = fit_stage(observations, family=_regressor_law_family(), num_steps=2, num_samples=3)
+    assert dict(fit.parameters) == {}
+    return fit, observations
+
+
+def _regressor_law(inputs):
+    """Closed-form ``(log_survival_step, susceptibility_logits)`` of ``_regressor_law_family``."""
+    features = np.asarray(inputs.features)
+    static = np.asarray(inputs.susceptibility_features)
+    return -np.exp(-2.0 + features.sum(axis=-1)), 0.5 + static.sum(axis=-1)
+
+
+@pytest.mark.parametrize("fitted", [(1, 1), (2, 0)])
+@pytest.mark.parametrize("field", ["features", "susceptibility_features"])
+def test_custom_fit_timing_refuses_regressor_widths_it_was_not_fitted_at(fitted, field):
+    # Nothing in the posterior records the regressor columns, so only the
+    # fit's own memory of its widths can refuse a replay that omits or adds
+    # one; traced replays see the same static shapes and refuse the same way.
+    fit, observations = _regressor_law_fit(*fitted)
+    inputs = timing_inputs(observations)
+    index = 0 if field == "features" else 1
+    for width in sorted({0, fitted[index] + 1} - {fitted[index]}):
+        shape = (3, 2, width) if field == "features" else (2, width)
+        other = inputs._replace(**{field: jnp.ones(shape)})
+        with pytest.raises(ValueError):
+            fit.timing(other, draw=0)
+        with pytest.raises(ValueError):
+            jax.jit(lambda inputs, draw: fit.timing(inputs, draw=draw))(other, 0)
+
+
+def test_custom_fit_timing_at_its_fitted_widths_replays_the_closed_form_law_under_jit():
+    fit, observations = _regressor_law_fit(2, 1)
+    rng = np.random.default_rng(6)
+    inputs = TimingInputs(
+        ages=jnp.array([[0, 4], [1, 5], [2, 6], [3, 7]]),
+        features=jnp.asarray(rng.normal(size=(4, 2, 2))),
+        susceptibility_features=jnp.asarray(rng.normal(size=(2, 1))),
+    )
+    laws = jax.jit(jax.vmap(lambda draw: fit.timing(inputs, draw=draw)))(jnp.arange(fit.draws))
+    expected_stay, expected_logits = _regressor_law(inputs)
+    assert laws.timing.log_survival_step.shape == (3, 4, 2)
+    np.testing.assert_allclose(laws.timing.log_survival_step, [expected_stay] * 3, rtol=1e-6)
+    np.testing.assert_allclose(laws.susceptibility_logits, [expected_logits] * 3, rtol=1e-6)
+    eager = fit.timing(timing_inputs(observations), draw=2)
+    stay, logits = _regressor_law(timing_inputs(observations))
+    np.testing.assert_allclose(eager.timing.log_survival_step, stay, rtol=1e-6)
+    np.testing.assert_allclose(eager.susceptibility_logits, logits, rtol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "field,width", [("features", 0), ("features", 2), ("susceptibility_features", 2)]
+)
+def test_predict_stage_refuses_observations_at_other_regressor_widths(field, width):
+    fit, observations = _regressor_law_fit(1, 1)
+    shape = (2, 3, width) if field == "features" else (2, width)
+    other = dataclasses.replace(observations, **{field: jnp.zeros(shape)})
+    with pytest.raises(ValueError):
+        predict_stage(fit, other)
+    assert predict_stage(fit, observations, seed=1).shape == (3, 3, 2)
+
+
 def test_custom_fit_timing_accepts_recorded_deterministic_sites_in_its_posterior():
     # Posterior mappings taken from NumPyro samplers carry deterministic
     # sites next to the sampled ones; the family reaches them, so they replay.
@@ -320,7 +413,13 @@ def test_custom_fit_timing_accepts_recorded_deterministic_sites_in_its_posterior
         return EventLaw(TimingLaw(log1mexp(stay), stay), jnp.zeros(inputs.ages.shape[-1:]))
 
     posterior = {"log_rate": jnp.array([0.0, np.log(2.0)]), "rate": jnp.array([1.0, 2.0])}
-    fit = StageFit(posterior, jnp.zeros(0), family=EventFamily(model, ProperTail()), num_samples=2)
+    fit = StageFit(
+        posterior,
+        jnp.zeros(0),
+        family=EventFamily(model, ProperTail()),
+        num_samples=2,
+        feature_widths=(0, 0),
+    )
     inputs = TimingInputs(jnp.array([[0], [1]]), jnp.zeros((2, 1, 0)), jnp.zeros((1, 0)))
     law = fit.timing(inputs, draw=1)
     np.testing.assert_allclose(law.timing.log_survival_step, -2.0, rtol=1e-6)
@@ -330,12 +429,45 @@ def test_stage_fit_validates_draw_metadata_against_its_arrays():
     parameters = StageParameters(
         jnp.zeros((3, 2)), jnp.zeros((3, 0)), jnp.zeros(3), jnp.zeros((3, 0))
     )
+    fixed = _weibull_family(scale=1.0, susceptibility_logit=0.0)
     with pytest.raises(ValueError, match="num_samples"):
         StageFit(parameters, jnp.zeros(0), num_samples=5)
     with pytest.raises(ValueError, match="num_samples"):
-        StageFit({}, jnp.zeros(0), family=_weibull_family(scale=1.0, susceptibility_logit=0.0))
+        StageFit({}, jnp.zeros(0), family=fixed, feature_widths=(0, 0))
     with pytest.raises(TypeError, match="StageParameters"):
         StageFit({"scale": jnp.ones(3)}, jnp.zeros(0))
+
+
+def test_default_family_fit_takes_its_feature_widths_from_its_coefficients():
+    parameters = StageParameters(
+        jnp.zeros((3, 2)),
+        jnp.tile(jnp.array([0.2, -0.1]), (3, 1)),
+        jnp.zeros(3),
+        jnp.full((3, 1), 0.3),
+    )
+    fit = StageFit(parameters, jnp.zeros(0))
+    inputs = TimingInputs(jnp.array([[0], [1]]), jnp.ones((2, 1, 2)), jnp.ones((1, 1)))
+    explicit = StageFit(parameters, jnp.zeros(0), feature_widths=[np.int64(2), 1])
+    for candidate in (fit, explicit):
+        law = jax.jit(lambda fitted: fitted.timing(inputs, draw=0))(candidate)
+        np.testing.assert_allclose(law.timing.log_hazard, -np.logaddexp(0.0, -0.1), rtol=1e-6)
+        np.testing.assert_allclose(law.timing.log_survival_step, -np.logaddexp(0.0, 0.1), rtol=1e-6)
+        np.testing.assert_allclose(law.susceptibility_logits, 0.3, rtol=1e-6)
+    with pytest.raises(ValueError):
+        fit.timing(inputs._replace(features=jnp.ones((2, 1, 1))), draw=0)
+    with pytest.raises(ValueError):
+        fit.timing(inputs._replace(susceptibility_features=jnp.ones((1, 0))), draw=0)
+    with pytest.raises(ValueError):
+        StageFit(parameters, jnp.zeros(0), feature_widths=(1, 1))
+
+
+@pytest.mark.parametrize(
+    "widths", [None, 3, (1,), (1, 2, 3), (True, 0), (-1, 0), (0.0, 0), ("0", "0")]
+)
+def test_custom_family_fit_requires_two_nonnegative_integer_feature_widths(widths):
+    fixed = _weibull_family(scale=1.0, susceptibility_logit=0.0)
+    with pytest.raises(ValueError):
+        StageFit({}, jnp.zeros(0), family=fixed, num_samples=2, feature_widths=widths)
 
 
 def test_ambiguous_family_configuration_is_rejected():

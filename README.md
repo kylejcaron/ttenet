@@ -538,6 +538,15 @@ zero-latent families without inventing posterior sites.
 `.timing(inputs, draw=i)` returns a replayed `EventLaw`.
 Pass the whole `StageFit` to forecasting so the family and shared metadata survive.
 
+`StageFit.feature_widths` records `(timing_width, susceptibility_width)` from
+the fitted observations, including zero-width inputs. Replay, standalone
+forecasts, and eventual expectations require those same widths even when
+a custom family uses regressors deterministically or through shared parameters.
+`fit_stage` and joint/modular network fits record this metadata automatically.
+When constructing a custom-family `StageFit` from posterior arrays by hand,
+supply `feature_widths=(P, Q)` explicitly, including `(0, 0)` for no regressors.
+Default-family fits infer the widths from their `StageParameters`.
+
 Every family carries an explicit, immutable tail declaration:
 
 - `ProperTail()`: susceptible units eventually fire under continuing exposure

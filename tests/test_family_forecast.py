@@ -1,5 +1,7 @@
 """Forecasts and eventual expectations replayed through fitted event-time families."""
 
+import functools
+
 import jax.numpy as jnp
 import numpy as np
 import numpyro
@@ -14,7 +16,7 @@ from ttenet.event_times import EventLaw, TimingLaw, log1mexp, timing_from_log_ma
 from ttenet.families import EventFamily, FiniteTail, ProperTail, UnknownTail, WeibullFamily
 from ttenet.forecast import expected_return_receipts, forecast_events, forecast_returns
 from ttenet.integration import SalesForecast
-from ttenet.models import StageFit
+from ttenet.models import StageFit, StageObservations, fit_stage
 from ttenet.survival import StageParameters
 
 AS_OF = np.datetime64("2026-03-01", "D")
@@ -45,8 +47,14 @@ def _calendar(start="2025-01-01", horizon=120):
     return date_grid(np.datetime64(start, "D"), AS_OF + np.timedelta64(horizon, "D"))
 
 
-def _fit(family, parameters, draws):
-    return StageFit(parameters=parameters, losses=np.zeros(0), family=family, num_samples=draws)
+def _fit(family, parameters, draws, feature_widths=(0, 0)):
+    return StageFit(
+        parameters=parameters,
+        losses=np.zeros(0),
+        family=family,
+        num_samples=draws,
+        feature_widths=feature_widths,
+    )
 
 
 def _constant_model(inputs, shared):
@@ -228,18 +236,18 @@ def test_weibull_family_respects_closures_and_deadlines_in_the_shared_kernel():
     np.testing.assert_array_equal(result.pending[:, 3:], result.pending[:, 2:3].repeat(3, axis=1))
 
 
-def test_forecast_events_refuses_regressor_sites_the_supplied_inputs_never_reach():
-    # Fitted with one timing and one susceptibility regressor, the packaged
-    # Weibull reaches "beta" and "susceptibility_beta" only when the forecast
-    # supplies regressors of those widths. Omitting either would silently drop
-    # a fitted effect, so it is refused; matching widths replay the fit.
+def test_forecast_events_replays_a_hand_built_fit_only_with_its_declared_widths():
+    # Declared with one timing and one susceptibility regressor, the packaged
+    # Weibull replays only forecasts that supply regressors of exactly those
+    # widths. Omitting either would silently drop a fitted effect, so it is
+    # refused; matching widths replay the fit.
     family = WeibullFamily(scale_prior=dist.LogNormal(1.0, 0.3), susceptibility_logit_prior=0.5)
     posterior = {
         "scale": jnp.array([3.0, 4.0]),
         "beta": jnp.array([[0.5], [-0.5]]),
         "susceptibility_beta": jnp.array([[1.0], [1.0]]),
     }
-    fit = _fit(family, posterior, 2)
+    fit = _fit(family, posterior, 2, feature_widths=(1, 1))
     calendar = _calendar()
     kwargs = dict(
         origins=[NAT],
@@ -251,11 +259,11 @@ def test_forecast_events_refuses_regressor_sites_the_supplied_inputs_never_reach
     )
     features = np.zeros((1, calendar.size, 1))
     susceptibility_features = np.zeros((1, 1))
-    with pytest.raises(ValueError, match="beta"):
+    with pytest.raises(ValueError):
         forecast_events(fit, **kwargs)
-    with pytest.raises(ValueError, match="susceptibility_beta"):
+    with pytest.raises(ValueError):
         forecast_events(fit, features=features, **kwargs)
-    with pytest.raises(ValueError, match="beta"):
+    with pytest.raises(ValueError):
         forecast_events(fit, susceptibility_features=susceptibility_features, **kwargs)
     result = forecast_events(
         fit, features=features, susceptibility_features=susceptibility_features, **kwargs
@@ -519,3 +527,196 @@ def test_one_unit_pools_absorb_absent_draws_and_keep_multiple_parent_dates():
     )
     np.testing.assert_array_equal(result.events, arrivals)
     np.testing.assert_array_equal(result.pending, np.zeros((3, 3), dtype=int))
+
+
+# --------------------------------------------------------------------------
+# Regressor widths of a fitted custom law bind every standalone forecast
+# --------------------------------------------------------------------------
+#
+# The law below reads the supplied regressors directly and owns no coefficient
+# site, so nothing in the posterior reveals how many columns it was trained on:
+# only the width recorded by ``fit_stage`` can refuse a forecast whose
+# regressors were dropped, padded or reshaped.
+
+_FEATURE_VALUE = 1.0
+_SUSCEPTIBILITY_VALUE = 0.7
+_TRAINED_WIDTHS = [(0, 0), (1, 1), (2, 0), (0, 2)]
+
+
+def _feature_law(inputs, shared):
+    stay = -jnp.exp(-2.0 + inputs.features.sum(axis=-1))
+    logits = 0.5 + inputs.susceptibility_features.sum(axis=-1)
+    return EventLaw(
+        TimingLaw(log1mexp(stay), stay), jnp.broadcast_to(logits, inputs.ages.shape[-1:])
+    )
+
+
+@functools.cache
+def _feature_fit(p, q):
+    """A deterministic custom fit trained on ``p`` timing and ``q`` susceptibility columns."""
+    observations = StageObservations(
+        ages=jnp.broadcast_to(jnp.arange(3), (2, 3)),
+        features=jnp.ones((2, 3, p)),
+        susceptibility_features=jnp.ones((2, q)),
+        at_risk=jnp.ones((2, 3), dtype=bool),
+        allowed=jnp.ones((2, 3), dtype=bool),
+        event_index=jnp.array([0, -1]),
+    )
+    fit = fit_stage(
+        observations, family=EventFamily(_feature_law, ProperTail()), num_steps=2, num_samples=3
+    )
+    assert dict(fit.parameters) == {}
+    return fit
+
+
+def _feature_law_numbers(p, q):
+    """Per-age survival and susceptibility of ``_feature_law`` on the forecast regressors."""
+    survive = np.exp(-np.exp(-2.0 + p * _FEATURE_VALUE))
+    susceptibility = 1.0 / (1.0 + np.exp(-(0.5 + q * _SUSCEPTIBILITY_VALUE)))
+    return survive, susceptibility
+
+
+def _width_cases(p, q):
+    """Supplied ``(features, susceptibility_features)`` widths; ``None`` omits the argument."""
+    cases = [(None, None), (None, q), (p, None), (p, q), (p + 1, q), (p, q + 1), (p + 1, q + 1)]
+    if p:
+        cases.append((p - 1, q))
+    if q:
+        cases.append((p, q - 1))
+    return list(dict.fromkeys(cases))
+
+
+def _regressors(prefix, widths, rows, calendar_size):
+    features, susceptibility = widths
+    supplied = {}
+    if features is not None:
+        supplied[f"{prefix}features"] = np.full((rows, calendar_size, features), _FEATURE_VALUE)
+    if susceptibility is not None:
+        supplied[f"{prefix}susceptibility_features"] = np.full(
+            (rows, susceptibility), _SUSCEPTIBILITY_VALUE
+        )
+    return supplied
+
+
+def _assert_trained_widths_bind(call, prefix, trained, rows, calendar_size, check):
+    """Every supplied width pair other than the trained one is refused; the trained pair replays."""
+    for widths in _width_cases(*trained):
+        regressors = _regressors(prefix, widths, rows, calendar_size)
+        if (widths[0] or 0, widths[1] or 0) == trained:
+            check(call(**regressors))
+            continue
+        wrong = (
+            f"{prefix}features"
+            if (widths[0] or 0) != trained[0]
+            else (f"{prefix}susceptibility_features")
+        )
+        with pytest.raises(ValueError, match=wrong):
+            call(**regressors)
+
+
+@pytest.mark.parametrize("trained", _TRAINED_WIDTHS)
+def test_forecast_events_binds_a_site_free_custom_law_to_its_trained_widths(trained):
+    fit = _feature_fit(*trained)
+    calendar = _calendar()
+    units = 20000
+    survive, susceptibility = _feature_law_numbers(*trained)
+    expected = units * susceptibility * (1.0 - survive)
+
+    def call(**regressors):
+        return forecast_events(
+            fit,
+            origins=[NAT],
+            observed=[NAT],
+            arrivals=_future_arrivals(3, 4, 1, day=1, cohort=0, count=units),
+            calendar=calendar,
+            as_of=AS_OF,
+            horizon=4,
+            **regressors,
+        )
+
+    def check(result):
+        np.testing.assert_allclose(result.events[:, 0, 0], expected, atol=5 * np.sqrt(expected))
+
+    _assert_trained_widths_bind(call, "", trained, 1, calendar.size, check)
+
+
+def _return_scenario(stage, trained):
+    """History and exact ``(uninitiated, open)`` receipt expectations with the custom law at ``stage``."""
+    survive, susceptibility = _feature_law_numbers(*trained)
+    if stage == "receipt":
+        # One return initiated the day before as_of: two exposed event-free days.
+        history = _history(
+            {
+                "item_id": ["open"],
+                "sale_date": ["2026-01-01"],
+                "initiation_date": [str(AS_OF - np.timedelta64(1, "D"))],
+                "receipt_date": [None],
+            }
+        )
+        cured = 1.0 - susceptibility + susceptibility * survive**2
+        return history, (0.0, susceptibility * survive**2 / cured)
+    # One sale on as_of with a two-day policy: one event-free age-0 exposure,
+    # then initiation within ages 1-2 and the default fresh-unit receipt of .5.
+    history = _history({"item_id": ["sold"], "sale_date": [str(AS_OF)]}, policy_days=2)
+    conditional = susceptibility * survive / (1.0 - susceptibility + susceptibility * survive)
+    return history, (conditional * (1.0 - survive**2) * 0.5, 0.0)
+
+
+def _stage_pair(stage, fit):
+    return (_params(), fit) if stage == "receipt" else (fit, _params())
+
+
+@pytest.mark.parametrize("stage", ["initiation", "receipt"])
+@pytest.mark.parametrize("trained", _TRAINED_WIDTHS)
+def test_expected_return_receipts_binds_a_site_free_custom_law_to_its_trained_widths(
+    stage, trained
+):
+    history, (uninitiated, open_receipts) = _return_scenario(stage, trained)
+    initiation, receipt = _stage_pair(stage, _feature_fit(*trained))
+    calendar = _calendar()
+
+    def call(**regressors):
+        return expected_return_receipts(
+            history, initiation, receipt, calendar=calendar, **regressors
+        )
+
+    def check(result):
+        np.testing.assert_allclose(result[0], np.full(3, uninitiated), rtol=1e-9, atol=1e-12)
+        np.testing.assert_allclose(result[1], np.full(3, open_receipts), rtol=1e-9, atol=1e-12)
+
+    _assert_trained_widths_bind(call, f"{stage}_", trained, 1, calendar.size, check)
+
+
+@pytest.mark.parametrize("stage", ["initiation", "receipt"])
+@pytest.mark.parametrize("trained", _TRAINED_WIDTHS)
+def test_forecast_returns_binds_a_site_free_custom_law_to_its_trained_widths(stage, trained):
+    history, (uninitiated, open_receipts) = _return_scenario(stage, trained)
+    initiation, receipt = _stage_pair(stage, _feature_fit(*trained))
+    future = SalesForecast(
+        cohorts=pd.DataFrame(
+            {"item_id": ["f"], "sale_date": [str(AS_OF + np.timedelta64(1, "D"))]}
+        ),
+        counts=np.array([[3]]),
+    )
+    calendar = _calendar()
+
+    def call(**regressors):
+        return forecast_returns(
+            history,
+            initiation,
+            receipt,
+            calendar=calendar,
+            horizon=4,
+            future_sales=future,
+            **regressors,
+        )
+
+    def check(result):
+        np.testing.assert_allclose(
+            result.expected_uninitiated_receipts, np.full(3, uninitiated), rtol=1e-9, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            result.expected_open_receipts, np.full(3, open_receipts), rtol=1e-9, atol=1e-12
+        )
+
+    _assert_trained_widths_bind(call, f"{stage}_", trained, 2, calendar.size, check)

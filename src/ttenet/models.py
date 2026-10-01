@@ -141,10 +141,57 @@ def _fit_parameter_leaves(parameters, family):
     return tree_util.tree_leaves(dict(parameters))
 
 
+def _feature_widths(regressors) -> tuple[int, int]:
+    """``(P, Q)`` trailing widths of ``features`` and ``susceptibility_features``."""
+    return (
+        int(np.shape(regressors.features)[-1]),
+        int(np.shape(regressors.susceptibility_features)[-1]),
+    )
+
+
+def _fit_feature_widths(widths, parameters, family) -> tuple[int, int]:
+    """Canonical ``(P, Q)`` regressor widths a fit replays at.
+
+    The default family's are the widths of its ``beta`` and
+    ``susceptibility_beta`` draws, so they may be omitted but not
+    contradicted. A custom family's posterior says nothing about the
+    regressors its law consumed, so its fit must state them.
+    """
+    inferred = None
+    if family is None:
+        inferred = (
+            int(np.shape(parameters.beta)[-1]),
+            int(np.shape(parameters.susceptibility_beta)[-1]),
+        )
+        if widths is None:
+            return inferred
+    elif widths is None:
+        raise ValueError(
+            "a custom-family StageFit must record feature_widths, the (P, Q) regressor "
+            "widths its law was fitted at"
+        )
+    try:
+        p, q = widths
+    except (TypeError, ValueError):
+        raise ValueError("feature_widths must be a pair of nonnegative integers (P, Q)") from None
+    if any(
+        isinstance(width, bool) or not isinstance(width, (int, np.integer)) or width < 0
+        for width in (p, q)
+    ):
+        raise ValueError("feature_widths must be a pair of nonnegative integers (P, Q)")
+    widths = (int(p), int(q))
+    if inferred is not None and widths != inferred:
+        raise ValueError(
+            f"feature_widths={widths} disagrees with the default family's coefficient "
+            f"widths {inferred}"
+        )
+    return widths
+
+
 @partial(
     register_dataclass,
     data_fields=["parameters", "losses", "shared"],
-    meta_fields=["family", "num_samples"],
+    meta_fields=["family", "num_samples", "feature_widths"],
 )
 @dataclasses.dataclass(frozen=True)
 class StageFit:
@@ -162,11 +209,16 @@ class StageFit:
     all replay the requested number of draws. The two-argument form
     ``StageFit(parameters, losses)`` remains valid for the default family and
     takes its draw count from the arrays. ``losses`` is the per-step ELBO
-    trace from ``SVI.run`` (empty when nothing was fitted).
+    trace from ``SVI.run`` (empty when nothing was fitted). ``feature_widths``
+    is the ``(P, Q)`` pair of regressor widths the law was fitted at: the
+    default family's follow from its ``beta`` and ``susceptibility_beta``
+    draws, a custom family's must be given because nothing in its posterior
+    records which regressor columns its law read. Both are static pytree
+    metadata.
 
-    ``timing`` replays one draw's law at new ages and regressors; the draw
-    index may be traced, so ``jax.vmap`` over ``jnp.arange(fit.draws)``
-    evaluates every draw.
+    ``timing`` replays one draw's law at new ages and regressors whose
+    widths must equal ``feature_widths``; the draw index may be traced, so
+    ``jax.vmap`` over ``jnp.arange(fit.draws)`` evaluates every draw.
     """
 
     parameters: Any
@@ -174,9 +226,12 @@ class StageFit:
     family: Family | None = None
     shared: Any = None
     num_samples: int | None = None
+    feature_widths: tuple[int, int] | None = None
 
     def __post_init__(self):
         leaves = _fit_parameter_leaves(self.parameters, self.family)
+        widths = _fit_feature_widths(self.feature_widths, self.parameters, self.family)
+        object.__setattr__(self, "feature_widths", widths)
         leaves += tree_util.tree_leaves(self.shared)
         if any(isinstance(leaf, jax.core.Tracer) for leaf in leaves):
             return
@@ -212,17 +267,25 @@ class StageFit:
     def timing(self, inputs: TimingInputs, *, draw, key=None) -> EventLaw:
         """Timing law and susceptibility logits of posterior draw ``draw`` at ``inputs``.
 
+        Regressors narrower or wider than ``feature_widths`` are refused
+        before any law runs: a family that reads its regressors without a
+        per-column site would otherwise replay a different law in silence.
         The default family evaluates ``default_timing`` on that draw's
         ``StageParameters``. A custom family reruns ``family.model`` with the
         draw's named values substituted at its sample and ``numpyro.param``
         sites and the draw's resolved shared values passed through; a family
         that reaches a site absent from the fitted mapping is refused rather
         than silently sampled from its prior, and so is one that never
-        reaches a fitted site (regressor coefficients skipped by zero-width
-        inputs would silently change the law). ``key`` seeds that replay
-        (every site is substituted, so it only matters for families with
-        other NumPyro randomness).
+        reaches a fitted site. ``key`` seeds that replay (every site is
+        substituted, so it only matters for families with other NumPyro
+        randomness).
         """
+        widths = _feature_widths(inputs)
+        if widths != self.feature_widths:
+            raise ValueError(
+                f"inputs carry regressor widths {widths}, but this fit replays its law "
+                f"at feature widths {self.feature_widths}"
+            )
 
         def select(leaf):
             return jnp.asarray(leaf)[draw]
@@ -932,7 +995,8 @@ def fit_stage(
     ``StageParameters`` (including the deterministic ``age_logits``) with a
     leading draw axis. With ``family`` its own sample sites and optimized
     ``numpyro.param`` values form the named posterior mapping instead, and
-    the family itself is kept for replay. A family
+    the family itself is kept for replay. Either result records the
+    observations' regressor widths as its ``feature_widths``. A family
     with nothing to fit still records ``num_samples`` draws. Observations no
     parameter value can score are refused: the guide's initialization raises
     when it finds no finite-density parameters, and a latent-free model is
@@ -970,14 +1034,16 @@ def fit_stage(
         seed=seed,
         learning_rate=learning_rate,
     )
+    widths = _feature_widths(observations)
     if family is None:
         parameters = StageParameters(*[resolved[name] for name in StageParameters._fields])
-        return StageFit(parameters, losses, num_samples=num_samples)
+        return StageFit(parameters, losses, num_samples=num_samples, feature_widths=widths)
     return StageFit(
         _named_posterior(posterior, params, prefix="", num_samples=num_samples),
         losses,
         family=family,
         num_samples=num_samples,
+        feature_widths=widths,
     )
 
 

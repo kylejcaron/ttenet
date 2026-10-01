@@ -223,11 +223,10 @@ def _stage_tail(fit) -> TailBehavior:
 
 
 class _Stage(NamedTuple):
-    """A stage ready to replay: its fit, draw count, regressor widths and tail."""
+    """A stage ready to replay: its fit, draw count and tail."""
 
     fit: StageFit
     draws: int
-    widths: tuple[int, int] | None  # (P, Q) for the default family, None for a custom one
     tail: TailBehavior
 
 
@@ -238,13 +237,7 @@ def _resolve_stage(parameters, name):
     else:
         normalized, draws = _normalize_stage_parameters(parameters, name)
         fit = StageFit(_broadcast_stage(normalized, draws), np.zeros(0))
-    widths = None
-    if fit.family is None:
-        widths = (
-            int(fit.parameters.beta.shape[-1]),
-            int(fit.parameters.susceptibility_beta.shape[-1]),
-        )
-    return _Stage(fit, fit.draws, widths, _stage_tail(fit))
+    return _Stage(fit, fit.draws, _stage_tail(fit))
 
 
 def _x64(tree):
@@ -290,7 +283,7 @@ def _map_draws(block, draws, cells, key, *args):
 
 
 def _prepare_features(features, n_rows, calendar_len, width, name):
-    """``[N, T, P]`` regressors; ``width`` None accepts any P (a custom family's own)."""
+    """``[N, T, P]`` regressors of exactly the fitted width ``P``."""
     if features is None:
         if width:
             raise ValueError(
@@ -298,14 +291,14 @@ def _prepare_features(features, n_rows, calendar_len, width, name):
             )
         return np.zeros((n_rows, calendar_len, 0), dtype=np.float64)
     arr = np.asarray(features, dtype=np.float64)
-    expected = (n_rows, calendar_len) + (() if width is None else (width,))
-    if arr.ndim != 3 or tuple(arr.shape[: len(expected)]) != expected:
-        shown = expected if width is not None else expected + ("P",)
-        raise ValueError(f"{name} must have shape {shown}; got {tuple(arr.shape)}")
+    expected = (n_rows, calendar_len, width)
+    if tuple(arr.shape) != expected:
+        raise ValueError(f"{name} must have shape {expected}; got {tuple(arr.shape)}")
     return arr
 
 
 def _prepare_susceptibility_features(features, n_rows, width, name):
+    """``[N, Q]`` static regressors of exactly the fitted width ``Q``."""
     if features is None:
         if width:
             raise ValueError(
@@ -313,10 +306,9 @@ def _prepare_susceptibility_features(features, n_rows, width, name):
             )
         return np.zeros((n_rows, 0), dtype=np.float64)
     arr = np.asarray(features, dtype=np.float64)
-    expected = (n_rows,) + (() if width is None else (width,))
-    if arr.ndim != 2 or tuple(arr.shape[: len(expected)]) != expected:
-        shown = expected if width is not None else expected + ("Q",)
-        raise ValueError(f"{name} must have shape {shown}; got {tuple(arr.shape)}")
+    expected = (n_rows, width)
+    if tuple(arr.shape) != expected:
+        raise ValueError(f"{name} must have shape {expected}; got {tuple(arr.shape)}")
     return arr
 
 
@@ -344,8 +336,8 @@ class _StageInputs(NamedTuple):
 def _stage_inputs(
     stage, features, susceptibility_features, allowed, n_rows, calendar_len, *, prefix=""
 ):
-    """Validate a stage's host regressors; a custom family's widths are its own."""
-    p, q = stage.widths if stage.widths is not None else (None, None)
+    """Validate a stage's host regressors against its fit's recorded feature widths."""
+    p, q = stage.fit.feature_widths
     return _StageInputs(
         _prepare_features(features, n_rows, calendar_len, p, f"{prefix}features"),
         _prepare_susceptibility_features(
