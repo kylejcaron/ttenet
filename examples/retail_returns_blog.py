@@ -9,7 +9,7 @@
 #     "jax>=0.10.0,<0.11.3",
 #     "numpyro>=0.22.0",
 #     "numpyro-forecast>=0.4.0,<0.5",
-#     "ttenet @ git+https://github.com/kylejcaron/ttenet@293c41783189a69b149b0bc4f3eea9e05ec75b95",
+#     "ttenet @ git+https://github.com/kylejcaron/ttenet@d8581f4545fb591513317fa55e66e6d8d1720b61",
 # ]
 # [tool.marimo.display]
 # theme = "light"
