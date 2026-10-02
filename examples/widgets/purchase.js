@@ -62,7 +62,7 @@ function view(M, r, d) {
   if (got) { label = `Received ${cal.dow(r.recv)} ${cal.short(r.recv)}`; tone = 'done'; }
   else if (inited) { label = d === r.init ? 'Return just started' : 'Return started, no receipt yet'; tone = 'open'; }
   else if (d < WINDOW) { label = 'No return started yet'; tone = 'quiet'; }
-  else if (d === WINDOW) { label = 'Last day to start a return'; tone = 'quiet'; }
+  /* the view is end-of-day: once day 90 has passed with nothing started, day 90 was the last chance */
   else { label = 'Window closed, no return started'; tone = 'closed'; }
   return { inited, got, since, cur, label, tone };
 }
@@ -72,14 +72,13 @@ function stages(M, r, d) {
   s.push({ name: 'Purchase', st: 'observed', tag: 'Observed', big: `${cal.dow(0)} ${cal.short(0)}`, sub: `Day 0 · ${cal.short(0)} sale` });
   if (v.inited) s.push({ name: 'Return started', st: 'observed', tag: 'Observed', big: `${cal.dow(r.init)} ${cal.short(r.init)}`, sub: `Day ${r.init} · initiation recorded` });
   else if (d < WINDOW) s.push({ name: 'Return started', st: 'pending', tag: 'Not seen yet', big: 'No initiation', sub: `${days(WINDOW - d)} left in the window` });
-  else if (d === WINDOW) s.push({ name: 'Return started', st: 'pending', tag: 'Last day', big: 'No initiation', sub: `Window closes tonight, ${cal.short(WINDOW)}` });
-  else s.push({ name: 'Return started', st: 'closed', tag: 'Window closed', big: 'None started', sub: `Deadline was ${cal.short(WINDOW)} (day ${WINDOW})` });
+  else s.push({ name: 'Return started', st: 'closed', tag: 'Window closed', big: 'None started', sub: `Day ${WINDOW} (${cal.short(WINDOW)}) was the last day to start one` });
   if (!v.inited) s.push({ name: 'In transit', st: 'na', tag: 'Not entered', big: '—', sub: 'Nothing to ship yet' });
   else if (v.got) s.push({ name: 'In transit', st: 'observed', tag: 'Observed span', big: days(v.since), sub: 'Initiation to receipt' });
   else s.push({ name: 'In transit', st: 'open', tag: 'Clock running', big: d === r.init ? 'Day 0' : `Day ${v.since}`, sub: 'Open interval, unfinished' });
   if (v.got) s.push({ name: 'Received', st: 'observed', tag: 'Observed', big: `${cal.dow(r.recv)} ${cal.short(r.recv)}`, sub: `Day ${r.recv} · receipt recorded` });
   else if (v.inited) s.push({ name: 'Received', st: 'open', tag: 'No receipt yet', big: 'Not observed', sub: 'Absence is not abandonment' });
-  else s.push({ name: 'Received', st: 'na', tag: 'Not applicable', big: '—', sub: d <= WINDOW ? 'Needs a return to start first' : 'Nothing was started' });
+  else s.push({ name: 'Received', st: 'na', tag: 'Not applicable', big: '—', sub: d < WINDOW ? 'Needs a return to start first' : 'Nothing was started' });
   return s;
 }
 
@@ -170,7 +169,7 @@ function axis(M, r, d, w, hind, uid) {
       o.push(`<rect x="${a.toFixed(2)}" y="${c3 - 4}" width="${Math.max(0, b - a).toFixed(2)}" height="8" fill="#f4ebd8" stroke="#956017" stroke-width="1.5" stroke-dasharray="5 4"/><rect x="${(a - 2).toFixed(2)}" y="${c3 - 8}" width="4" height="16" fill="#956017"/><circle cx="${b.toFixed(2)}" cy="${c3}" r="6.5" fill="#fffef9" stroke="#956017" stroke-width="2"/>`);
     }
   } else {
-    o.push(`<line x1="${x(0)}" y1="${c3}" x2="${x(SNAP)}" y2="${c3}" stroke="#c4c8b8" stroke-width="2" stroke-dasharray="1 6" stroke-linecap="round"/><text x="${L}" y="${c3 + 16}" font-size="11" fill="#8c917f" font-style="italic">${d > WINDOW ? 'never started' : 'not started'}</text>`);
+    o.push(`<line x1="${x(0)}" y1="${c3}" x2="${x(SNAP)}" y2="${c3}" stroke="#c4c8b8" stroke-width="2" stroke-dasharray="1 6" stroke-linecap="round"/><text x="${L}" y="${c3 + 16}" font-size="11" fill="#8c917f" font-style="italic">${d >= WINDOW ? 'never started' : 'not started'}</text>`);
   }
   if (hind && r.init != null) {
     const from = Math.max(d, r.init), to = r.recv != null ? r.recv : SNAP;
@@ -213,7 +212,7 @@ function axis(M, r, d, w, hind, uid) {
       : `<rect x="${(cx - 6).toFixed(2)}" y="${BL - 6}" width="12" height="12" fill="${fill}" stroke="${col}" stroke-width="2"${dash}/>`;
     o.push(m);
   });
-  if (r.init == null && d > WINDOW) {
+  if (r.init == null && d >= WINDOW) {
     const cx = x(WINDOW), ry = R(1), lab = 'Window closed · none started', p = place(cx, lab, 12);
     o.push(`<line x1="${cx.toFixed(2)}" y1="${BL + 8}" x2="${cx.toFixed(2)}" y2="${ry - 4}" stroke="#4c5a6b"/><text x="${p.x.toFixed(1)}" y="${ry}" text-anchor="${p.a}" font-size="12" fill="#292d26">${lab}</text>`);
   }
@@ -240,7 +239,7 @@ function mountView(root, M, prev) {
   <p class="pu-label pu-kicker">Simulated ledger records · not a forecast</p>
   <div class="pu-fig">
     <div class="pu-recs" role="group" aria-label="Choose an example record" data-pu="recs">
-      ${records.map((r) => `<button type="button" class="pu-rec" data-rec="${esc(r.id)}" aria-pressed="false"><b>${esc(r.title)}</b><span class="pu-label"><span>Record ${esc(r.letter)}</span><span>${esc(r.order)}</span></span><span class="d">${esc(r.blurb)}</span></button>`).join('')}
+      ${records.map((r) => `<button type="button" class="pu-rec" data-rec="${esc(r.id)}" aria-pressed="false"><b data-t></b><span class="pu-label"><span>Record ${esc(r.letter)}</span><span>${esc(r.order)}</span></span><span class="d" data-b></span></button>`).join('')}
     </div>
     <ol class="pu-stages" aria-label="Stages of the selected purchase" data-pu="stages"></ol>
 
@@ -257,8 +256,8 @@ function mountView(root, M, prev) {
         <div class="pu-presets" role="group" aria-label="Jump to a day" data-pu="presets">
           <span class="pu-days" data-pu="days"></span>
           <span class="sep" aria-hidden="true"></span>
-          <button type="button" class="pu-pill" data-step="-1" aria-label="Jump to previous event">&#8592; Previous event</button>
-          <button type="button" class="pu-pill" data-step="1" aria-label="Jump to next event">Next event &#8594;</button>
+          <button type="button" class="pu-pill" data-step="-1" aria-label="Jump to previous marked day">&#8592; Previous marked day</button>
+          <button type="button" class="pu-pill" data-step="1" aria-label="Jump to next marked day">Next marked day &#8594;</button>
         </div>
         <button type="button" class="pu-pill" data-pu="hind" aria-pressed="false">Show later events (hindsight)</button>
       </div>
@@ -277,7 +276,12 @@ function mountView(root, M, prev) {
   const listeners = [];
   const on = (target, type, fn) => { target.addEventListener(type, fn); listeners.push([target, type, fn]); };
 
-  function eventDays(r) { return [...new Set([0, r.init, r.recv, WINDOW, SNAP].filter((n) => n != null))].sort((a, b) => a - b); }
+  /* Policy and snapshot days are known up front. A unit's own events become a stop only once the
+     ledger has recorded them, or when hindsight is on; otherwise the buttons would spoil the story. */
+  function markedDays(r) {
+    const own = [r.init, r.recv].filter((n) => n != null && (state.hind || n <= state.day));
+    return [...new Set([0, WINDOW, SNAP, ...own])].sort((a, b) => a - b);
+  }
 
   function renderAxis() {
     const r = byId[state.rec], w = Math.max(280, Math.round(el.axisbox.clientWidth || 900));
@@ -292,7 +296,13 @@ function mountView(root, M, prev) {
   function render() {
     const r = byId[state.rec], d = state.day, v = view(M, r, d), st = stages(M, r, d);
     root.dataset.puRec = r.id; root.dataset.puDay = String(d);
-    el.recs.querySelectorAll('[data-rec]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.rec === state.rec)));
+    el.recs.querySelectorAll('[data-rec]').forEach((b) => {
+      const rr = byId[b.dataset.rec];
+      b.setAttribute('aria-pressed', String(b.dataset.rec === state.rec));
+      /* what happens to a unit is only said once hindsight is on; until then the card names what the ledger already holds */
+      b.querySelector('[data-t]').textContent = state.hind ? rr.title : rr.item;
+      b.querySelector('[data-b]').textContent = state.hind ? rr.blurb : `Sold ${cal.dow(0)} ${cal.short(0)}`;
+    });
     const here = (i) => (i === v.cur ? '<span class="here">Unit is here</span>' : '');
     el.stages.innerHTML = st.map((s, i) => {
       const next = st[i + 1];
@@ -302,9 +312,13 @@ function mountView(root, M, prev) {
         <span class="pu-ic">${ICONS[i]()}</span>
         <span class="pu-tx"><span class="l1"><span class="nm">${s.name}</span><span class="tag">${s.tag}</span></span><span class="big">${s.big}</span><span class="sub">${s.sub}</span>${here(i)}</span></li>`;
     }).join('');
-    if (daysFor !== r.id) {
-      daysFor = r.id;
-      el.days.innerHTML = eventDays(r).map((n) => `<button type="button" class="pu-pill" data-day="${n}" aria-pressed="false">Day ${n}${n === SNAP ? ' · snapshot' : ''}</button>`).join('');
+    const marks = markedDays(r), marksKey = `${r.id}:${marks.join(',')}`;
+    if (daysFor !== marksKey) {
+      daysFor = marksKey;
+      const scope = root.getRootNode(), held = scope.activeElement;
+      const focusDay = held && el.days.contains(held) ? held.dataset.day : null;
+      el.days.innerHTML = marks.map((n) => `<button type="button" class="pu-pill" data-day="${n}" aria-pressed="false">Day ${n}${n === SNAP ? ' · snapshot' : ''}</button>`).join('');
+      if (focusDay != null) { const again = el.days.querySelector(`[data-day="${focusDay}"]`); if (again) again.focus(); }
     }
     el.legend.innerHTML = `<span><i style="background:#42644d"></i>observed event or stopped clock</span><span><i style="background:#f4ebd8;border:1.5px dashed #956017;height:10px"></i>clock still running, nothing observed</span>${r.storm ? '<span><i class="storm"></i>storm days</span>' : ''}`;
     el.dayread.innerHTML = `Day ${d}<small>${cal.longDate(d)}</small>`;
@@ -330,7 +344,7 @@ function mountView(root, M, prev) {
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.day != null) setDay(+b.dataset.day);
     else if (b.dataset.step) {
-      const ev = eventDays(byId[state.rec]);
+      const ev = markedDays(byId[state.rec]);
       const t = b.dataset.step === '1' ? ev.find((n) => n > state.day) : [...ev].reverse().find((n) => n < state.day);
       if (t != null) setDay(t);
     }

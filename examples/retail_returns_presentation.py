@@ -228,6 +228,7 @@ def source_md(*objects):
 def status_figure(status, abandoned, as_of):
     """The stacked bar of where every unit stands at the snapshot, with its legend."""
     counts = pd.Series(status).value_counts()
+    snapshot = pd.Timestamp(str(as_of))
     total = len(status)
     # Settled outcomes at the two ends, the censored ones (clock still running) between.
     parts = [
@@ -258,7 +259,7 @@ def status_figure(status, abandoned, as_of):
     return mo.Html(
         '<figure class="ttn-status">'
         f'<p class="ttn-figure-title">Where all {total:,} units sold so far stand at the '
-        f"snapshot, {pd.Timestamp(str(as_of)):%b %-d}</p>"
+        f"snapshot, {snapshot:%b} {snapshot.day}</p>"
         f'<div class="ttn-status-bar" role="img" aria-label="Status of every unit">{bar}</div>'
         f'<ul class="ttn-status-legend">{legend}</ul>'
         "</figure>"

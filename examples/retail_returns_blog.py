@@ -399,7 +399,8 @@ def _(AS_OF, PurchaseStory, data, mo, pd, storms, truth):
     from retail_returns_story import purchase_story
 
     _story = purchase_story(truth, AS_OF, storms)
-    _sold = pd.Timestamp(_story["sale"]).strftime("%A, %B %-d")
+    _sale = pd.Timestamp(_story["sale"])
+    _sold = f"{_sale:%A, %B} {_sale.day}"
     mo.vstack(
         [
             mo.md(
