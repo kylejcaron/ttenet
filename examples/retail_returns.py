@@ -9,124 +9,26 @@ import argparse
 import json
 from pathlib import Path
 
-import jax.numpy as jnp
 import numpy as np
-import numpyro
 import numpyro.distributions as dist
 import pandas as pd
-from numpyro_forecast import Horizon, predict
+from retail_returns_world import (
+    initiation_covariates,
+    receipt_covariates,
+    sales_covariates,
+    sales_model,
+    simulate_retail,
+)
 
 from ttenet import (
     CountProcess,
     EventProcess,
     RetailData,
     RetailReturnModel,
+    WeibullFamily,
     date_grid,
     prepare_history,
 )
-
-
-def sigmoid(value):
-    return 1 / (1 + np.exp(-value))
-
-
-def storms(days):
-    """An explicitly supplied historical/future weather scenario, not a forecast."""
-    age = (np.asarray(days, dtype="datetime64[D]") - np.datetime64("2026-01-01")).astype(int)
-    return (
-        ((age >= 45) & (age <= 49)) | ((age >= 125) & (age <= 129)) | ((age >= 185) & (age <= 189))
-    ).astype(float)
-
-
-def simulate_retail(seed=21, training_days=180, horizon=28, volume=1.0):
-    """Simulate unit histories; ``volume`` scales both products' daily sales rates."""
-    rng = np.random.default_rng(seed)
-    start = np.datetime64("2026-01-01")
-    sales_days = date_grid(start, start + np.timedelta64(training_days + horizon - 1, "D"))
-    weekday = pd.DatetimeIndex(sales_days).dayofweek.to_numpy()
-    season = np.sin(2 * np.pi * weekday / 7)
-    rates = volume * np.exp(np.log([1.2, 0.8]) + season[:, None] * np.array([0.3, -0.2]))
-    daily_sales = rng.poisson(rates)
-    rows = []
-    for day_index, date in enumerate(sales_days):
-        for product in range(2):
-            for _ in range(daily_sales[day_index, product]):
-                initiated = np.datetime64("NaT", "D")
-                received = np.datetime64("NaT", "D")
-                susceptible = rng.random() < sigmoid(-0.8 + 0.45 * product)
-                if susceptible:
-                    for age in range(91):
-                        day = date + np.timedelta64(age, "D")
-                        week = pd.Timestamp(day).dayofweek
-                        hazard = sigmoid(
-                            -2.5
-                            + 0.35 * np.cos(min(age, 15) / 5)
-                            - 0.25 * product
-                            + 0.3 * np.sin(2 * np.pi * week / 7)
-                        )
-                        if rng.random() < hazard:
-                            initiated = day
-                            break
-                abandoned = False
-                if not np.isnat(initiated):
-                    abandoned = rng.random() >= 0.8
-                    if not abandoned:
-                        # Continue until receipt, not until the sale's policy expires.
-                        age = 0
-                        while np.isnat(received):
-                            day = initiated + np.timedelta64(age, "D")
-                            if pd.Timestamp(day).dayofweek < 5:
-                                hazard = sigmoid(
-                                    -1.0
-                                    + 0.2 * np.cos(min(age, 15) / 5)
-                                    - 2.0 * float(storms([day])[0])
-                                )
-                                if rng.random() < hazard:
-                                    received = day
-                            age += 1
-                rows.append(
-                    {
-                        "item_id": f"sale_{len(rows)}",
-                        "sale_date": date,
-                        "initiation_date": initiated,
-                        "receipt_date": received,
-                        "product": float(product),
-                        "abandoned_truth": abandoned,
-                    }
-                )
-    return pd.DataFrame(rows), daily_sales
-
-
-def initiation_covariates(frame, calendar):
-    """Product attributes and calendar features with fixed meanings across windows."""
-    product = frame["product"].to_numpy(float)
-    weekday = pd.DatetimeIndex(calendar).dayofweek.to_numpy()
-    features = np.empty((len(frame), len(calendar), 2))
-    features[:, :, 0] = product[:, None]
-    features[:, :, 1] = np.sin(2 * np.pi * weekday / 7)[None, :]
-    return {"features": features, "susceptibility_features": product[:, None]}
-
-
-def receipt_covariates(frame, calendar):
-    return {
-        "features": np.broadcast_to(
-            storms(calendar)[None, :, None],
-            (len(frame), len(calendar), 1),
-        ),
-    }
-
-
-def sales_covariates(calendar):
-    weekday = pd.DatetimeIndex(calendar).dayofweek.to_numpy()
-    return jnp.asarray(np.sin(2 * np.pi * weekday / 7)[:, None])
-
-
-def sales_model(covariates, data=None):
-    h = Horizon.from_data(covariates, data)
-    log_rate = numpyro.sample("log_rate", dist.Normal(0, 0.6).expand([2]).to_event(1))
-    weekday_effect = numpyro.sample("weekday_effect", dist.Normal(0, 0.4).expand([2]).to_event(1))
-    eta = log_rate + covariates * weekday_effect
-    predict(h, lambda value: dist.Poisson(jnp.exp(value)), eta)
 
 
 def run(steps=150, draws=40, seed=21, plot=None):
@@ -165,7 +67,14 @@ def run(steps=150, draws=40, seed=21, plot=None):
     model = RetailReturnModel(
         sales=CountProcess(model=sales_model),
         initiation=EventProcess(age_bins=16, deadline_days=90),
-        receipt=EventProcess(age_bins=16, allowed_weekdays=range(5)),
+        receipt=EventProcess(
+            family=WeibullFamily(
+                scale_prior=dist.LogNormal(1.8, 0.3),
+                shape_prior=dist.LogNormal(0.7, 0.2),
+                susceptibility_logit_prior=dist.Normal(1.0, 1.0),
+            ),
+            allowed_weekdays=range(5),
+        ),
     )
     fitted = model.fit(
         data,

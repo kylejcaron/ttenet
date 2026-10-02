@@ -20,6 +20,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+from retail_returns_analysis import bands
 
 from ttenet.event_times import TimingInputs, survival_kernel
 
@@ -77,19 +78,6 @@ def _band(draws, axis=0):
     mean = draws.mean(axis=axis)
     lo, hi = np.quantile(draws, [0.05, 0.95], axis=axis)
     return {"mean": mean.tolist(), "lo90": lo.tolist(), "hi90": hi.tolist()}
-
-
-def _summary(draws):
-    """Mean and 50%/90% predictive intervals of a ``[draw, day]`` array."""
-    draws = np.asarray(draws, dtype=float)
-    lo90, lo50, hi50, hi90 = np.quantile(draws, [0.05, 0.25, 0.75, 0.95], axis=0)
-    return {
-        "mean": draws.mean(axis=0).tolist(),
-        "lo90": lo90.tolist(),
-        "hi90": hi90.tolist(),
-        "lo50": lo50.tolist(),
-        "hi50": hi50.tolist(),
-    }
 
 
 def _total(draws):
@@ -159,8 +147,8 @@ def chain_data(fitted, forecast, sales_draws, storm=None, receipt_days=30):
         "datesISO": [str(d) for d in dates],
         "weekend": (_weekday(dates) >= 5).tolist(),
         "storm": None if storm is None else storm.tolist(),
-        "sales": _summary(sales),
-        "receipt_forecast": _summary(receipts),
+        "sales": bands(sales),
+        "receipt_forecast": bands(receipts),
         "totals": {"sales": _total(sales), "receipt_forecast": _total(receipts)},
         "draws": {
             "forecast": int(receipts.shape[0]),

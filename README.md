@@ -33,7 +33,7 @@ It prints held-out scores and checks count conservation. Latent abandonment
 labels never enter fitting. Short runs are execution checks, not convergence
 or calibration guarantees.
 
-The same example as an illustrated, interactive essay: a marimo notebook in seven
+The same example as an illustrated, interactive essay: a marimo notebook in six
 parts, from the raw ledger through fitting, forecasting, scenarios, and a simple
 baseline:
 
@@ -57,10 +57,17 @@ Three interactive figures sit inside the parts they explain:
   storm and the week after. The gap is a paired per-draw difference: a storm
   moves receipts in time far more than it changes the monthly total.
 
-The essay's simulator draws receipts from the same discretized Weibull the
-receipt stage fits, so every fitted parameter has a true value to check.
+Both examples run on one synthetic world, `examples/retail_returns_world.py`. Its
+receipts follow the same discretized Weibull the receipt stage fits, so every fitted
+parameter has a true value to check.
 
-Python computes every number; the figures in `examples/widgets/` only draw it.
+The essay keeps data work and drawing apart. The notebook holds the narrative, the
+model and the fit and forecast calls. `retail_returns_analysis.py` computes the
+numbers (cohort rates, parameter recovery, baseline scores), `retail_returns_story.py`,
+`retail_returns_chain.py` and `retail_returns_scenario.py` build the JSON for the three
+interactive figures, and `retail_returns_presentation.py` holds the palette, themes and
+one chart per figure. Python computes every number; the figures in `examples/widgets/`
+only draw it.
 
 ### Native survival convolutions
 
