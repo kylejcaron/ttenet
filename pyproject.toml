@@ -23,6 +23,7 @@ examples = [
   "marimo>=0.23.15",
   "altair>=5.5",
   "coeftable>=0.12.1",
+  "anywidget>=0.9.18",
 ]
 
 [dependency-groups]

@@ -24,10 +24,11 @@
   color: var(--ttn-ink);
 }
 
-/* One continuous paper column. */
+/* One continuous paper column: wide enough for figures and tables side by side, while
+   paragraphs keep a readable measure (see Prose). */
 #App [data-cell-name] {
   width: 100%;
-  max-width: 960px;
+  max-width: 1200px;
   margin-inline: auto;
   padding: 0 56px;
   background: var(--ttn-panel);
@@ -39,7 +40,7 @@
   position: sticky;
   top: 0;
   z-index: 20;
-  max-width: 960px;
+  max-width: 1200px;
   padding: 18px 0;
   margin-bottom: 28px;
   background: var(--ttn-canvas);
@@ -185,13 +186,114 @@
   font-weight: 600;
 }
 
-/* Section openers */
+/* Section openers: each part starts on its own band after a strip of bare canvas, so the
+   break between parts reads like turning a page. */
+
+#App [data-cell-name]:has(.ttn-section) {
+  margin-top: 56px;
+  padding-top: 22px;
+  padding-bottom: 34px;
+  background: var(--ttn-band);
+  border-top: 3px solid var(--ttn-ink);
+  border-bottom: 1px solid var(--ttn-rule);
+}
 
 .ttn-section {
-  margin-top: 36px;
-  padding-top: 34px;
-  border-top: 1px solid var(--ttn-rule);
-  scroll-margin-top: 96px;
+  scroll-margin-top: 120px;
+}
+
+/* Where you are: every part, with this one filled in and the ones already read in green. */
+.ttn-map {
+  display: flex;
+  gap: 4px;
+  margin: 0 0 30px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.ttn-map-step {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 11px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--ttn-muted);
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.ttn-map-num {
+  font-family: var(--ttn-mono);
+  font-size: 11px;
+}
+
+.ttn-map-step.is-done {
+  color: var(--ttn-accent);
+}
+
+.ttn-map-step.is-here {
+  background: var(--ttn-ink);
+  color: var(--ttn-panel);
+}
+
+.ttn-map-step:not(.is-here):hover,
+.ttn-map-step:focus-visible {
+  border-color: var(--ttn-rule);
+  color: var(--ttn-ink);
+}
+
+.ttn-section-head {
+  display: flex;
+  gap: 28px;
+  align-items: flex-start;
+}
+
+.ttn-section-head > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.ttn-section-num {
+  margin: 0;
+  font-family: var(--ttn-serif);
+  font-size: 104px;
+  line-height: 0.78;
+  letter-spacing: -0.06em;
+  color: var(--ttn-accent);
+}
+
+.ttn-section-num:empty {
+  display: none;
+}
+
+.ttn-section-points {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 20px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ttn-section-points::before {
+  content: "In this part";
+  flex-basis: 100%;
+  font-size: 11px;
+  font-weight: 620;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--ttn-muted);
+}
+
+.ttn-section-points li {
+  padding: 5px 12px;
+  border: 1px solid var(--ttn-rule);
+  border-radius: 999px;
+  background: var(--ttn-panel);
+  font-size: 13px;
+  color: var(--ttn-ink);
 }
 
 .ttn-section-kicker {
@@ -264,9 +366,13 @@
   color: var(--ttn-ink);
 }
 
+/* The interval sits on its own line, tight under the point estimate. */
 .ttn-card-value small {
-  margin-left: 6px;
-  font-size: 15px;
+  display: block;
+  margin-top: 1px;
+  font-size: 14px;
+  line-height: 1.2;
+  letter-spacing: 0;
   color: var(--ttn-muted);
 }
 
@@ -347,7 +453,7 @@
   border-radius: 2px;
 }
 
-/* The unit ledger */
+/* Tables */
 
 .ttn-table-wrap {
   margin: 14px 0 6px;
@@ -365,8 +471,8 @@
 .ttn-table td {
   padding: 8px 12px;
   text-align: left;
+  vertical-align: top;
   border-bottom: 1px solid var(--ttn-rule);
-  white-space: nowrap;
 }
 
 .ttn-table thead th {
@@ -378,29 +484,156 @@
   color: var(--ttn-muted);
 }
 
-.ttn-table td.ttn-mono {
+.ttn-table code {
+  overflow-wrap: anywhere;
+}
+
+/* Stage cards: what each return stage learns and what it is told. */
+
+.ttn-stages {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+  gap: 16px;
+  margin: 18px 0 6px;
+}
+
+.ttn-stage {
+  padding: 16px 20px 6px;
+  border: 1px solid var(--ttn-rule);
+  background: var(--ttn-band);
+}
+
+.ttn-stage h4 {
+  margin: 0;
+  font-family: var(--ttn-serif);
+  font-size: 19px;
+  font-weight: 500;
+  color: var(--ttn-ink);
+}
+
+.ttn-stage > code {
+  display: block;
+  margin: 4px 0 10px;
   font-family: var(--ttn-mono);
-  font-size: 12.5px;
+  font-size: 12px;
+  color: var(--ttn-muted);
+  overflow-wrap: anywhere;
+}
+
+.ttn-stage dl {
+  margin: 0;
+}
+
+.ttn-stage dt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--ttn-rule);
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--ttn-ink);
+}
+
+.ttn-stage dd {
+  margin: 3px 0 10px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ttn-ink);
+}
+
+.ttn-stage dd code {
+  font-family: var(--ttn-mono);
+  font-size: 12px;
+}
+
+.ttn-tag {
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 620;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.ttn-tag--learned { color: var(--ttn-accent); background: #e6efe7; }
+.ttn-tag--declared { color: var(--ttn-muted); background: var(--ttn-column); }
+
+/* Where every unit stands: one bar, settled ends and censored middle. */
+
+.ttn-status {
+  margin: 26px 0 6px;
+}
+
+.ttn-status-bar {
+  display: flex;
+  height: 26px;
+  margin-top: 8px;
+  overflow: hidden;
+  border-radius: 3px;
+}
+
+.ttn-status-seg { flex-basis: 0; min-width: 2px; }
+.ttn-status-seg + .ttn-status-seg { border-left: 2px solid var(--ttn-panel); }
+
+.ttn-status-seg--received, .ttn-status-item--received .ttn-status-key { background: var(--ttn-accent); }
+.ttn-status-seg--transit, .ttn-status-item--transit .ttn-status-key { background: var(--ttn-amber); }
+.ttn-status-seg--eligible, .ttn-status-item--eligible .ttn-status-key { background: #8a97a8; }
+.ttn-status-seg--expired, .ttn-status-item--expired .ttn-status-key { background: #c9cdbf; }
+
+/* Censored states are hatched: the clock is still running. */
+.ttn-status-seg--transit,
+.ttn-status-seg--eligible {
+  background-image: repeating-linear-gradient(
+    -45deg, transparent 0 5px, rgba(255, 254, 249, 0.35) 5px 8px
+  );
+}
+
+.ttn-status-legend {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px 24px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ttn-status-item {
+  font-size: 14px;
+  color: var(--ttn-ink);
+}
+
+.ttn-status-item b {
+  font-family: var(--ttn-serif);
+  font-size: 22px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.ttn-status-key {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 7px;
+  border-radius: 2px;
+}
+
+.ttn-status-state {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  font-weight: 620;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: var(--ttn-muted);
 }
 
-.ttn-table .ttn-missing {
-  color: #a9ae9f;
+.ttn-status-item p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--ttn-muted);
 }
-
-.ttn-pill {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 620;
-  letter-spacing: 0.02em;
-}
-
-.ttn-pill--received { color: var(--ttn-accent); background: #e6efe7; }
-.ttn-pill--transit { color: var(--ttn-amber); background: #f4ecd7; }
-.ttn-pill--eligible { color: #4c5a6b; background: #e7ebf0; }
-.ttn-pill--expired { color: var(--ttn-muted); background: var(--ttn-column); }
 
 /* Status checks */
 
@@ -431,15 +664,6 @@
   color: var(--ttn-muted);
 }
 
-/* Interactive controls */
-
-.ttn-controls {
-  margin: 18px 0 6px;
-  padding: 16px 18px;
-  border: 1px solid var(--ttn-rule);
-  background: var(--ttn-band);
-}
-
 .ttn-footer {
   margin-top: 8px;
   font-size: 13px;
@@ -449,6 +673,35 @@
 @media (max-width: 760px) {
   #App [data-cell-name] {
     padding-inline: 18px;
+  }
+
+  #App [data-cell-name]:has(.ttn-section) {
+    margin-top: 36px;
+  }
+
+  .ttn-section {
+    scroll-margin-top: 170px;
+  }
+
+  /* Numbers only, except the part you are in, so the whole map fits on a phone. */
+  .ttn-map-step:not(.is-here) .ttn-map-num + .ttn-map-label {
+    display: none;
+  }
+
+  .ttn-map-step {
+    padding-inline: 8px;
+  }
+
+  .ttn-section-head {
+    gap: 16px;
+  }
+
+  .ttn-section-num {
+    font-size: 60px;
+  }
+
+  .ttn-section-title {
+    font-size: 28px;
   }
 
   .ttn-nav {

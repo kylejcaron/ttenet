@@ -33,12 +33,34 @@ It prints held-out scores and checks count conservation. Latent abandonment
 labels never enter fitting. Short runs are execution checks, not convergence
 or calibration guarantees.
 
-The same example as an illustrated, interactive essay (a marimo notebook with
-parameter recovery, held-out checks, and demand/weather scenario controls):
+The same example as an illustrated, interactive essay: a marimo notebook in seven
+parts, from the raw ledger through fitting, forecasting, scenarios, and a simple
+baseline:
 
 ```bash
+uv sync --all-extras
 uv run marimo run examples/retail_returns_blog.py   # or `marimo edit` to see the code
 ```
+
+Three interactive figures sit inside the parts they explain:
+
+- **Follow one purchase** (Part 1): scrub three simulated ledger records through
+  the inclusive day-90 initiation deadline and end-of-day censoring. An
+  observation lesson, not a forecast; hindsight is an explicit toggle.
+- **How the forecast is assembled** (Part 4): step through sales, return
+  initiation, receipt timing, and the resulting receipt forecast. Timing bars
+  are daily event probabilities from the fitted survival kernel, not hazards.
+- **Storm scenarios** (Part 5): no storm, the storm as forecast, or one that
+  lingers, without refitting the return stages. Daily receipts, the backlog of
+  returns in transit, and a cumulative gap against the baseline show predictive
+  means and 50%/90% intervals; two tiles give the receipts difference during the
+  storm and the week after. The gap is a paired per-draw difference: a storm
+  moves receipts in time far more than it changes the monthly total.
+
+The essay's simulator draws receipts from the same discretized Weibull the
+receipt stage fits, so every fitted parameter has a true value to check.
+
+Python computes every number; the figures in `examples/widgets/` only draw it.
 
 ### Native survival convolutions
 
