@@ -8,9 +8,16 @@ from typing import Callable
 import numpy as np
 
 from .data import RetailHistory, prepare_history
+from .families import FiniteTail, validate_family
 from .forecast import ReturnForecast, expected_return_receipts
 from .network import FittedNetwork, ForecastNetwork
-from .processes import CountNode, CountProcess, CureProcess, EventNode, _positive_integer
+from .processes import (
+    CountNode,
+    CountProcess,
+    EventNode,
+    EventProcess,
+    _positive_integer,
+)
 
 
 @dataclass(frozen=True)
@@ -23,15 +30,15 @@ class RetailReturnModel:
     """
 
     sales: CountProcess | None = None
-    initiation: CureProcess = field(default_factory=lambda: CureProcess(deadline_days=90))
-    receipt: CureProcess = field(default_factory=CureProcess)
+    initiation: EventProcess = field(default_factory=lambda: EventProcess(deadline_days=90))
+    receipt: EventProcess = field(default_factory=EventProcess)
     shared_model: Callable | None = None
 
     def __post_init__(self):
-        if not isinstance(self.initiation, CureProcess) or not isinstance(
-            self.receipt, CureProcess
+        if not isinstance(self.initiation, EventProcess) or not isinstance(
+            self.receipt, EventProcess
         ):
-            raise TypeError("initiation and receipt must be CureProcess values")
+            raise TypeError("initiation and receipt must be EventProcess values")
         if self.receipt.deadline_days is not None:
             raise ValueError(
                 "retail receipts have no deadline; use ForecastNetwork for other event policies"
@@ -108,6 +115,12 @@ class FittedRetailReturnModel:
         _positive_integer("horizon", horizon)
         through = self.history.as_of + np.timedelta64(int(horizon), "D")
         policy = self.model.initiation.deadline_days
+        family = self.model.initiation.family
+        if family is not None:
+            validate_family(family)
+            if isinstance(family.tail, FiniteTail):
+                last_age = family.tail.last_age
+                policy = last_age if policy is None else min(policy, last_age)
         eligible = self.history.frame.loc[self.history.frame.eligible, "sale_date"]
         if policy is not None and len(eligible) and self.model.receipt.allowed_weekdays:
             deadline = np.asarray(eligible, dtype="datetime64[D]").max() + np.timedelta64(
@@ -127,13 +140,13 @@ class FittedRetailReturnModel:
         if self.model.receipt.allowed_weekdays:
             uninitiated, open_returns = expected_return_receipts(
                 self.history,
-                self.initiation_fit.parameters,
-                self.receipt_fit.parameters,
+                self.initiation_fit,
+                self.receipt_fit,
                 calendar=context.calendar,
                 initiation_features=initiation.features[:n],
                 receipt_features=receipt.features[:n],
-                initiation_cure_features=initiation.cure_features[:n],
-                receipt_cure_features=receipt.cure_features[:n],
+                initiation_susceptibility_features=initiation.susceptibility_features[:n],
+                receipt_susceptibility_features=receipt.susceptibility_features[:n],
                 initiation_allowed=initiation.allowed[:n],
                 receipt_allowed=receipt.allowed[:n],
             )

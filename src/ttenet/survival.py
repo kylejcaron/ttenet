@@ -2,7 +2,7 @@
 
 Every function here operates on a *single* posterior draw: the fields of
 ``StageParameters`` are un-batched (``age_logits`` is ``[K]``, ``beta`` is
-``[P]``, ``cure_intercept`` is a scalar, ``cure_beta`` is ``[Q]``). Callers
+``[P]``, ``susceptibility_intercept`` is a scalar, ``susceptibility_beta`` is ``[Q]``). Callers
 that hold a leading posterior-draw axis (e.g. the output of
 ``models.fit_stage``) are responsible for ``jax.vmap``-ing these primitives
 over that axis, or for indexing a single draw before calling them.
@@ -12,6 +12,10 @@ differentiate. They perform no host-side validation and never attempt to
 convert traced values to concrete NumPy arrays; shape/shape-compatibility
 checks that require concrete inspection belong to host-side callers
 (``models.make_observations``, ``models.fit_stage``).
+
+``event_times`` composes the private ``_hazard_logits``/``_susceptibility_logits``
+primitives into the shared mixture-cure kernel; the hazard and
+susceptibility formulas are defined once, here.
 """
 
 from __future__ import annotations
@@ -27,8 +31,8 @@ class StageParameters(NamedTuple):
 
     age_logits: ``[K]`` flexible age-baseline logits, one per age bin.
     beta: ``[P]`` linear effects for time-varying hazard regressors.
-    cure_intercept: scalar susceptibility intercept.
-    cure_beta: ``[Q]`` linear effects for static susceptibility regressors.
+    susceptibility_intercept: scalar susceptibility intercept.
+    susceptibility_beta: ``[Q]`` linear effects for static susceptibility regressors.
 
     A leading posterior-draw axis (``[draw, K]``, ``[draw, P]``, ``[draw]``,
     ``[draw, Q]``) is valid wherever a *batch* of draws is being carried
@@ -38,8 +42,8 @@ class StageParameters(NamedTuple):
 
     age_logits: Any
     beta: Any
-    cure_intercept: Any
-    cure_beta: Any
+    susceptibility_intercept: Any
+    susceptibility_beta: Any
 
 
 def _linear_effect(features: Any, weights: Any) -> Any:
@@ -57,8 +61,10 @@ def _hazard_logits(parameters: StageParameters, ages: Any, features: Any) -> Any
     return parameters.age_logits[age_index] + _linear_effect(features, parameters.beta)
 
 
-def _cure_logits(parameters: StageParameters, cure_features: Any) -> Any:
-    return parameters.cure_intercept + _linear_effect(cure_features, parameters.cure_beta)
+def _susceptibility_logits(parameters: StageParameters, susceptibility_features: Any) -> Any:
+    return parameters.susceptibility_intercept + _linear_effect(
+        susceptibility_features, parameters.susceptibility_beta
+    )
 
 
 def stage_hazard(
@@ -86,15 +92,15 @@ def stage_hazard(
     return jnp.where(valid, sigmoid(logits), 0.0)
 
 
-def susceptibility(parameters: StageParameters, cure_features: Any) -> Any:
-    """Susceptibility probability ``pi = sigmoid(cure_intercept + z @ cure_beta)``.
+def susceptibility(parameters: StageParameters, susceptibility_features: Any) -> Any:
+    """Susceptibility probability ``pi = sigmoid(susceptibility_intercept + z @ susceptibility_beta)``.
 
-    ``cure_features`` is static at stage entry (``[..., Q]``); the result
+    ``susceptibility_features`` is static at stage entry (``[..., Q]``); the result
     broadcasts over its leading axes. This is latent susceptibility, not a
     realized event probability: a susceptible unit can still miss a finite
     observation/policy window.
     """
-    logits = _cure_logits(parameters, cure_features)
+    logits = _susceptibility_logits(parameters, susceptibility_features)
     return sigmoid(logits)
 
 
@@ -106,18 +112,16 @@ def conditional_susceptibility(probability: Any, log_survival: Any) -> Any:
     a unit was at risk and event-free through the conditioning point,
     returns ``pi * S / ((1 - pi) + pi * S)`` where ``S = exp(log_survival)``:
     the probability the unit remains susceptible (has not been cured) given
-    it has not yet had the event. Computed in log-space via
-    ``logaddexp`` for numerical stability rather than forming ``S``
-    directly, so it stays accurate for long, deeply-survived histories
-    where ``S`` itself would underflow to zero.
+    it has not yet had the event. In logit space this is the shift
+    ``logit(pi) + log_survival``, the same conditioning the event-time
+    kernel applies to known pre-entry survival; the sigmoid of that shifted
+    logit never forms ``S`` directly, so it stays accurate for long,
+    deeply-survived histories where ``S`` itself would underflow to zero.
 
     Conditioning on a zero-probability history (``pi=1`` and ``S=0``) is
     undefined and returns NaN. Host-side forecasting must reject that
     contradiction rather than arbitrarily relabel a certain return as cured.
     """
     probability = jnp.asarray(probability)
-    log_pi = jnp.log(probability)
-    log_not_pi = jnp.log1p(-probability)
-    log_numerator = log_pi + log_survival
-    log_denominator = jnp.logaddexp(log_not_pi, log_numerator)
-    return jnp.exp(log_numerator - log_denominator)
+    logits = jnp.log(probability) - jnp.log1p(-probability)
+    return sigmoid(logits + log_survival)

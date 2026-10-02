@@ -21,8 +21,8 @@ def _sync(session: nox.Session, *groups: str, extras: tuple[str, ...] = ()) -> N
 
 @nox.session(python=PYTHON_VERSIONS)
 def tests(session: nox.Session) -> None:
-    """Run the unit tests; the forecast extra keeps numpyro_forecast tests from skipping."""
-    _sync(session, "dev", extras=("forecast",))
+    """Run unit tests against the default installation, including native forecasting."""
+    _sync(session, "dev")
     session.run("pytest", "-q", *session.posargs)
 
 

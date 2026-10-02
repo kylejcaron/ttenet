@@ -7,6 +7,8 @@ from typing import Callable
 
 import numpy as np
 
+from .families import Family, validate_family
+
 
 def _positive_integer(name, value):
     if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 1:
@@ -30,19 +32,27 @@ class CountProcess:
 
 
 @dataclass(frozen=True)
-class CureProcess:
+class EventProcess:
     """One event per source unit, with its own age clock and possible non-occurrence.
 
     A deadline is inclusive and relative to the immediate source event, not
-    necessarily the root sale. ``parameter_model(observations, shared)`` may
-    sample custom NumPyro priors and must return ``StageParameters``. The
-    default uses the regularized random-walk age baseline in ``stage_model``.
+    necessarily the root sale. The default family is the regularized
+    random-walk age baseline of ``stage_model``; ``parameter_model(observations,
+    shared)`` may instead sample custom NumPyro priors and must return
+    ``StageParameters`` for that same family. ``family`` selects a different
+    timing family altogether: an object with ``model(inputs, shared)`` that
+    receives ``TimingInputs`` (ages and regressors only), samples its own named
+    NumPyro sites and returns an :class:`~ttenet.event_times.EventLaw`, and a
+    typed ``tail`` declaration (see :mod:`ttenet.families`). Exposure,
+    closures, susceptibility marginalization and entry conditioning stay in the shared
+    core. ``family`` and ``parameter_model`` are alternatives, never combined.
     """
 
     age_bins: int = 30
     deadline_days: int | None = None
     allowed_weekdays: tuple[int, ...] = tuple(range(7))
     parameter_model: Callable | None = None
+    family: Family | None = None
 
     def __post_init__(self):
         _positive_integer("age_bins", self.age_bins)
@@ -61,6 +71,13 @@ class CureProcess:
         object.__setattr__(self, "allowed_weekdays", tuple(dict.fromkeys(weekdays)))
         if self.parameter_model is not None and not callable(self.parameter_model):
             raise TypeError("parameter_model must be callable")
+        if self.family is not None:
+            if self.parameter_model is not None:
+                raise ValueError(
+                    "parameter_model and family are ambiguous together: a stage "
+                    "uses either the default family's prior or a custom timing family"
+                )
+            validate_family(self.family)
 
 
 @dataclass(frozen=True)
@@ -78,7 +95,7 @@ class CountNode:
 
 @dataclass(frozen=True)
 class EventNode:
-    """A cure-capable child event, preserving its source's root cohort identity.
+    """A susceptibility-capable child event, preserving its source's root cohort identity.
 
     Multiple children of one source are distinct events, not competing risks.
     ``event_column`` defaults to the node's entry in ``RetailData.event_columns``.
@@ -86,12 +103,12 @@ class EventNode:
 
     name: str
     source: CountNode | EventNode | str
-    process: CureProcess
+    process: EventProcess
     event_column: str | None = None
 
     def __post_init__(self):
-        if not isinstance(self.process, CureProcess):
-            raise TypeError("an EventNode process must be a CureProcess")
+        if not isinstance(self.process, EventProcess):
+            raise TypeError("an EventNode process must be an EventProcess")
 
     @property
     def source_name(self):

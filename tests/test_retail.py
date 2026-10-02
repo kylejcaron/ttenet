@@ -33,8 +33,8 @@ def _no_sales():
 
 def test_refitting_configuration_does_not_change_an_existing_forecast():
     model = ttenet.RetailReturnModel(
-        initiation=ttenet.CureProcess(age_bins=2, deadline_days=3),
-        receipt=ttenet.CureProcess(age_bins=2),
+        initiation=ttenet.EventProcess(age_bins=2, deadline_days=3),
+        receipt=ttenet.EventProcess(age_bins=2),
     )
     data = _data(_sales())
     first = model.fit(data, num_steps=3, num_samples=8, seed=2)
@@ -69,8 +69,8 @@ def test_future_cohort_closures_and_uncertain_counts_stay_aligned():
         }
 
     model = ttenet.RetailReturnModel(
-        initiation=ttenet.CureProcess(age_bins=1, deadline_days=3, parameter_model=_certain),
-        receipt=ttenet.CureProcess(age_bins=1, parameter_model=_certain),
+        initiation=ttenet.EventProcess(age_bins=1, deadline_days=3, parameter_model=_certain),
+        receipt=ttenet.EventProcess(age_bins=1, parameter_model=_certain),
     )
     data = _data(
         pd.DataFrame(
@@ -115,4 +115,75 @@ def test_invalid_covariate_provider_cannot_silently_disable_closures():
 
 def test_policy_days_cannot_be_silently_truncated():
     with pytest.raises(ValueError):
-        ttenet.CureProcess(deadline_days=3.5)
+        ttenet.EventProcess(deadline_days=3.5)
+
+
+def test_custom_receipt_family_preserves_eventual_outstanding_expectation():
+    def fixed_initiation(observations, shared):
+        return ttenet.StageParameters(
+            jnp.array([0.0]), jnp.empty(0), np.log(0.4 / 0.6), jnp.empty(0)
+        )
+
+    def receipt_model(inputs, shared):
+        return ttenet.EventLaw(
+            ttenet.TimingLaw(
+                jnp.full_like(inputs.ages, np.log(0.5), dtype=float),
+                jnp.full_like(inputs.ages, np.log(0.5), dtype=float),
+            ),
+            jnp.full(inputs.ages.shape[-1], np.log(0.4 / 0.6)),
+        )
+
+    receipt_family = ttenet.EventFamily(receipt_model, ttenet.ProperTail())
+    model = ttenet.RetailReturnModel(
+        initiation=ttenet.EventProcess(
+            age_bins=1, deadline_days=3, parameter_model=fixed_initiation
+        ),
+        receipt=ttenet.EventProcess(family=receipt_family),
+    )
+    units = pd.DataFrame(
+        {
+            "item_id": ["pending"],
+            "sale_date": ["2026-01-01"],
+            "initiation_date": ["2026-01-03"],
+            "receipt_date": [None],
+        }
+    )
+    fitted = model.fit(_data(units), num_steps=1, num_samples=3)
+    result = fitted.forecast(horizon=4, future_sales=_no_sales(), seed=3)
+    # Receipt was event-free on ages zero and one. Its remaining susceptible
+    # share is .4 * .5**2 / (.6 + .4 * .5**2) = 1/7; no sale remains uninitiated.
+    np.testing.assert_allclose(result.expected_open_receipts, np.full(3, 1 / 7), rtol=1e-6)
+    np.testing.assert_array_equal(result.expected_uninitiated_receipts, np.zeros(3))
+    np.testing.assert_allclose(result.expected_existing_receipts, np.full(3, 1 / 7), rtol=1e-6)
+    assert np.issubdtype(result.receipts.dtype, np.integer)
+    assert np.all(result.receipts.sum(axis=1) <= 1)
+
+
+def test_finite_initiation_support_extends_eventual_retail_covariates():
+    def initiation_model(inputs, shared):
+        log_mass = jnp.concatenate([jnp.full(10, -jnp.inf), jnp.zeros(1)])
+        law = ttenet.timing_from_log_masses(log_mass, -jnp.inf, inputs.ages)
+        return ttenet.EventLaw(law, jnp.full(inputs.ages.shape[-1], 50.0))
+
+    initiation_family = ttenet.EventFamily(initiation_model, ttenet.FiniteTail(last_age=10))
+
+    def receipt_parameters(observations, shared):
+        return ttenet.StageParameters(jnp.zeros(1), jnp.empty(0), np.log(0.4 / 0.6), jnp.empty(0))
+
+    model = ttenet.RetailReturnModel(
+        initiation=ttenet.EventProcess(family=initiation_family),
+        receipt=ttenet.EventProcess(age_bins=1, parameter_model=receipt_parameters),
+    )
+    units = pd.DataFrame({"item_id": ["sold"], "sale_date": ["2026-01-04"]})
+    fitted = model.fit(_data(units), num_steps=1, num_samples=3)
+    result = fitted.forecast(horizon=1, future_sales=_no_sales())
+    np.testing.assert_array_equal(result.initiations, np.zeros((3, 1), dtype=int))
+    np.testing.assert_allclose(result.expected_existing_receipts, [0.4] * 3, rtol=1e-6)
+    closed = fitted.forecast(
+        horizon=1,
+        future_sales=_no_sales(),
+        covariates={
+            "initiations": lambda frame, dates: {"allowed": dates != np.datetime64("2026-01-14")}
+        },
+    )
+    np.testing.assert_array_equal(closed.expected_existing_receipts, np.zeros(3))

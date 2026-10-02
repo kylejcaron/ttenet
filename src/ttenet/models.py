@@ -1,31 +1,49 @@
-"""Discrete-time mixture-cure stage observations, likelihood, and NumPyro fitting.
+"""Discrete-time mixture-cure stage observations, native observation, and fitting.
 
-Host-side preparation (`make_observations`) is plain NumPy/pandas and runs
-before inference: it converts a history's dates into calendar-indexed
-arrays and validates coverage, so it never touches JAX tracers. Everything
-downstream (`stage_log_likelihood`, `stage_model`, `fit_stage`) is ordinary
-differentiable JAX/NumPyro built from the single-draw primitives in
-`survival.py`.
+Host-side preparation (`make_observations`, `make_event_observations`) is
+plain NumPy/pandas and runs before inference: it converts a history's dates
+into calendar-indexed arrays and validates coverage, so it never touches
+JAX tracers. Everything downstream is ordinary differentiable JAX/NumPyro:
+a timing family (the default `StageParameters` adapter or a custom
+`family`) produces a `TimingLaw`, the shared `event_times` kernel
+masks it by the stage's administrative exposure and closures and conditions
+entry, and the native `EventTime` distribution registers every unit's
+observed trajectory through NumPyro Forecast's `Horizon`/`predict`. The
+public `stage_log_likelihood` scores the same kernel per unit.
 """
 
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 from functools import partial
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import numpyro
 import numpyro.distributions as dist
-from jax import random
-from jax.nn import log_sigmoid
+from jax import random, tree_util
 from jax.tree_util import register_dataclass
+from numpyro import handlers
 from numpyro.infer import SVI, Predictive, Trace_ELBO
 from numpyro.infer.autoguide import AutoNormal
+from numpyro_forecast import Horizon, predict
 
 from .dates import to_day
-from .survival import StageParameters, _cure_logits, _hazard_logits
+from .distributions import EventTime
+from .event_times import (
+    EventLaw,
+    SurvivalKernel,
+    TimingInputs,
+    TimingLaw,
+    default_timing,
+    kernel_unit_log_prob,
+    survival_kernel,
+)
+from .families import Family, validate_family
+from .survival import StageParameters
 
 _STAGES = ("initiation", "receipt")
 
@@ -35,11 +53,12 @@ _STAGES = ("initiation", "receipt")
     data_fields=[
         "ages",
         "features",
-        "cure_features",
+        "susceptibility_features",
         "at_risk",
         "allowed",
         "event_index",
         "pre_entry",
+        "exposure",
     ],
     meta_fields=[],
 )
@@ -52,7 +71,7 @@ class StageObservations:
     ``"receipt"``); negative before the clock starts.
     ``features: [N, T, P]`` -- time-varying hazard regressors, calendar-day
     indexed.
-    ``cure_features: [N, Q]`` -- static susceptibility regressors.
+    ``susceptibility_features: [N, Q]`` -- static susceptibility regressors.
     ``at_risk: [N, T]`` -- observed exposure window: ``True`` for every
     calendar day the unit was under observation *from its entry date
     inclusive* through and including its event or censoring day, clipped at
@@ -67,11 +86,21 @@ class StageObservations:
     unit's snapshot entry date, clipped at the policy deadline; ``None``
     (the default) means every unit's history is fully observed from its
     clock origin, which is exactly the ordinary (non-conditional-entry)
-    likelihood. When supplied, ``stage_log_likelihood`` uses the cumulative
-    survival over these days to compute a *conditional* susceptibility at
-    entry, so a unit's already-known event-free run before it entered the
-    observed snapshot still informs its posterior cure probability without
-    re-litigating a likelihood contribution for those days directly.
+    likelihood. When supplied, the cumulative survival over these days
+    shifts the susceptibility logit at entry, so a unit's already-known
+    event-free run before it entered the observed snapshot still informs
+    its posterior susceptibility probability without re-litigating a likelihood
+    contribution for those days directly.
+    ``exposure: [N, T] | None`` -- administrative exposure of the generative
+    law: ``True`` from the unit's entry (``max(origin, entry)``) through
+    ``min(deadline, as_of)`` whether or not its event was observed earlier.
+    It never encodes the observed stopping time, so a posterior predictive
+    draw may fire a unit on a later date than its recorded event. Builders
+    always populate it; ``None`` (hand-built observations) infers it from
+    ``at_risk``: a censored unit's at-risk days, and an event unit's at-risk
+    days plus every later date, which leaves the observed likelihood exactly
+    as ``at_risk`` describes it (an event outside ``at_risk`` is impossible).
+    Negative ages are never exposed, whichever route supplies the mask.
 
     Registered as a JAX pytree (all fields are array data, no static
     metadata) so instances can be passed directly as NumPyro model/SVI
@@ -80,25 +109,192 @@ class StageObservations:
 
     ages: Any
     features: Any
-    cure_features: Any
+    susceptibility_features: Any
     at_risk: Any
     allowed: Any
     event_index: Any
     pre_entry: Any = None
+    exposure: Any = None
 
 
-@partial(register_dataclass, data_fields=["parameters", "losses"], meta_fields=[])
+_DRAW_AXES = {"age_logits": 2, "beta": 2, "susceptibility_intercept": 1, "susceptibility_beta": 2}
+
+
+def _fit_parameter_leaves(parameters, family):
+    """Validate the family-specific posterior container without copying its arrays."""
+    if family is None:
+        if not isinstance(parameters, StageParameters):
+            raise TypeError(
+                "a default-family StageFit carries StageParameters; a custom family "
+                "needs its family alongside its named posterior mapping"
+            )
+        for name, value in zip(StageParameters._fields, parameters, strict=True):
+            if jnp.ndim(value) != _DRAW_AXES[name]:
+                raise ValueError(f"StageFit.parameters.{name} must carry a leading draw axis")
+        return list(parameters)
+    validate_family(family)
+    if not isinstance(parameters, Mapping) or any(not isinstance(name, str) for name in parameters):
+        raise TypeError(
+            "a custom-family StageFit carries a mapping from the family's site "
+            "names to posterior arrays"
+        )
+    return tree_util.tree_leaves(dict(parameters))
+
+
+def _feature_widths(regressors) -> tuple[int, int]:
+    """``(P, Q)`` trailing widths of ``features`` and ``susceptibility_features``."""
+    return (
+        int(np.shape(regressors.features)[-1]),
+        int(np.shape(regressors.susceptibility_features)[-1]),
+    )
+
+
+def _fit_feature_widths(widths, parameters, family) -> tuple[int, int]:
+    """Canonical ``(P, Q)`` regressor widths a fit replays at.
+
+    The default family's are the widths of its ``beta`` and
+    ``susceptibility_beta`` draws, so they may be omitted but not
+    contradicted. A custom family's posterior says nothing about the
+    regressors its law consumed, so its fit must state them.
+    """
+    inferred = None
+    if family is None:
+        inferred = (
+            int(np.shape(parameters.beta)[-1]),
+            int(np.shape(parameters.susceptibility_beta)[-1]),
+        )
+        if widths is None:
+            return inferred
+    elif widths is None:
+        raise ValueError(
+            "a custom-family StageFit must record feature_widths, the (P, Q) regressor "
+            "widths its law was fitted at"
+        )
+    try:
+        p, q = widths
+    except (TypeError, ValueError):
+        raise ValueError("feature_widths must be a pair of nonnegative integers (P, Q)") from None
+    if any(
+        isinstance(width, bool) or not isinstance(width, (int, np.integer)) or width < 0
+        for width in (p, q)
+    ):
+        raise ValueError("feature_widths must be a pair of nonnegative integers (P, Q)")
+    widths = (int(p), int(q))
+    if inferred is not None and widths != inferred:
+        raise ValueError(
+            f"feature_widths={widths} disagrees with the default family's coefficient "
+            f"widths {inferred}"
+        )
+    return widths
+
+
+@partial(
+    register_dataclass,
+    data_fields=["parameters", "losses", "shared"],
+    meta_fields=["family", "num_samples", "feature_widths"],
+)
 @dataclasses.dataclass(frozen=True)
 class StageFit:
-    """SVI fit result: posterior stage-parameter draws and the loss trace.
+    """Fit result: posterior draws of one stage's timing family and the loss trace.
 
-    ``parameters`` carries a leading posterior-draw axis on every field
-    (see ``StageParameters``). ``losses`` is the per-step ELBO loss trace
-    from ``SVI.run``.
+    For the default family ``parameters`` is a ``StageParameters`` whose
+    every field carries a leading posterior-draw axis and ``family`` is
+    ``None``. For a custom family ``family`` is the fitted family object and
+    ``parameters`` maps the family's own sample sites and optimized
+    ``numpyro.param`` values (node scope stripped) to arrays with the same
+    leading draw axis; ``shared`` is the shared model's returned mapping
+    resolved at those same draws (``None`` without one), so replaying the
+    family never re-samples shared values. ``num_samples`` records the fit's
+    actual draw count; it is what lets a fully fixed family with no arrays at
+    all replay the requested number of draws. The two-argument form
+    ``StageFit(parameters, losses)`` remains valid for the default family and
+    takes its draw count from the arrays. ``losses`` is the per-step ELBO
+    trace from ``SVI.run`` (empty when nothing was fitted). ``feature_widths``
+    is the ``(P, Q)`` pair of regressor widths the law was fitted at: the
+    default family's follow from its ``beta`` and ``susceptibility_beta``
+    draws, a custom family's must be given because nothing in its posterior
+    records which regressor columns its law read. Both are static pytree
+    metadata.
+
+    ``timing`` replays one draw's law at new ages and regressors whose
+    widths must equal ``feature_widths``; the draw index may be traced, so
+    ``jax.vmap`` over ``jnp.arange(fit.draws)`` evaluates every draw.
     """
 
-    parameters: StageParameters
+    parameters: Any
     losses: Any
+    family: Family | None = None
+    shared: Any = None
+    num_samples: int | None = None
+    feature_widths: tuple[int, int] | None = None
+
+    def __post_init__(self):
+        leaves = _fit_parameter_leaves(self.parameters, self.family)
+        widths = _fit_feature_widths(self.feature_widths, self.parameters, self.family)
+        object.__setattr__(self, "feature_widths", widths)
+        leaves += tree_util.tree_leaves(self.shared)
+        if any(isinstance(leaf, jax.core.Tracer) for leaf in leaves):
+            return
+        if self.num_samples is not None and (
+            isinstance(self.num_samples, bool)
+            or not isinstance(self.num_samples, (int, np.integer))
+            or self.num_samples < 1
+        ):
+            raise ValueError("num_samples must be a positive integer or None")
+        sizes = {int(np.shape(leaf)[0]) for leaf in leaves}
+        if len(sizes) > 1:
+            raise ValueError(f"posterior arrays disagree on their draw axis: {sorted(sizes)}")
+        if self.num_samples is None:
+            if not sizes:
+                raise ValueError(
+                    "a fit without posterior arrays must record num_samples, its actual draw count"
+                )
+        elif sizes and sizes != {int(self.num_samples)}:
+            raise ValueError(
+                f"num_samples={self.num_samples} disagrees with the posterior draw axis "
+                f"{sizes.pop()}"
+            )
+
+    @property
+    def draws(self) -> int:
+        """Number of posterior draws this fit replays."""
+        if self.num_samples is not None:
+            return int(self.num_samples)
+        if self.family is None:
+            return int(np.shape(self.parameters.susceptibility_intercept)[0])
+        return int(np.shape(tree_util.tree_leaves((dict(self.parameters), self.shared))[0])[0])
+
+    def timing(self, inputs: TimingInputs, *, draw, key=None) -> EventLaw:
+        """Timing law and susceptibility logits of posterior draw ``draw`` at ``inputs``.
+
+        Regressors narrower or wider than ``feature_widths`` are refused
+        before any law runs: a family that reads its regressors without a
+        per-column site would otherwise replay a different law in silence.
+        The default family evaluates ``default_timing`` on that draw's
+        ``StageParameters``. A custom family reruns ``family.model`` with the
+        draw's named values substituted at its sample and ``numpyro.param``
+        sites and the draw's resolved shared values passed through; a family
+        that reaches a site absent from the fitted mapping is refused rather
+        than silently sampled from its prior, and so is one that never
+        reaches a fitted site. ``key`` seeds that replay (every site is
+        substituted, so it only matters for families with other NumPyro
+        randomness).
+        """
+        widths = _feature_widths(inputs)
+        if widths != self.feature_widths:
+            raise ValueError(
+                f"inputs carry regressor widths {widths}, but this fit replays its law "
+                f"at feature widths {self.feature_widths}"
+            )
+
+        def select(leaf):
+            return jnp.asarray(leaf)[draw]
+
+        if self.family is None:
+            return default_timing(tree_util.tree_map(select, self.parameters), inputs)
+        parameters = tree_util.tree_map(select, dict(self.parameters))
+        shared = tree_util.tree_map(select, self.shared)
+        return _replay_family(self.family, parameters, shared, inputs, key)
 
 
 def _select_rows(
@@ -107,7 +303,7 @@ def _select_rows(
     if array is None:
         return None
     array = np.asarray(array)
-    required_ndim = {"features": 3, "cure_features": 2, "allowed": 2}[name]
+    required_ndim = {"features": 3, "susceptibility_features": 2, "allowed": 2}[name]
     if array.ndim != required_ndim:
         raise ValueError(f"{name} must have {required_ndim} dimensions")
     if name != "allowed" and not np.isfinite(array).all():
@@ -197,8 +393,13 @@ def _construct_exposure(
     calendar: np.ndarray,
     as_of: np.datetime64,
     entry_dates_given: bool,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
-    """Construct age, exposure, event-index, and conditional-entry masks."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
+    """Construct age, observed at-risk, administrative exposure, event-index and pre-entry masks.
+
+    ``at_risk`` stops at the observed event; ``exposure`` is the generative
+    law's window from entry through ``min(deadline, as_of)`` regardless of the
+    event, so a calendar extending past ``as_of`` never adds exposure.
+    """
     num_days = calendar.shape[0]
     calendar_start = calendar[0]
     stop_date = (
@@ -208,6 +409,7 @@ def _construct_exposure(
     )
     end_date = np.where(has_event, event, stop_date)
     end_index = (end_date - calendar_start).astype("timedelta64[D]").astype(np.int64)
+    stop_index = (stop_date - calendar_start).astype("timedelta64[D]").astype(np.int64)
     event_raw_index = (event - calendar_start).astype("timedelta64[D]").astype(np.int64)
     if np.any(has_event & ((event_raw_index < 0) | (event_raw_index >= num_days))):
         raise ValueError("calendar does not cover an observed event date")
@@ -217,11 +419,11 @@ def _construct_exposure(
     day_index = np.arange(num_days)
     risk_origin = np.maximum(origin, entry)
     risk_origin_idx = (risk_origin - calendar_start).astype("timedelta64[D]").astype(np.int64)
-    at_risk = (day_index[None, :] >= risk_origin_idx[:, None]) & (
-        day_index[None, :] <= end_index[:, None]
-    )
+    entered = day_index[None, :] >= risk_origin_idx[:, None]
+    at_risk = entered & (day_index[None, :] <= end_index[:, None])
+    exposure = entered & (day_index[None, :] <= stop_index[:, None])
     if not entry_dates_given:
-        return ages, at_risk, event_index, None
+        return ages, at_risk, exposure, event_index, None
 
     origin_idx = (origin - calendar_start).astype("timedelta64[D]").astype(np.int64)
     pre_entry_stop = entry - np.timedelta64(1, "D")
@@ -231,7 +433,7 @@ def _construct_exposure(
     pre_entry = (day_index[None, :] >= origin_idx[:, None]) & (
         day_index[None, :] <= pre_entry_stop_idx[:, None]
     )
-    return ages, at_risk, event_index, pre_entry
+    return ages, at_risk, exposure, event_index, pre_entry
 
 
 def _observation_allowed(allowed, row_mask, total_rows, num_rows, num_days):
@@ -254,7 +456,7 @@ def _observation_allowed(allowed, row_mask, total_rows, num_rows, num_days):
 
 def _normalize_observation_arrays(
     features: Any | None,
-    cure_features: Any | None,
+    susceptibility_features: Any | None,
     allowed: Any | None,
     row_mask: np.ndarray,
     total_rows: int,
@@ -270,10 +472,14 @@ def _normalize_observation_arrays(
             raise ValueError("features must be indexed against the exact calendar length")
         features_arr = features_full
 
-    cure_full = _select_rows(cure_features, row_mask, total_rows, name="cure_features")
-    cure_arr = np.zeros((num_rows, 0)) if cure_full is None else cure_full
+    susceptibility_full = _select_rows(
+        susceptibility_features, row_mask, total_rows, name="susceptibility_features"
+    )
+    susceptibility_arr = (
+        np.zeros((num_rows, 0)) if susceptibility_full is None else susceptibility_full
+    )
     allowed_arr = _observation_allowed(allowed, row_mask, total_rows, num_rows, num_days)
-    return features_arr, cure_arr, allowed_arr
+    return features_arr, susceptibility_arr, allowed_arr
 
 
 def make_event_observations(
@@ -286,7 +492,7 @@ def make_event_observations(
     deadline_days: int | None = None,
     entry_dates: Any | None = None,
     features: Any | None = None,
-    cure_features: Any | None = None,
+    susceptibility_features: Any | None = None,
     allowed: Any | None = None,
 ) -> StageObservations:
     """Build calendar-indexed :class:`StageObservations` for one generic event stage.
@@ -311,7 +517,7 @@ def make_event_observations(
     contributes no new information given that entry and is excluded
     entirely (not zeroed out).
 
-    ``features`` (``[frame rows, len(calendar), P]``), ``cure_features``
+    ``features`` (``[frame rows, len(calendar), P]``), ``susceptibility_features``
     (``[frame rows, Q]``), and ``allowed`` (``[len(calendar)]`` or
     ``[frame rows, len(calendar)]``) are indexed against the *full* frame
     row order, matching every row -- including rows this stage will
@@ -333,7 +539,7 @@ def make_event_observations(
         entry_dates=entry_dates,
     )
     calendar_arr = _validate_calendar(calendar, origin, as_of_day)
-    ages, at_risk, event_index, pre_entry = _construct_exposure(
+    ages, at_risk, exposure, event_index, pre_entry = _construct_exposure(
         origin,
         event,
         entry,
@@ -343,17 +549,18 @@ def make_event_observations(
         as_of_day,
         entry_dates is not None,
     )
-    features_arr, cure_arr, allowed_arr = _normalize_observation_arrays(
-        features, cure_features, allowed, row_mask, total_rows, calendar_arr.shape[0]
+    features_arr, susceptibility_arr, allowed_arr = _normalize_observation_arrays(
+        features, susceptibility_features, allowed, row_mask, total_rows, calendar_arr.shape[0]
     )
     return StageObservations(
         ages=jnp.asarray(ages),
         features=jnp.asarray(features_arr, dtype=jnp.float32),
-        cure_features=jnp.asarray(cure_arr, dtype=jnp.float32),
+        susceptibility_features=jnp.asarray(susceptibility_arr, dtype=jnp.float32),
         at_risk=jnp.asarray(at_risk),
         allowed=jnp.asarray(allowed_arr),
         event_index=jnp.asarray(event_index),
         pre_entry=None if pre_entry is None else jnp.asarray(pre_entry),
+        exposure=jnp.asarray(exposure),
     )
 
 
@@ -363,7 +570,7 @@ def make_observations(
     calendar: Any,
     *,
     features: Any | None = None,
-    cure_features: Any | None = None,
+    susceptibility_features: Any | None = None,
     allowed: Any | None = None,
 ) -> StageObservations:
     """Build calendar-indexed :class:`StageObservations` for one stage.
@@ -376,13 +583,13 @@ def make_observations(
     ``"initiation"`` uses every row of ``history.frame`` (all historical
     sales); ``"receipt"`` uses only rows with an observed initiation date,
     and resets the clock origin to that initiation date. ``features``
-    (``[frame rows, len(calendar), P]``), ``cure_features``
+    (``[frame rows, len(calendar), P]``), ``susceptibility_features``
     (``[frame rows, Q]``), and ``allowed`` (``[len(calendar)]`` or
     ``[frame rows, len(calendar)]``) are indexed against the *full*
     ``history.frame`` row order; for ``"receipt"`` the matching row subset
-    is selected automatically so feature/cure/mask rows stay aligned with
+    is selected automatically so feature/susceptibility/mask rows stay aligned with
     the units actually observed in that stage. Omitted arrays default to
-    zero-width features/cure-features or an all-allowed mask. No
+    zero-width features/susceptibility-features or an all-allowed mask. No
     conditional-entry snapshot semantics here (``entry_dates`` is always
     ``None``); existing public behavior is maintained except that
     ``policy_days=None`` now means an unbounded initiation deadline.
@@ -405,58 +612,167 @@ def make_observations(
         calendar=calendar,
         deadline_days=deadline_days,
         features=features,
-        cure_features=cure_features,
+        susceptibility_features=susceptibility_features,
         allowed=allowed,
     )
 
 
-def stage_log_likelihood(parameters: StageParameters, observations: StageObservations) -> Any:
-    """Per-unit mixture-cure log likelihood, including exact hard-zero days.
+def timing_inputs(observations: StageObservations) -> TimingInputs:
+    """Time-major ``TimingInputs`` (``[T, N]`` ages, ``[T, N, P]`` features) of a stage.
 
-    Work from logits, never log rounded sigmoid probabilities: large finite
-    logits must retain finite likelihoods and gradients under float32 too.
-    Censoring includes the last exposed day; event survival excludes its day.
-
-    When ``observations.pre_entry`` is not ``None``, this is a
-    conditional-entry likelihood: the cure logit used for the post-entry
-    event/censor term is first shifted by the cumulative log-survival over
-    the known event-free days *before* entry, i.e.
-    ``sigmoid(cure_intercept + z @ beta + logS_pre)`` -- exactly
-    ``conditional_susceptibility`` in logit space (see ``survival.py``).
-    This avoids ever forming and subtracting two large log-marginal
-    survivals. ``pre_entry is None`` (the default) makes ``logS_pre`` zero
-    everywhere, reducing exactly to the ordinary full-origin likelihood.
+    This is everything a timing family may see: elapsed ages and regressors,
+    never the observed outcomes or administrative masks.
     """
-    ages = observations.ages
-    at_risk = observations.at_risk
-    event_index = observations.event_index
-    logits = _hazard_logits(parameters, ages, observations.features)
-    open_day = (ages >= 0) & observations.allowed
-    log_hazard = jnp.where(open_day, log_sigmoid(logits), -jnp.inf)
-    log_survival_day = jnp.where(open_day, log_sigmoid(-logits), 0.0)
-    cure_logits = _cure_logits(parameters, observations.cure_features)
-    if observations.pre_entry is None:
-        log_survival_pre_entry = 0.0
-    else:
-        log_survival_pre_entry = jnp.sum(
-            jnp.where(observations.pre_entry, log_survival_day, 0.0), axis=-1
-        )
-    conditional_cure_logits = cure_logits + log_survival_pre_entry
-    log_pi, log_not_pi = log_sigmoid(conditional_cure_logits), log_sigmoid(-conditional_cure_logits)
-
-    num_days = ages.shape[-1]
-    is_event = event_index >= 0
-    event_stop = jnp.where(is_event, event_index, num_days)
-    survival_mask = at_risk & (jnp.arange(num_days)[None, :] < event_stop[:, None])
-    log_survival = jnp.sum(jnp.where(survival_mask, log_survival_day, 0.0), axis=-1)
-    safe_index = jnp.where(is_event, event_index, 0)
-    event_log_hazard = jnp.take_along_axis(log_hazard, safe_index[:, None], axis=-1)[:, 0]
-    event_is_exposed = jnp.take_along_axis(at_risk, safe_index[:, None], axis=-1)[:, 0]
-    event_log_likelihood = jnp.where(
-        event_is_exposed, log_pi + event_log_hazard + log_survival, -jnp.inf
+    features = jnp.asarray(observations.features)
+    return TimingInputs(
+        ages=jnp.asarray(observations.ages).T,
+        features=jnp.moveaxis(features, 0, 1),
+        susceptibility_features=jnp.asarray(observations.susceptibility_features),
     )
-    censored_log_likelihood = jnp.logaddexp(log_not_pi, log_pi + log_survival)
-    return jnp.where(is_event, event_log_likelihood, censored_log_likelihood)
+
+
+def _observation_masks(observations: StageObservations):
+    """Time-major closure, administrative exposure and pre-entry masks of a stage.
+
+    Exposure is inferred for hand-built observations without one (see
+    :class:`StageObservations`); negative ages are excluded from exposure and
+    pre-entry because the shared kernel cannot see ages.
+    """
+    ages = jnp.asarray(observations.ages)
+    present = ages >= 0
+    allowed = jnp.asarray(observations.allowed, dtype=bool)
+    if observations.exposure is None:
+        event_index = jnp.asarray(observations.event_index)
+        after_event = (event_index >= 0)[:, None] & (
+            jnp.arange(ages.shape[-1])[None, :] > event_index[:, None]
+        )
+        exposure = jnp.asarray(observations.at_risk, dtype=bool) | after_event
+    else:
+        exposure = jnp.asarray(observations.exposure, dtype=bool)
+    exposure = exposure & present
+    if observations.pre_entry is None:
+        pre_entry = None
+    else:
+        pre_entry = (jnp.asarray(observations.pre_entry, dtype=bool) & present).T
+    return allowed.T, exposure.T, pre_entry
+
+
+def observation_kernel(
+    timing: TimingLaw, susceptibility_logits: Any, observations: StageObservations
+) -> SurvivalKernel:
+    """Mask a family's timing law by the stage's exposure, closures and pre-entry survival.
+
+    The result is the one law used for the observed likelihood, the native
+    observation site and in-sample prediction: ``kernel_unit_log_prob`` of it
+    at ``observations.event_index`` is each unit's observed log probability.
+    """
+    allowed, exposure, pre_entry = _observation_masks(observations)
+    return survival_kernel(
+        timing, susceptibility_logits, allowed=allowed, exposure=exposure, pre_entry=pre_entry
+    )
+
+
+def _trajectories(observations: StageObservations) -> tuple[Any, Any]:
+    """Integer ``[T, N]`` trajectories and impossible-unit mask, never invalid censoring."""
+    event_index = jnp.asarray(observations.event_index)
+    units, days = jnp.asarray(observations.ages).shape
+    if event_index.shape != (units,) or not jnp.issubdtype(event_index.dtype, jnp.integer):
+        raise ValueError("event_index must be an integer vector with one index per unit")
+    valid = (event_index >= -1) & (event_index < days)
+    if not isinstance(valid, jax.core.Tracer) and not np.asarray(valid).all():
+        raise ValueError("event_index must be -1 or an index within the observed calendar")
+    data = (jnp.arange(days)[:, None] == event_index[None, :]).astype(jnp.int32)
+    return data, ~valid
+
+
+def _observe(
+    kernel: SurvivalKernel, inputs: TimingInputs, data: Any | None, *, massless=None
+) -> None:
+    """Register the stage's trajectories at the native observation site.
+
+    ``data`` is the observed ``[T, N]`` trajectory grid, or ``None`` to draw
+    the in-sample posterior predictive at ``"obs"``. The compact kernel route
+    scores the observation from log hazards without forming date masses; the
+    predictor passed to ``predict`` is the kernel's own log hazard.
+    """
+    horizon = Horizon.from_data(inputs.ages, data)
+    predict(
+        horizon,
+        lambda log_hazard: EventTime(
+            kernel=kernel._replace(log_hazard=log_hazard), massless=massless
+        ),
+        kernel.log_hazard,
+    )
+
+
+def _validated_law(law: Any, inputs: TimingInputs) -> EventLaw:
+    """Check a family's :class:`EventLaw` and broadcast it to the inputs."""
+    if not isinstance(law, EventLaw) or not isinstance(law.timing, TimingLaw):
+        raise TypeError("family.model must return an EventLaw(timing, susceptibility_logits)")
+    timing, logits = law
+    cells = tuple(np.shape(inputs.ages))
+    units = cells[:-2] + cells[-1:]
+    values = (
+        ("log_hazard", jnp.asarray(timing.log_hazard), cells),
+        ("log_survival_step", jnp.asarray(timing.log_survival_step), cells),
+        ("susceptibility_logits", jnp.asarray(logits), units),
+    )
+    resolved = []
+    for name, value, shape in values:
+        try:
+            resolved.append(jnp.broadcast_to(value, shape))
+        except ValueError:
+            raise ValueError(
+                f"family {name} has shape {value.shape}, which does not "
+                f"broadcast to the {shape} inputs"
+            ) from None
+    return EventLaw(TimingLaw(resolved[0], resolved[1]), resolved[2])
+
+
+def _replay_family(family, parameters, shared, inputs, key) -> EventLaw:
+    """Run a family with one draw's named values substituted at its sites.
+
+    The replay must use every fitted value and nothing else: a site the
+    family reaches without a fitted value would be a fresh prior draw, and a
+    fitted site the family never reaches (regressor coefficients skipped by
+    zero-width inputs, say) would silently change the fitted law.
+    """
+    key = random.PRNGKey(0) if key is None else key
+    model = handlers.substitute(handlers.seed(family.model, key), data=dict(parameters))
+    with handlers.trace() as trace:
+        law = model(inputs, shared)
+    missing = sorted(
+        name
+        for name, site in trace.items()
+        if site["type"] in ("sample", "param")
+        and not site.get("is_observed", False)
+        and name not in parameters
+    )
+    if missing:
+        raise ValueError(f"family reaches sites absent from the fitted posterior: {missing}")
+    unreached = sorted(name for name in parameters if name not in trace)
+    if unreached:
+        raise ValueError(f"family never reaches fitted posterior sites: {unreached}")
+    return _validated_law(law, inputs)
+
+
+def stage_log_likelihood(parameters: StageParameters, observations: StageObservations) -> Any:
+    """Per-unit mixture-cure log likelihood of the default family, ``[N]``.
+
+    One posterior draw of ``StageParameters`` is turned into its timing law
+    and scored through the shared kernel: an event on date ``d`` has mass
+    ``pi * S_{<d} * h_d`` and censoring has the residual
+    ``(1 - pi) + pi * S_{<T}``, with hazard exactly zero on closed, unexposed
+    or negative-age dates and susceptibility conditioned on any known
+    pre-entry survival (``logit(pi) + log S_pre``). Large finite logits keep
+    finite values and gradients; an impossible outcome (an event on a closed
+    or unexposed date) scores ``-inf``. The native observation site of
+    ``stage_model`` sums exactly these per-unit scores.
+    """
+    inputs = timing_inputs(observations)
+    timing, logits = default_timing(parameters, inputs)
+    kernel = observation_kernel(timing, logits, observations)
+    return kernel_unit_log_prob(kernel, jnp.asarray(observations.event_index))
 
 
 def sample_stage_parameters(
@@ -479,17 +795,17 @@ def sample_stage_parameters(
       recorded as ``age_logits``.
     - ``beta ~ Normal(0, 1)^P``: linear effects of the time-varying hazard
       regressors.
-    - ``cure_intercept ~ Normal(0, 2)``: logit susceptibility intercept.
-    - ``cure_beta ~ Normal(0, 1)^Q``: linear effects of the static
+    - ``susceptibility_intercept ~ Normal(0, 2)``: logit susceptibility intercept.
+    - ``susceptibility_beta ~ Normal(0, 1)^Q``: linear effects of the static
       susceptibility regressors.
 
     Extracted from ``stage_model`` so a custom NumPyro prior callback (e.g.
-    ``CureProcess.parameter_model``) can sample or otherwise construct its
+    ``EventProcess.parameter_model``) can sample or otherwise construct its
     own :class:`StageParameters` under a caller-controlled scope while
     reusing these exact sample sites and priors when no override is given.
     """
     num_features = observations.features.shape[-1]
-    num_cure_features = observations.cure_features.shape[-1]
+    num_susceptibility_features = observations.susceptibility_features.shape[-1]
 
     age_scale = numpyro.sample("age_scale", dist.HalfNormal(1.0))
     age_init = numpyro.sample("age_init", dist.Normal(0.0, 2.0))
@@ -500,32 +816,171 @@ def sample_stage_parameters(
     age_logits = numpyro.deterministic("age_logits", age_logits)
 
     beta = numpyro.sample("beta", dist.Normal(0.0, 1.0).expand([num_features]).to_event(1))
-    cure_intercept = numpyro.sample("cure_intercept", dist.Normal(0.0, 2.0))
-    cure_beta = numpyro.sample(
-        "cure_beta", dist.Normal(0.0, 1.0).expand([num_cure_features]).to_event(1)
+    susceptibility_intercept = numpyro.sample("susceptibility_intercept", dist.Normal(0.0, 2.0))
+    susceptibility_beta = numpyro.sample(
+        "susceptibility_beta",
+        dist.Normal(0.0, 1.0).expand([num_susceptibility_features]).to_event(1),
     )
 
     return StageParameters(
-        age_logits=age_logits, beta=beta, cure_intercept=cure_intercept, cure_beta=cure_beta
+        age_logits=age_logits,
+        beta=beta,
+        susceptibility_intercept=susceptibility_intercept,
+        susceptibility_beta=susceptibility_beta,
     )
 
 
-def stage_model(observations: StageObservations, *, age_bins: int = 30) -> None:
+def stage_model(
+    observations: StageObservations, *, age_bins: int = 30, family: Family | None = None
+) -> None:
     """NumPyro model for one mixture-cure stage.
 
-    Delegates prior sampling to :func:`sample_stage_parameters` and adds the
-    per-unit ``stage_log_likelihood`` to the log joint density via
-    ``numpyro.factor``.
+    Without ``family`` the prior of :func:`sample_stage_parameters`
+    feeds the default timing adapter; with one, ``family.model`` is called as
+    ``family.model(timing_inputs(observations), None)`` and samples its
+    own named sites. Either law is masked by the stage's exposure, closures
+    and pre-entry survival and observed at the native ``"obs"`` site as an
+    integer ``[T, N]`` trajectory grid through ``Horizon``/``predict``.
     """
-    parameters = sample_stage_parameters(observations, age_bins=age_bins)
-    log_likelihood = stage_log_likelihood(parameters, observations)
-    numpyro.factor("stage_log_likelihood", log_likelihood)
+    inputs = timing_inputs(observations)
+    if family is None:
+        parameters = sample_stage_parameters(observations, age_bins=age_bins)
+        timing, logits = default_timing(parameters, inputs)
+    else:
+        timing, logits = _validated_law(family.model(inputs, None), inputs)
+    data, impossible = _trajectories(observations)
+    _observe(observation_kernel(timing, logits, observations), inputs, data, massless=impossible)
+
+
+def _run_svi(
+    program, trace, latent, parameter_names, *, keys, num_steps, num_samples, learning_rate
+):
+    """Optimize real model parameters and draw the nonempty guide's named sites."""
+
+    def empty_guide():
+        for name, site in trace.items():
+            if site["type"] == "sample" and not site["is_observed"]:
+                numpyro.sample(name, site["fn"])
+
+    guide = AutoNormal(program) if latent else empty_guide
+    svi = SVI(program, guide, numpyro.optim.Adam(learning_rate), Trace_ELBO())
+    result = svi.run(keys[0], num_steps, progress_bar=False)
+    losses = result.losses
+    if not np.isfinite(losses).all():
+        raise FloatingPointError("nonfinite SVI losses; inspect covariate scaling and priors")
+    posterior = (
+        Predictive(
+            guide,
+            params=result.params,
+            num_samples=num_samples,
+            return_sites=[
+                name
+                for name, site in trace.items()
+                if site["type"] == "sample" and not site["is_observed"]
+            ],
+            parallel=True,
+        )(keys[1])
+        if latent
+        else {}
+    )
+    params = {name: result.params[name] for name in parameter_names}
+    return posterior, params, losses
+
+
+def _validated_fit_trace(program, key):
+    """Identify real inference sites and refuse data a latent-free model cannot score.
+
+    Without a latent site the law is fully determined (fixed values, or
+    ``numpyro.param`` sites at their initial values), so one trace scores the
+    observations exactly. With latent sites one prior draw says nothing about
+    feasibility -- a latent support boundary can exclude the data at one draw
+    and admit it at another -- so feasibility is left to the guide's own
+    initialization, which searches for finite-density parameters and raises
+    when none exist.
+    """
+    trace = handlers.trace(handlers.seed(program, key)).get_trace()
+    sites = [site for site in trace.values() if site["type"] == "sample"]
+    latent = any(not site["is_observed"] and np.size(site["value"]) > 0 for site in sites)
+    if not latent and any(
+        not np.isfinite(site["fn"].log_prob(site["value"])).all() for site in sites
+    ):
+        raise ValueError(
+            "model gives nonfinite density to the observations; check closures and priors"
+        )
+    parameter_names = [name for name, site in trace.items() if site["type"] == "param"]
+    return trace, latent, parameter_names
+
+
+def _fit_program(program, resolver, return_sites, *, num_steps, num_samples, seed, learning_rate):
+    """Fit a zero-argument NumPyro program with SVI and resolve named draws.
+
+    Returns ``(posterior, params, losses, resolved)``: guide draws of every
+    latent sample site, optimized ``numpyro.param`` values of the program
+    itself (never the guide's), the loss trace, and ``return_sites`` of
+    ``resolver`` evaluated under those draws. A program with no latent site
+    and no parameter has nothing to fit and yields an empty trace.
+    """
+    keys = random.split(random.PRNGKey(seed), 4)
+    trace, latent, parameter_names = _validated_fit_trace(program, keys[0])
+    params = {}
+    if latent or parameter_names:
+        posterior, params, losses = _run_svi(
+            program,
+            trace,
+            latent,
+            parameter_names,
+            keys=keys[1:3],
+            num_steps=num_steps,
+            num_samples=num_samples,
+            learning_rate=learning_rate,
+        )
+    else:
+        # A fully specified model has no parameters to optimize; still simulate its noise.
+        posterior, losses = {}, np.empty(0)
+    # Empty latent vectors are real named sites, even when there is no guide.
+    # Preserve their draw axis so family replay cannot mistake them for missing priors.
+    for name, site in trace.items():
+        if site["type"] == "sample" and not site["is_observed"] and np.size(site["value"]) == 0:
+            value = jnp.asarray(site["value"])
+            posterior.setdefault(name, jnp.broadcast_to(value, (num_samples,) + value.shape))
+    resolved = {}
+    if return_sites:
+        resolved = Predictive(
+            resolver,
+            posterior_samples=posterior or None,
+            params=params,
+            num_samples=num_samples,
+            return_sites=return_sites,
+            condition_deterministic=True,
+            parallel=True,
+        )(keys[3])
+    if any(
+        not np.isfinite(value).all()
+        for value in tree_util.tree_leaves((posterior, params, resolved))
+    ):
+        raise FloatingPointError("nonfinite posterior parameter draws")
+    return dict(posterior), params, losses, resolved
+
+
+def _named_posterior(posterior, params, *, prefix, num_samples):
+    """A family's local sample-site draws and optimized values, scope stripped, per draw."""
+    local = {
+        name[len(prefix) :]: jnp.asarray(value)
+        for name, value in posterior.items()
+        if name.startswith(prefix)
+    }
+    for name, value in params.items():
+        if name.startswith(prefix):
+            value = jnp.asarray(value)
+            local[name[len(prefix) :]] = jnp.broadcast_to(value, (num_samples,) + value.shape)
+    return local
 
 
 def fit_stage(
     observations: StageObservations,
     *,
     age_bins: int = 30,
+    family: Family | None = None,
     num_steps: int = 500,
     num_samples: int = 100,
     seed: int = 0,
@@ -535,12 +990,19 @@ def fit_stage(
 
     Ordinary NumPyro inference, not a custom engine: ``SVI`` with an
     ``AutoNormal`` mean-field guide and the ``Adam`` optimizer minimizes the
-    ``Trace_ELBO``. Posterior draws (including the deterministic
-    ``age_logits`` site) are then produced with ``Predictive`` conditioned
-    on the fitted guide, giving every ``StageParameters`` field a leading
-    posterior-draw axis of size ``num_samples``. Advanced users can call
-    ``stage_model`` directly with any NumPyro inference algorithm (e.g.
-    MCMC) instead of this convenience.
+    ``Trace_ELBO``; ``num_samples`` guide draws are then resolved through
+    the model. For the default family the result's ``parameters`` is a
+    ``StageParameters`` (including the deterministic ``age_logits``) with a
+    leading draw axis. With ``family`` its own sample sites and optimized
+    ``numpyro.param`` values form the named posterior mapping instead, and
+    the family itself is kept for replay. Either result records the
+    observations' regressor widths as its ``feature_widths``. A family
+    with nothing to fit still records ``num_samples`` draws. Observations no
+    parameter value can score are refused: the guide's initialization raises
+    when it finds no finite-density parameters, and a latent-free model is
+    scored once before anything runs. Advanced users
+    can call ``stage_model`` directly with any NumPyro inference algorithm
+    (e.g. MCMC) instead of this convenience.
     """
     for name, value in (
         ("age_bins", age_bins),
@@ -555,32 +1017,54 @@ def fit_stage(
         raise ValueError("fitting requires at least one observed or censored item")
     if (
         not np.isfinite(observations.features).all()
-        or not np.isfinite(observations.cure_features).all()
+        or not np.isfinite(observations.susceptibility_features).all()
     ):
         raise ValueError("fitting requires finite feature values")
-    guide = AutoNormal(stage_model)
-    optimizer = numpyro.optim.Adam(step_size=learning_rate)
-    svi = SVI(stage_model, guide, optimizer, loss=Trace_ELBO())
-    svi_key, predictive_key = random.split(random.PRNGKey(seed))
-    result = svi.run(svi_key, num_steps, observations, age_bins=age_bins, progress_bar=False)
-    if not np.isfinite(result.losses).all():
-        raise FloatingPointError("nonfinite SVI losses; inspect covariate scaling and model priors")
-
-    predictive = Predictive(
-        stage_model,
-        guide=guide,
-        params=result.params,
+    if family is not None:
+        validate_family(family)
+    program = partial(stage_model, observations, age_bins=age_bins, family=family)
+    resolver = partial(sample_stage_parameters, observations, age_bins=age_bins)
+    sites = list(StageParameters._fields) if family is None else []
+    posterior, params, losses, resolved = _fit_program(
+        program,
+        resolver,
+        sites,
+        num_steps=num_steps,
         num_samples=num_samples,
-        return_sites=["age_logits", "beta", "cure_intercept", "cure_beta"],
-        condition_deterministic=True,
+        seed=seed,
+        learning_rate=learning_rate,
     )
-    draws = predictive(predictive_key, observations, age_bins=age_bins)
-    if any(not np.isfinite(value).all() for value in draws.values()):
-        raise FloatingPointError("nonfinite posterior draws")
-    parameters = StageParameters(
-        age_logits=draws["age_logits"],
-        beta=draws["beta"],
-        cure_intercept=draws["cure_intercept"],
-        cure_beta=draws["cure_beta"],
+    widths = _feature_widths(observations)
+    if family is None:
+        parameters = StageParameters(*[resolved[name] for name in StageParameters._fields])
+        return StageFit(parameters, losses, num_samples=num_samples, feature_widths=widths)
+    return StageFit(
+        _named_posterior(posterior, params, prefix="", num_samples=num_samples),
+        losses,
+        family=family,
+        num_samples=num_samples,
+        feature_widths=widths,
     )
-    return StageFit(parameters=parameters, losses=result.losses)
+
+
+def predict_stage(fit: StageFit, observations: StageObservations, *, seed: int = 0) -> Any:
+    """In-sample posterior predictive trajectories ``[draws, T, N]`` of a fitted stage.
+
+    Each posterior draw replays its timing law on the observations' ages and
+    regressors, applies the same administrative exposure, closures and
+    pre-entry conditioning as fitting, and samples the native observation
+    site with no data attached. The recorded outcomes play no part: a unit
+    whose event was observed can fire on any exposed date, or not at all.
+    Draws are integer time-major grids with at most one event per unit.
+    """
+    inputs = timing_inputs(observations)
+
+    def model(draw):
+        timing, logits = fit.timing(inputs, draw=draw)
+        _observe(observation_kernel(timing, logits, observations), inputs, None)
+
+    def sample(draw, key):
+        return handlers.trace(handlers.seed(model, key)).get_trace(draw)["obs"]["value"]
+
+    keys = random.split(random.PRNGKey(seed), fit.draws)
+    return jax.vmap(sample)(jnp.arange(fit.draws), keys)

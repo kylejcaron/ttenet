@@ -13,29 +13,36 @@ import numpyro
 import pandas as pd
 from jax import random, tree_util
 from numpyro import handlers
-from numpyro.infer import SVI, Predictive, Trace_ELBO
-from numpyro.infer.autoguide import AutoNormal
+from numpyro.infer import Predictive
 
 from .dataset import RetailData
 from .dates import date_grid, to_day
+from .event_times import default_timing
 from .forecast import EventForecast, forecast_events
 from .integration import SalesForecast
 from .models import (
     StageFit,
+    _feature_widths,
+    _fit_program,
+    _named_posterior,
+    _observe,
+    _trajectories,
+    _validated_law,
     make_event_observations,
+    observation_kernel,
     sample_stage_parameters,
-    stage_log_likelihood,
+    timing_inputs,
 )
 from .processes import CountNode, EventNode, _positive_integer
 from .survival import StageParameters
 
-_FEATURE_KEYS = frozenset({"features", "cure_features", "allowed"})
+_FEATURE_KEYS = frozenset({"features", "susceptibility_features", "allowed"})
 
 
 @dataclass(frozen=True)
 class _Features:
     features: np.ndarray
-    cure_features: np.ndarray
+    susceptibility_features: np.ndarray
     allowed: np.ndarray
 
     def kwargs(self):
@@ -53,7 +60,9 @@ def _covariate_mapping(value, names):
     return dict(value)
 
 
-def _resolve_features(process, provider, frame, calendar, *, widths=None, default_cure=None):
+def _resolve_features(
+    process, provider, frame, calendar, *, widths=None, default_susceptibility=None
+):
     value = (
         {} if provider is None else provider(frame, calendar) if callable(provider) else provider
     )
@@ -63,17 +72,20 @@ def _resolve_features(process, provider, frame, calendar, *, widths=None, defaul
         raise ValueError(f"unknown event covariate keys: {sorted(set(value) - _FEATURE_KEYS)}")
     n, t = len(frame), len(calendar)
     features = np.asarray(value.get("features", np.empty((n, t, 0))), dtype=np.float64)
-    cure = np.asarray(
-        value.get("cure_features", np.empty((n, 0)) if default_cure is None else default_cure),
+    susceptibility = np.asarray(
+        value.get(
+            "susceptibility_features",
+            np.empty((n, 0)) if default_susceptibility is None else default_susceptibility,
+        ),
         dtype=np.float64,
     )
     if features.ndim != 3 or features.shape[:2] != (n, t):
         raise ValueError(f"features must have shape ({n}, {t}, P)")
-    if cure.ndim != 2 or cure.shape[0] != n:
-        raise ValueError(f"cure_features must have shape ({n}, Q)")
-    if not np.isfinite(features).all() or not np.isfinite(cure).all():
+    if susceptibility.ndim != 2 or susceptibility.shape[0] != n:
+        raise ValueError(f"susceptibility_features must have shape ({n}, Q)")
+    if not np.isfinite(features).all() or not np.isfinite(susceptibility).all():
         raise ValueError("event covariates must be finite over the requested calendar")
-    if widths is not None and (features.shape[-1], cure.shape[-1]) != widths:
+    if widths is not None and (features.shape[-1], susceptibility.shape[-1]) != widths:
         raise ValueError(
             "future covariates must preserve fitted feature widths; missing values are not imputed"
         )
@@ -84,7 +96,7 @@ def _resolve_features(process, provider, frame, calendar, *, widths=None, defaul
         raise ValueError(f"allowed must have shape ({t},) or ({n}, {t})")
     weekdays = pd.DatetimeIndex(calendar).dayofweek.to_numpy()
     allowed = np.broadcast_to(mask, (n, t)) & np.isin(weekdays, process.allowed_weekdays)[None, :]
-    return _Features(features.copy(), cure.copy(), allowed)
+    return _Features(features.copy(), susceptibility.copy(), allowed)
 
 
 def _count_covariates(value, duration):
@@ -97,88 +109,61 @@ def _count_covariates(value, duration):
 
 
 def _parameter_sites(nodes):
-    return [f"{node.name}/__resolved_{name}" for node in nodes for name in StageParameters._fields]
+    return [
+        f"{node.name}/__resolved_{name}"
+        for node in nodes
+        if node.process.family is None
+        for name in StageParameters._fields
+    ]
+
+
+_SHARED_SITE = "shared/__resolved_"
+
+
+def _shared_sites(count):
+    return [f"{_SHARED_SITE}{index}" for index in range(count)]
+
+
+def _record_shared(shared):
+    """Record every leaf of the shared model's returned mapping as a resolved site."""
+    for index, leaf in enumerate(tree_util.tree_leaves(shared)):
+        numpyro.deterministic(f"{_SHARED_SITE}{index}", jnp.asarray(leaf))
+
+
+def _default_parameters(node, observations, shared):
+    """Sample or construct the default family's single-draw parameters and record them."""
+    if node.process.parameter_model is None:
+        parameters = sample_stage_parameters(observations, age_bins=node.process.age_bins)
+    else:
+        parameters = node.process.parameter_model(observations, shared)
+    if not isinstance(parameters, StageParameters):
+        raise TypeError("parameter_model must return StageParameters")
+    shapes = (
+        (node.process.age_bins,),
+        (observations.features.shape[-1],),
+        (),
+        (observations.susceptibility_features.shape[-1],),
+    )
+    for name, value, shape in zip(StageParameters._fields, parameters, shapes, strict=True):
+        if np.shape(value) != shape:
+            raise ValueError(f"{node.name}.{name} must have single-draw shape {shape}")
+        numpyro.deterministic(f"__resolved_{name}", jnp.asarray(value))
+    return parameters
 
 
 def _event_model(node, observations, shared, *, likelihood=True):
+    """One node's timing law under its scope, observed at the native site when fitting."""
+    inputs = timing_inputs(observations)
     with handlers.scope(prefix=node.name):
-        if node.process.parameter_model is None:
-            parameters = sample_stage_parameters(observations, age_bins=node.process.age_bins)
+        if node.process.family is None:
+            parameters = _default_parameters(node, observations, shared)
+            timing, logits = default_timing(parameters, inputs)
         else:
-            parameters = node.process.parameter_model(observations, shared)
-        if not isinstance(parameters, StageParameters):
-            raise TypeError("parameter_model must return StageParameters")
-        shapes = (
-            (node.process.age_bins,),
-            (observations.features.shape[-1],),
-            (),
-            (observations.cure_features.shape[-1],),
-        )
-        for name, value, shape in zip(StageParameters._fields, parameters, shapes, strict=True):
-            if np.shape(value) != shape:
-                raise ValueError(f"{node.name}.{name} must have single-draw shape {shape}")
-            numpyro.deterministic(f"__resolved_{name}", jnp.asarray(value))
+            timing, logits = _validated_law(node.process.family.model(inputs, shared), inputs)
         if likelihood:
-            numpyro.factor("stage_log_likelihood", stage_log_likelihood(parameters, observations))
-
-
-def _fit_program(program, resolver, return_sites, *, num_steps, num_samples, seed, learning_rate):
-    keys = random.split(random.PRNGKey(seed), 4)
-    trace = handlers.trace(handlers.seed(program, keys[0])).get_trace()
-    latent = False
-    for site in trace.values():
-        if site["type"] != "sample":
-            continue
-        if not np.isfinite(site["fn"].log_prob(site["value"])).all():
-            raise ValueError(
-                "model gives nonfinite density to the observations; check closures and priors"
-            )
-        latent |= not site["is_observed"] and np.size(site["value"]) > 0
-    parameter_names = [name for name, site in trace.items() if site["type"] == "param"]
-    params = {}
-    if latent or parameter_names:
-        guide = AutoNormal(program) if latent else lambda: None
-        svi = SVI(program, guide, numpyro.optim.Adam(learning_rate), Trace_ELBO())
-        result = svi.run(keys[1], num_steps, progress_bar=False)
-        losses = result.losses
-        if not np.isfinite(losses).all():
-            raise FloatingPointError("nonfinite SVI losses; inspect covariate scaling and priors")
-        posterior = (
-            Predictive(
-                guide,
-                params=result.params,
-                num_samples=num_samples,
-                return_sites=[
-                    name
-                    for name, site in trace.items()
-                    if site["type"] == "sample" and not site["is_observed"]
-                ],
-                parallel=True,
-            )(keys[2])
-            if latent
-            else {}
-        )
-        params = {name: result.params[name] for name in parameter_names}
-    else:
-        # A fully specified model has no parameters to optimize; still simulate its noise.
-        posterior, losses = {}, np.empty(0)
-    resolved = {}
-    if return_sites:
-        resolved = Predictive(
-            resolver,
-            posterior_samples=posterior or None,
-            params=params,
-            num_samples=num_samples,
-            return_sites=return_sites,
-            condition_deterministic=True,
-            parallel=True,
-        )(keys[3])
-    if any(
-        not np.isfinite(value).all()
-        for value in tree_util.tree_leaves((posterior, params, resolved))
-    ):
-        raise FloatingPointError("nonfinite posterior parameter draws")
-    return dict(posterior), params, losses, resolved
+            kernel = observation_kernel(timing, logits, observations)
+            data, impossible = _trajectories(observations)
+            _observe(kernel, inputs, data, massless=impossible)
 
 
 @dataclass(frozen=True)
@@ -191,15 +176,42 @@ class _Prepared:
     observations: dict[str, Any]
 
 
+def _resolved_stage_fit(
+    node, observations, posterior, params, losses, resolved, shared, num_samples
+):
+    """Keep default parameters or the custom family's own named posterior and object.
+
+    Either fit records the regressor widths of the node's observations.
+    """
+    widths = _feature_widths(observations)
+    if node.process.family is None:
+        parameters = StageParameters(
+            *[resolved[f"{node.name}/__resolved_{name}"] for name in StageParameters._fields]
+        )
+        return StageFit(parameters, losses, num_samples=num_samples, feature_widths=widths)
+    return StageFit(
+        _named_posterior(posterior, params, prefix=f"{node.name}/", num_samples=num_samples),
+        losses,
+        family=node.process.family,
+        shared=shared,
+        num_samples=num_samples,
+        feature_widths=widths,
+    )
+
+
 @dataclass(frozen=True)
 class ForecastNetwork:
-    """One count root and an acyclic graph of single-source cure-capable events.
+    """One count root and an acyclic graph of single-source susceptibility-capable events.
 
     Joint mode is one NumPyro program/posterior. Independent priors and fully
     observed parents still factorize. For cross-stage learning, ``shared_model()``
     samples shared latent values; a count model receives ``shared=values`` and
-    each custom event ``parameter_model(observations, values)`` receives them too.
-    Shared effects require joint mode. Branches are distinct, not competing events.
+    each custom event ``parameter_model(observations, values)`` or timing family
+    ``family.model(inputs, values)`` receives them too. Every event node
+    observes its units at one native event-time site under its own scope; a
+    custom family's fit keeps its named posterior and the resolved shared
+    values per draw. Shared effects require joint mode. Branches are distinct,
+    not competing events.
     """
 
     nodes: tuple[CountNode | EventNode, ...]
@@ -315,8 +327,15 @@ class ForecastNetwork:
         sales_covariates = _count_covariates(values.get(self.root.name), len(data.calendar))
         return _Prepared(data, columns, values, sales_covariates, features, observations)
 
+    def _shared_structure(self):
+        """Pytree structure of the shared model's returned mapping, from one prior run."""
+        if self.shared_model is None:
+            return None
+        return tree_util.tree_structure(handlers.seed(self._shared, random.PRNGKey(0))())
+
     def _programs(self, prepared, selected):
         events = [node for node in self.event_nodes if node.name in selected]
+        record_shared = any(node.process.family is not None for node in events)
 
         def program():
             shared = self._shared()
@@ -329,6 +348,8 @@ class ForecastNetwork:
 
         def resolver():
             shared = self._shared()
+            if record_shared:
+                _record_shared(shared)
             for node in events:
                 _event_model(node, prepared.observations[node.name], shared, likelihood=False)
 
@@ -338,6 +359,31 @@ class ForecastNetwork:
         """Return the ordinary zero-argument joint model, usable directly with NUTS/MCMC."""
         prepared = self._prepare(data, covariates)
         return self._programs(prepared, {node.name for node in self.nodes})[0]
+
+    def _fit_selection(self, prepared, selected, structure, **options):
+        """Fit one joint/modular block and resolve its real local/shared draw values."""
+        program, resolver, events = self._programs(prepared, selected)
+        custom = any(node.process.family is not None for node in events)
+        record = custom and structure is not None
+        shared_sites = _shared_sites(structure.num_leaves) if record else []
+        post, params, loss, resolved = _fit_program(
+            program, resolver, _parameter_sites(events) + shared_sites, **options
+        )
+        shared = structure.unflatten([resolved[name] for name in shared_sites]) if record else None
+        stages = {
+            node.name: _resolved_stage_fit(
+                node,
+                prepared.observations[node.name],
+                post,
+                params,
+                loss,
+                resolved,
+                shared,
+                options["num_samples"],
+            )
+            for node in events
+        }
+        return post, params, loss, stages
 
     def fit(
         self,
@@ -353,7 +399,7 @@ class ForecastNetwork:
         """Fit one joint AutoNormal guide, or explicitly independent modular guides.
 
         Covariates map node names to arrays (count root) or mappings/callables
-        returning features, cure_features and allowed masks (event nodes).
+        returning features, susceptibility_features and allowed masks (event nodes).
         Event fit providers receive the original-origin context calendar, not
         just the root sales observation window. No historical prefix is imputed.
         """
@@ -375,13 +421,13 @@ class ForecastNetwork:
                 if isinstance(node, EventNode) or node.process is not None
             ]
         )
+        structure = self._shared_structure()
         posterior, params, stage_fits, losses = {}, {}, {}, {}
         for index, (label, selected) in enumerate(selections):
-            program, resolver, events = self._programs(prepared, selected)
-            post, model_params, loss, resolved = _fit_program(
-                program,
-                resolver,
-                _parameter_sites(events),
+            post, model_params, loss, stages = self._fit_selection(
+                prepared,
+                selected,
+                structure,
                 num_steps=num_steps,
                 num_samples=num_samples,
                 seed=seed + index,
@@ -390,14 +436,7 @@ class ForecastNetwork:
             posterior.update(post)
             params.update(model_params)
             losses[label] = loss
-            for node in events:
-                parameters = StageParameters(
-                    *[
-                        resolved[f"{node.name}/__resolved_{name}"]
-                        for name in StageParameters._fields
-                    ]
-                )
-                stage_fits[node.name] = StageFit(parameters, loss)
+            stage_fits.update(stages)
         return FittedNetwork(
             self,
             prepared,
@@ -528,12 +567,12 @@ class FittedNetwork:
             provider,
             frame,
             future_days,
-            widths=(old.features.shape[-1], old.cure_features.shape[-1]),
-            default_cure=old.cure_features if len(frame) == n else None,
+            widths=(old.features.shape[-1], old.susceptibility_features.shape[-1]),
+            default_susceptibility=old.susceptibility_features if len(frame) == n else None,
         )
-        if not np.array_equal(future.cure_features[:n], old.cure_features):
+        if not np.array_equal(future.susceptibility_features[:n], old.susceptibility_features):
             raise ValueError(
-                "historical cure_features are static at stage entry and cannot change in a scenario"
+                "historical susceptibility_features are static at stage entry and cannot change in a scenario"
             )
         prefix = old.features.shape[1]
         features = np.empty((len(frame), prefix + len(future_days), old.features.shape[-1]))
@@ -544,7 +583,7 @@ class FittedNetwork:
         allowed[:n, :prefix] = old.allowed
         allowed[n:, :prefix] = False
         allowed[:, prefix:] = future.allowed
-        return _Features(features, future.cure_features, allowed)
+        return _Features(features, future.susceptibility_features, allowed)
 
     def _forecast(self, *, horizon, covariates=None, future_sales=None, seed=0, through=None):
         _positive_integer("horizon", horizon)
@@ -584,7 +623,7 @@ class FittedNetwork:
             origins[:n] = to_day(self.data.units[self._prepared.columns[node.source_name]])
             observed[:n] = to_day(self.data.units[self._prepared.columns[node.name]])
             result = forecast_events(
-                self.stage_fits[node.name].parameters,
+                self.stage_fits[node.name],
                 origins=origins,
                 observed=observed,
                 arrivals=flows[node.source_name],
