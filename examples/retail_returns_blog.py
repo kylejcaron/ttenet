@@ -71,9 +71,18 @@ def _():
 @app.cell(hide_code=True)
 def _():
     # The interactive figures live beside this notebook: Python computes, they only draw.
-    from retail_returns_widgets import ScenarioForecast
+    from retail_returns_controls import baseline_data, history_data, sale_day_data
+    from retail_returns_widgets import BaselineComparison, HistoryRange, SaleDay, ScenarioForecast
 
-    return (ScenarioForecast,)
+    return (
+        BaselineComparison,
+        HistoryRange,
+        SaleDay,
+        ScenarioForecast,
+        baseline_data,
+        history_data,
+        sale_day_data,
+    )
 
 
 @app.cell(hide_code=True)
@@ -119,12 +128,10 @@ def _():
         SLATE,
         STORM,
         VIOLET,
-        baseline_chart,
         callout,
         cards,
         checks_list,
         cohort_chart,
-        convolution_chart,
         convolution_icon,
         drift_chart,
         figure,
@@ -142,7 +149,6 @@ def _():
         source_md,
         stage_cards,
         swatch,
-        tldr_chart,
         wait_charts,
     )
 
@@ -159,12 +165,10 @@ def _():
         SLATE,
         STORM,
         VIOLET,
-        baseline_chart,
         callout,
         cards,
         checks_list,
         cohort_chart,
-        convolution_chart,
         convolution_icon,
         drift_chart,
         figure,
@@ -182,7 +186,6 @@ def _():
         source_md,
         stage_cards,
         swatch,
-        tldr_chart,
         wait_charts,
     )
 
@@ -282,31 +285,17 @@ def _(section):
 
 
 @app.cell(hide_code=True)
-def _(HORIZON, daily_history, mo):
-    # Days relative to the snapshot: the whole ledger to the end of the forecast. The
-    # default shows nine weeks of history.
-    tldr_window = mo.ui.range_slider(
-        start=1 - len(daily_history),
-        stop=HORIZON,
-        step=1,
-        value=[-62, HORIZON],
-        label="History shown",
-        show_value=False,
-        full_width=True,
-    )
-    return (tldr_window,)
-
-
-@app.cell(hide_code=True)
 def _(
     AS_OF,
+    HORIZON,
+    HistoryRange,
     MUTED,
     SLATE,
     STORM,
     daily_history,
-    figure,
     forecast,
     held_out,
+    history_data,
     mo,
     pd,
     promo_spans,
@@ -314,50 +303,38 @@ def _(
     sales_draws,
     storms,
     swatch,
-    tldr_chart,
-    tldr_window,
 ):
     _past = promo_spans[promo_spans.end <= pd.Timestamp(AS_OF)].iloc[-1]
     _planned = promo_spans[promo_spans.start > pd.Timestamp(AS_OF)].iloc[0]
     _last = _planned.end - pd.Timedelta(days=1)
-    _first, _end = (pd.Timestamp(AS_OF) + pd.Timedelta(days=d) for d in tldr_window.value)
-    figure(
-        mo.vstack(
-            [
-                tldr_chart(
-                    forecast,
-                    sales_draws,
-                    sales_actual,
-                    held_out,
-                    storms,
-                    promo_spans,
-                    daily_history,
-                    (_first, _end),
-                ),
-                mo.hstack(
-                    [
-                        tldr_window,
-                        mo.Html(
-                            f'<span class="ttn-range-dates">{_first:%b %-d} – {_end:%b %-d}</span>'
-                        ),
-                    ],
-                    widths=[1, 0],
-                    align="center",
-                    gap=1,
-                ),
-            ]
-        ),
-        "One sales forecast, propagated twice",
-        [
-            (swatch(MUTED), "Historical observations"),
-            (
-                swatch(SLATE, block=True),
-                f"Sales: the {_past.start:%b} {_past.start.day} sale's returns are in by today; "
-                f"the {_planned.start:%b} {_planned.start.day}–{_last.day} sale's land late.",
-            ),
-            (swatch(STORM, block=True, opacity=0.55), "Storm: receipts stall, then catch up."),
-            ("", "Bands are 50% and 90% intervals."),
-        ],
+    mo.ui.anywidget(
+        HistoryRange(
+            data=history_data(
+                forecast,
+                sales_draws,
+                sales_actual,
+                held_out,
+                storms,
+                promo_spans,
+                daily_history,
+                AS_OF,
+                HORIZON,
+                "One sales forecast, propagated twice",
+                [
+                    (swatch(MUTED), "Historical observations"),
+                    (
+                        swatch(SLATE, block=True),
+                        f"Sales: the {_past.start:%b} {_past.start.day} sale's returns are in by today; "
+                        f"the {_planned.start:%b} {_planned.start.day}–{_last.day} sale's land late.",
+                    ),
+                    (
+                        swatch(STORM, block=True, opacity=0.55),
+                        "Storm: receipts stall, then catch up.",
+                    ),
+                    ("", "Bands are 50% and 90% intervals."),
+                ],
+            )
+        )
     )
     return
 
@@ -411,69 +388,41 @@ def _(fitted, forecast, sales_draws):
 
 
 @app.cell(hide_code=True)
-def _(AS_OF, HORIZON, forecast, mo, pd, promo_spans):
-    _planned = promo_spans[promo_spans.start > pd.Timestamp(AS_OF)].iloc[0].start
-    conv_day = mo.ui.slider(
-        start=0,
-        stop=HORIZON - 1,
-        step=1,
-        value=int((_planned - pd.Timestamp(forecast.dates[0])).days),
-        label="Sale day",
-        show_value=False,
-        full_width=True,
-    )
-    return (conv_day,)
-
-
-@app.cell(hide_code=True)
 def _(
     ACCENT,
     AMBER,
+    AS_OF,
     INK,
-    conv_day,
+    SaleDay,
     conv_followed,
-    convolution_chart,
-    figure,
     forecast,
     mo,
     pd,
+    promo_spans,
+    sale_day_data,
     sales_draws,
     swatch,
 ):
-    _dates = pd.DatetimeIndex(forecast.dates)
-    _day = _dates[conv_day.value]
-    _units = sales_draws.mean(axis=0)[conv_day.value]
-    figure(
-        mo.vstack(
-            [
-                mo.md(
-                    "The plot below shows the convolution in full effect. One day's sales "
-                    "are propagated forward into future returns initiated and future returns "
-                    "received."
-                ),
-                convolution_chart(
-                    conv_followed, sales_draws.mean(axis=0), _dates[0], conv_day.value
-                ),
-                mo.hstack(
-                    [conv_day, mo.Html(f'<span class="ttn-range-dates">{_day:%a %b %-d}</span>')],
-                    widths=[1, 0],
-                    align="center",
-                    gap=1,
-                ),
-            ]
-        ),
-        "Follow one day's sales forward",
-        [
-            (
-                swatch(INK, block=True, opacity=0.9),
-                f"{_day:%b %-d}: {_units:.0f} units sold → "
-                f"{conv_followed['started'][conv_day.value].sum():.0f} returns started → "
-                f"{conv_followed['received'][conv_day.value].sum():.0f} received.",
-            ),
-            (swatch(AMBER, block=True, opacity=0.9), "Returns started each day."),
-            (swatch(ACCENT, block=True, opacity=0.9), "Returns received each day."),
-            ("", "Each bar stacks one block per sale day; darker blocks sold later."),
-        ],
+    _planned = promo_spans[promo_spans.start > pd.Timestamp(AS_OF)].iloc[0].start
+    _default = int((_planned - pd.Timestamp(forecast.dates[0])).days)
+    mo.ui.anywidget(
+        SaleDay(
+            data=sale_day_data(
+                conv_followed,
+                sales_draws.mean(axis=0),
+                forecast.dates[0],
+                _default,
+                "Follow one day's sales forward",
+                [
+                    (swatch(INK, block=True, opacity=0.9), ""),
+                    (swatch(AMBER, block=True, opacity=0.9), "Returns started each day."),
+                    (swatch(ACCENT, block=True, opacity=0.9), "Returns received each day."),
+                    ("", "Each bar stacks one block per sale day; darker blocks sold later."),
+                ],
+                "The plot below shows the convolution in full effect. One day's sales "
+                "are propagated forward into future returns initiated and future returns received.",
+            )
+        )
     )
     return
 
@@ -1297,37 +1246,23 @@ def _(daily_history, forecast, sales_draws, sarimax_baseline, storm_spans):
 
 
 @app.cell(hide_code=True)
-def _(baselines, mo):
-    _short = ["Weekday average", "Settled return rate", "Return rate so far", "SARIMAX"]
-    baseline_pick = mo.ui.radio(
-        options=dict(zip(_short, baselines)),
-        value="SARIMAX",
-        label="Compare the chain with",
-        inline=True,
-    )
-    return (baseline_pick,)
-
-
-@app.cell(hide_code=True)
 def _(
     ACCENT,
     AMBER,
+    BaselineComparison,
     MUTED,
     RATE,
     RATE_LIGHT,
     RED,
     SLATE,
     VIOLET,
-    baseline_chart,
-    baseline_pick,
+    baseline_data,
     baselines,
-    figure,
     forecast,
     held_out,
     lagged,
     mo,
     naive_lagged,
-    np,
     promo_spans,
     recent_history,
     storm_spans,
@@ -1358,42 +1293,39 @@ def _(
             "SARIMAX on daily receipts with lagged sales and return initiations.",
         ),
     }
-    _color, _title, _row = _style[baseline_pick.value]
-    # One y-axis for every choice: the tallest of all shortcuts, the chain's band, the actuals
-    # and the ledger lead-in, so switching doesn't rescale the chart.
-    _y_max = 1.05 * max(
-        max(float(np.max(v)) for v in baselines.values()),
-        float(np.quantile(forecast.receipts, 0.95, axis=0).max()),
-        float(held_out.receipts.max()),
-        float(recent_history["Returns received"].max()),
-    )
-    figure(
-        mo.vstack(
-            [
-                baseline_pick,
-                baseline_chart(
-                    forecast,
-                    held_out,
-                    {baseline_pick.value: baselines[baseline_pick.value]},
-                    storm_spans,
-                    promo_spans,
-                    recent_history,
-                    colors=[_color],
-                    y_max=_y_max,
-                ),
-            ]
-        ),
-        _title,
-        [
-            (swatch(_color, dashed=True), _row),
-            (
-                swatch(ACCENT),
-                "The chain: tracks every unit sold, simulates the July sale, expects the storm.",
-            ),
-            (swatch(MUTED), "Historical observations"),
-            (swatch(SLATE, block=True), "The May and July sales."),
-            (swatch(AMBER, block=True), "The storm."),
-        ],
+    _short = ["Weekday average", "Settled return rate", "Return rate so far", "SARIMAX"]
+    _choices = [
+        {
+            "label": _label,
+            "series": _name,
+            "color": _style[_name][0],
+            "title": _style[_name][1],
+            "caption": _style[_name][2],
+            "mark": swatch(_style[_name][0], dashed=True),
+        }
+        for _label, _name in zip(_short, baselines)
+    ]
+    mo.ui.anywidget(
+        BaselineComparison(
+            data=baseline_data(
+                forecast,
+                held_out,
+                baselines,
+                storm_spans,
+                promo_spans,
+                recent_history,
+                _choices,
+                [
+                    (
+                        swatch(ACCENT),
+                        "The chain: tracks every unit sold, simulates the July sale, expects the storm.",
+                    ),
+                    (swatch(MUTED), "Historical observations"),
+                    (swatch(SLATE, block=True), "The May and July sales."),
+                    (swatch(AMBER, block=True), "The storm."),
+                ],
+            )
+        )
     )
     return
 

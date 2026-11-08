@@ -469,32 +469,6 @@
   margin: 0;
 }
 
-/* marimo's range slider, in the essay's palette. The rules reach into the slider's shadow
-   root because marimo adopts this stylesheet there too. */
-.mo-label .relative.grow.overflow-hidden.rounded-full {
-  background: var(--ttn-rule);
-}
-
-.mo-label .relative.grow.overflow-hidden.rounded-full > .absolute {
-  background: var(--ttn-accent);
-}
-
-.mo-label [role="slider"] {
-  background: var(--ttn-panel);
-  border: 1.5px solid var(--ttn-accent);
-  box-shadow: 0 1px 2px rgb(41 45 38 / 0.15);
-}
-
-.mo-label [role="slider"]:hover,
-.mo-label [role="slider"]:focus-visible {
-  background: var(--ttn-column);
-}
-
-.mo-label label {
-  color: var(--ttn-muted);
-  font-size: 13px;
-  font-weight: 500;
-}
 
 .ttn-range-dates {
   font-size: 13px;
@@ -503,16 +477,6 @@
   white-space: nowrap;
 }
 
-/* marimo's radio buttons, in the essay's palette (adopted into their shadow root too). */
-button[role="radio"] {
-  border: 1.5px solid var(--ttn-accent);
-  background: var(--ttn-panel);
-}
-
-button[role="radio"] svg circle {
-  fill: var(--ttn-accent);
-  stroke: var(--ttn-accent);
-}
 
 .ttn-swatch {
   display: inline-block;

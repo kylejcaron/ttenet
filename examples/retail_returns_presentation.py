@@ -530,12 +530,11 @@ def window_x(first, last, show_axis=True, field="date"):
     )
 
 
-def tldr_chart(forecast, sales_draws, sales_actual, held_out, storms, promos, history, window):
-    """The opening figure: sales, returns started and returns received forecast past the
-    snapshot, after the ledger's own daily counts; storms and sales shaded.
+def tldr_panels(forecast, sales_draws, sales_actual, held_out, storms, promos, history, window):
+    """Sales, starts and receipts as three shared-date Altair panels.
 
-    ``history`` is the whole ledger as daily counts; ``window`` is the ``(first, last)``
-    pair of days to show, which may reach back to the ledger's first day.
+    ``history`` is the whole ledger as daily counts; ``window`` is the inclusive
+    ``(first, last)`` pair. The browser can change that domain without recomputing data.
     """
     first, last = (pd.Timestamp(day) for day in window)
     snapshot = pd.Timestamp(history.date.max())
@@ -596,29 +595,26 @@ def tldr_chart(forecast, sales_draws, sales_actual, held_out, storms, promos, hi
             ]
         return alt.layer(*layers).properties(height=95, width="container")
 
-    return mo.vstack(
-        [
-            panel(sales_draws, sales_actual, MUTED, "Units sold", "Sales", False, labels=True),
-            panel(
-                forecast.initiations,
-                held_out.initiations,
-                AMBER,
-                "Returns started",
-                "Returns initiated",
-                False,
-            ),
-            panel(
-                forecast.receipts,
-                held_out.receipts,
-                ACCENT,
-                "Returns received",
-                "Returns received",
-                True,
-                storm_shade=True,
-            ),
-        ],
-        gap=0,
-    )
+    return [
+        panel(sales_draws, sales_actual, MUTED, "Units sold", "Sales", False, labels=True),
+        panel(
+            forecast.initiations,
+            held_out.initiations,
+            AMBER,
+            "Returns started",
+            "Returns initiated",
+            False,
+        ),
+        panel(
+            forecast.receipts,
+            held_out.receipts,
+            ACCENT,
+            "Returns received",
+            "Returns received",
+            True,
+            storm_shade=True,
+        ),
+    ]
 
 
 def purchase_timeline(unit):
@@ -664,7 +660,7 @@ def purchase_timeline(unit):
     )
 
 
-def convolution_chart(followed, sales, first_date, day):
+def convolution_panels(followed, sales, first_date, day):
     """One forecast sale day followed forward. The top row is units sold per day; below it,
     each day's returns started and returns received, stacked by the sale day they came from
     (later sale days darker), so a day's bar is the sum of its contributions. The chosen
@@ -675,7 +671,12 @@ def convolution_chart(followed, sales, first_date, day):
     """
     days = followed["started"].shape[1]
     dates = pd.date_range(str(first_date), periods=days)
-    x_scale = alt.Scale(domain=[_local(dates[0] - pd.Timedelta(hours=12)), _local(dates[-1])])
+    x_scale = alt.Scale(
+        domain=[
+            _local(dates[0] - pd.Timedelta(hours=12)),
+            _local(dates[-1] + pd.Timedelta(days=1)),
+        ]
+    )
 
     def x(show_axis):
         return alt.X(
@@ -687,10 +688,11 @@ def convolution_chart(followed, sales, first_date, day):
 
     sold = pd.DataFrame({"date": dates[: len(sales)], "units": np.asarray(sales, dtype=float)})
     sold["end"] = sold.date + pd.Timedelta(hours=20)  # a small gap between days
+    sold["sale"] = np.arange(len(sales))
     sold["picked"] = np.arange(len(sales)) == day
     top = (
         alt.Chart(sold)
-        .mark_rect()
+        .mark_rect(clip=True)
         .encode(
             x=x(False),
             x2="end:T",
@@ -727,7 +729,7 @@ def convolution_chart(followed, sales, first_date, day):
         long["bottom"] = long.top - long.units
         chart = (
             alt.Chart(long)
-            .mark_rect(stroke=PAPER, strokeWidth=0.4)
+            .mark_rect(stroke=PAPER, strokeWidth=0.4, clip=True)
             .encode(
                 x=x(show_axis),
                 x2="end:T",
@@ -764,14 +766,11 @@ def convolution_chart(followed, sales, first_date, day):
             )
         return chart.properties(height=120, width="container")
 
-    return mo.vstack(
-        [
-            top,
-            stage(followed["started"], AMBER_LIGHT, AMBER, "Returns started", False, False),
-            stage(followed["received"], "#cde9d7", ACCENT, "Returns received", True, True),
-        ],
-        gap=0,
-    )
+    return [
+        top,
+        stage(followed["started"], AMBER_LIGHT, AMBER, "Returns started", False, False),
+        stage(followed["received"], "#cde9d7", ACCENT, "Returns received", True, True),
+    ]
 
 
 def sale_echo(daily, sale, before=7, after=28):

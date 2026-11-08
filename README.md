@@ -44,14 +44,16 @@ uv sync --all-extras   # the essay's extras include statsmodels for the SARIMAX 
 uv run marimo run examples/retail_returns_blog.py   # or `marimo edit` to see the code
 ```
 
-Three interactive figures sit inside the parts they explain:
+Four interactive figures sit inside the parts they explain. All their controls work
+in static HTML exports as well as a running notebook:
 
+- **History and forecast** (TL;DR): move either handle of the history range slider
+  to change the shared date window across sales, returns started and returns received.
 - **Follow one day's sales forward** (TL;DR): pick a forecast sale day with the
   slider. Each day's returns started and returns received are stacked by the sale
   day they came from, with the chosen day in black, so its units visibly spread out
   and add up with every other sale day's. This is the survival convolution,
-  computed from the fitted timing curves (`retail_returns_chain.py`). The slider
-  needs a running kernel (`marimo run` or `marimo edit`).
+  computed from the fitted timing curves (`retail_returns_chain.py`).
 - **Comparing against four baselines** (Part 4): pick a weekday average, a settled
   or a naive return rate times lagged sales, or a SARIMAX with lagged sales and
   lagged return initiations (its weights bounded at zero; future initiations come
@@ -73,9 +75,10 @@ model and the fit and forecast calls. `retail_returns_analysis.py` computes the
 numbers (cohort rates, parameter recovery, the four baselines and their scores, the
 typical return drawn in Part 1), `retail_returns_chain.py` computes the survival
 convolution for the TL;DR figure, `retail_returns_scenario.py` builds the JSON for the
-storm scenarios, and
-`retail_returns_presentation.py` holds the palette, themes and one chart per figure.
-Python computes every number; the figures in `examples/widgets/` only draw it.
+storm scenarios, `retail_returns_controls.py` packages the other controls' complete
+datasets and Vega-Lite templates, and `retail_returns_presentation.py` holds the
+palette, themes and one chart per figure. Python computes every number; the figures
+in `examples/widgets/` draw it and handle selections entirely in the browser.
 
 ### Native survival convolutions
 
