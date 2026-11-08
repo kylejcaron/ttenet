@@ -758,9 +758,7 @@ def _(
     receipt_covariates,
 ):
     mo.ui.anywidget(
-        ModelOverview(
-            data=model_overview_data(model, initiation_covariates, receipt_covariates)
-        )
+        ModelOverview(data=model_overview_data(model, initiation_covariates, receipt_covariates))
     )
     return
 
