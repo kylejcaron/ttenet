@@ -9,9 +9,10 @@
   --ttn-panel: #fffef9;
   --ttn-ink: #292d26;
   --ttn-muted: #62695d;
-  --ttn-accent: #42644d;
-  --ttn-amber: #956017;
-  --ttn-red: #a23c3c;
+  --ttn-accent: #0a8a45;
+  --ttn-link: #0a8a45;
+  --ttn-amber: #d18f00;
+  --ttn-red: #d03b2f;
   --ttn-rule: #dcded1;
   --ttn-band: #f5f5ed;
   --ttn-column: #ecefe4;
@@ -84,8 +85,15 @@
 }
 
 #App [data-cell-name] .markdown a {
-  color: var(--ttn-accent);
+  color: var(--ttn-link);
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-thickness: 1.5px;
   text-underline-offset: 3px;
+}
+
+#App [data-cell-name] .markdown a:hover {
+  color: #066b34;
 }
 
 #App [data-cell-name] .markdown code {
@@ -164,10 +172,10 @@
 .ttn-dek {
   margin: 20px 0 0;
   max-width: 60ch;
-  font-family: var(--ttn-serif);
-  font-size: 20px;
-  line-height: 1.5;
-  color: var(--ttn-muted);
+  font-family: inherit;
+  font-size: 19px;
+  line-height: 1.55;
+  color: var(--ttn-ink);
 }
 
 .ttn-byline {
@@ -444,6 +452,68 @@
   font-weight: 600;
 }
 
+/* A caption written as a key: each row's swatch sits in one left-hand column. */
+.ttn-key {
+  padding: 0;
+  list-style: none;
+}
+
+.ttn-key li {
+  display: grid;
+  grid-template-columns: 24px 1fr;
+  align-items: baseline;
+  margin: 2px 0;
+}
+
+.ttn-key .ttn-swatch {
+  margin: 0;
+}
+
+/* marimo's range slider, in the essay's palette. The rules reach into the slider's shadow
+   root because marimo adopts this stylesheet there too. */
+.mo-label .relative.grow.overflow-hidden.rounded-full {
+  background: var(--ttn-rule);
+}
+
+.mo-label .relative.grow.overflow-hidden.rounded-full > .absolute {
+  background: var(--ttn-accent);
+}
+
+.mo-label [role="slider"] {
+  background: var(--ttn-panel);
+  border: 1.5px solid var(--ttn-accent);
+  box-shadow: 0 1px 2px rgb(41 45 38 / 0.15);
+}
+
+.mo-label [role="slider"]:hover,
+.mo-label [role="slider"]:focus-visible {
+  background: var(--ttn-column);
+}
+
+.mo-label label {
+  color: var(--ttn-muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.ttn-range-dates {
+  font-size: 13px;
+  color: var(--ttn-ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* marimo's radio buttons, in the essay's palette (adopted into their shadow root too). */
+button[role="radio"] {
+  border: 1.5px solid var(--ttn-accent);
+  background: var(--ttn-panel);
+}
+
+button[role="radio"] svg circle {
+  fill: var(--ttn-accent);
+  stroke: var(--ttn-accent);
+}
+
 .ttn-swatch {
   display: inline-block;
   width: 18px;
@@ -497,6 +567,10 @@
   margin: 18px 0 6px;
 }
 
+.ttn-stage--wide {
+  grid-column: 1 / -1;
+}
+
 .ttn-stage {
   padding: 16px 20px 6px;
   border: 1px solid var(--ttn-rule);
@@ -547,6 +621,18 @@
   font-size: 12px;
 }
 
+.ttn-formulas {
+  display: block;
+  margin-top: 4px;
+}
+
+.ttn-formulas code {
+  display: block;
+  width: fit-content;
+  margin: 2px 0;
+  white-space: pre;
+}
+
 .ttn-tag {
   padding: 1px 7px;
   border-radius: 999px;
@@ -558,82 +644,6 @@
 
 .ttn-tag--learned { color: var(--ttn-accent); background: #e6efe7; }
 .ttn-tag--declared { color: var(--ttn-muted); background: var(--ttn-column); }
-
-/* Where every unit stands: one bar, settled ends and censored middle. */
-
-.ttn-status {
-  margin: 26px 0 6px;
-}
-
-.ttn-status-bar {
-  display: flex;
-  height: 26px;
-  margin-top: 8px;
-  overflow: hidden;
-  border-radius: 3px;
-}
-
-.ttn-status-seg { flex-basis: 0; min-width: 2px; }
-.ttn-status-seg + .ttn-status-seg { border-left: 2px solid var(--ttn-panel); }
-
-.ttn-status-seg--received, .ttn-status-item--received .ttn-status-key { background: var(--ttn-accent); }
-.ttn-status-seg--transit, .ttn-status-item--transit .ttn-status-key { background: var(--ttn-amber); }
-.ttn-status-seg--eligible, .ttn-status-item--eligible .ttn-status-key { background: #8a97a8; }
-.ttn-status-seg--expired, .ttn-status-item--expired .ttn-status-key { background: #c9cdbf; }
-
-/* Censored states are hatched: the clock is still running. */
-.ttn-status-seg--transit,
-.ttn-status-seg--eligible {
-  background-image: repeating-linear-gradient(
-    -45deg, transparent 0 5px, rgba(255, 254, 249, 0.35) 5px 8px
-  );
-}
-
-.ttn-status-legend {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 12px 24px;
-  margin: 14px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.ttn-status-item {
-  font-size: 14px;
-  color: var(--ttn-ink);
-}
-
-.ttn-status-item b {
-  font-family: var(--ttn-serif);
-  font-size: 22px;
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
-}
-
-.ttn-status-key {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  margin-right: 7px;
-  border-radius: 2px;
-}
-
-.ttn-status-state {
-  display: block;
-  margin-top: 2px;
-  font-size: 10px;
-  font-weight: 620;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--ttn-muted);
-}
-
-.ttn-status-item p {
-  margin: 4px 0 0;
-  font-size: 13px;
-  line-height: 1.45;
-  color: var(--ttn-muted);
-}
 
 /* Status checks */
 

@@ -27,29 +27,36 @@ uv run python examples/retail_returns.py --steps 600 --draws 100 \
 ```
 
 The example jointly fits a real NumPyro sales model and two return processes.
-It includes two products, a 90-day initiation policy, abandonment, storms,
-weekend receipt closures, and histories preceding the sales training window.
+It includes two products, a 90-day initiation policy, abandonment, storms, a
+one-week sale about a month before the snapshot and a planned one inside the forecast window
+(a known sales covariate), weekend receipt closures, and histories preceding the sales
+training window.
 It prints held-out scores and checks count conservation. Latent abandonment
 labels never enter fitting. Short runs are execution checks, not convergence
 or calibration guarantees.
 
-The same example as an illustrated, interactive essay: a marimo notebook in six
-parts, from the raw ledger through fitting, forecasting, scenarios, and a simple
-baseline:
+The same example as an illustrated, interactive essay: a marimo notebook in five
+parts, from the raw ledger through fitting, scoring against baselines, and
+scenarios:
 
 ```bash
-uv sync --all-extras
+uv sync --all-extras   # the essay's extras include statsmodels for the SARIMAX baseline
 uv run marimo run examples/retail_returns_blog.py   # or `marimo edit` to see the code
 ```
 
 Three interactive figures sit inside the parts they explain:
 
-- **Follow one purchase** (Part 1): scrub three simulated ledger records through
-  the inclusive day-90 initiation deadline and end-of-day censoring. An
-  observation lesson, not a forecast; hindsight is an explicit toggle.
-- **How the forecast is assembled** (Part 4): step through sales, return
-  initiation, receipt timing, and the resulting receipt forecast. Timing bars
-  are daily event probabilities from the fitted survival kernel, not hazards.
+- **Follow one day's sales forward** (TL;DR): pick a forecast sale day with the
+  slider. Each day's returns started and returns received are stacked by the sale
+  day they came from, with the chosen day in black, so its units visibly spread out
+  and add up with every other sale day's. This is the survival convolution,
+  computed from the fitted timing curves (`retail_returns_chain.py`). The slider
+  needs a running kernel (`marimo run` or `marimo edit`).
+- **Comparing against four baselines** (Part 4): pick a weekday average, a settled
+  or a naive return rate times lagged sales, or a SARIMAX with lagged sales and
+  lagged return initiations (its weights bounded at zero; future initiations come
+  from a second SARIMAX), and see it against the chain's forecast. The score table
+  below shows all four: daily MAE, daily CRPS, the 28-day total and its error.
 - **Storm scenarios** (Part 5): no storm, the storm as forecast, or one that
   lingers, without refitting the return stages. Daily receipts, the backlog of
   returns in transit, and a cumulative gap against the baseline show predictive
@@ -63,11 +70,12 @@ parameter has a true value to check.
 
 The essay keeps data work and drawing apart. The notebook holds the narrative, the
 model and the fit and forecast calls. `retail_returns_analysis.py` computes the
-numbers (cohort rates, parameter recovery, baseline scores), `retail_returns_story.py`,
-`retail_returns_chain.py` and `retail_returns_scenario.py` build the JSON for the three
-interactive figures, and `retail_returns_presentation.py` holds the palette, themes and
-one chart per figure. Python computes every number; the figures in `examples/widgets/`
-only draw it.
+numbers (cohort rates, parameter recovery, the four baselines and their scores, the
+typical return drawn in Part 1), `retail_returns_chain.py` computes the survival
+convolution for the TL;DR figure, `retail_returns_scenario.py` builds the JSON for the
+storm scenarios, and
+`retail_returns_presentation.py` holds the palette, themes and one chart per figure.
+Python computes every number; the figures in `examples/widgets/` only draw it.
 
 ### Native survival convolutions
 

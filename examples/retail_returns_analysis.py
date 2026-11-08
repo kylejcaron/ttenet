@@ -6,6 +6,8 @@ frames, so each piece can be read, tested and reused without marimo or a plottin
 
 from __future__ import annotations
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -13,6 +15,7 @@ import pandas as pd
 from retail_returns_world import (
     HAZARD_PRODUCT,
     HAZARD_WEEKDAY,
+    PROMO_LIFT,
     RECEIPT_RECEIVABLE,
     RECEIPT_SCALE,
     RECEIPT_SHAPE,
@@ -83,22 +86,62 @@ def daily_totals(sales, dates):
 # --- What the ledger shows ------------------------------------------------------------
 
 
-def classify_units(units, as_of):
-    """Where each unit stands at the snapshot. Day 90 is inclusive, so age 90 has no chance left."""
-    within_policy = (as_of - units.sale_date.to_numpy().astype("datetime64[D]")).astype(
-        int
-    ) < POLICY_DAYS
-    return np.select(
-        [units.receipt_date.notna(), units.initiation_date.notna(), within_policy],
-        ["Received", "Return in transit", "Could still return"],
-        default="Window closed",
+def return_fates(truth, as_of, policy_days=90):
+    """In hindsight, where a batch of orders stands at each age: returned so far, will
+    return but hasn't yet, or never returns.
+
+    The batch is every order sold at least ``policy_days`` days before ``as_of`` that
+    could still be followed to the end of its return window, so its fate is known.
+    Shares are of the batch, by age in days since the sale.
+    """
+    cutoff = pd.Timestamp(str(as_of)) - pd.Timedelta(days=policy_days)
+    batch = truth[truth.sale_date <= cutoff]
+    started = (batch.initiation_date - batch.sale_date).dt.days  # NaN: never starts
+    ages = np.arange(policy_days + 1)
+    so_far = np.array([(started <= age).mean() for age in ages])
+    eventually = started.notna().mean()
+    return pd.DataFrame(
+        {
+            "age": ages,
+            "Returned so far": so_far,
+            "Will return, not yet": eventually - so_far,
+            "Never returns": 1 - eventually,
+        }
     )
 
 
-def abandoned_share(units, status, truth):
-    """Share of in-transit returns the simulator secretly abandoned (the ledger cannot say)."""
-    open_ids = units.item_id[status == "Return in transit"]
-    return truth.set_index("item_id").abandoned_truth.loc[open_ids].mean()
+def time_between_events(units, as_of):
+    """Days from sale to return started, and from return started to received.
+
+    Uses only what the ledger shows by ``as_of``; units still waiting are left out.
+    """
+    today = pd.Timestamp(str(as_of))
+    started = units[units.initiation_date <= today]  # missing dates compare False
+    received = started[started.receipt_date <= today]
+    to_start = (started.initiation_date - started.sale_date).dt.days
+    in_transit = (received.receipt_date - received.initiation_date).dt.days
+    return to_start, in_transit
+
+
+def typical_return(units, as_of):
+    """One received return whose two waits are both typical: the unit closest to the median
+    days from sale to return start and the median days in transit, among units the ledger
+    shows received by ``as_of``. Ties go to the earliest row."""
+    sold = units.sale_date.to_numpy().astype("datetime64[D]")
+    started = units.initiation_date.to_numpy().astype("datetime64[D]")
+    received = units.receipt_date.to_numpy().astype("datetime64[D]")
+    done = ~np.isnat(received) & (received <= np.datetime64(as_of, "D"))
+    if not done.any():
+        raise ValueError(f"no unit is received by {as_of}")
+    wait = (started - sold).astype(int)[done]
+    transit = (received - started).astype(int)[done]
+    distance = np.abs(wait - np.median(wait)) + np.abs(transit - np.median(transit))
+    row = np.flatnonzero(done)[np.argmin(distance)]
+    return {
+        "sold": pd.Timestamp(sold[row]),
+        "started": pd.Timestamp(started[row]),
+        "received": pd.Timestamp(received[row]),
+    }
 
 
 def daily_counts(units, start, as_of):
@@ -328,6 +371,12 @@ def recovery_table(fitted, data, volume):
         ("Sales", "Weekday effect, product A", weekday[:, a], WEEKDAY_SWING[0]),
         ("Sales", "Weekday effect, product B", weekday[:, b], WEEKDAY_SWING[1]),
         (
+            "Sales",
+            "Promotion lift (log-multiplier of the daily rate)",
+            np.asarray(posterior["sales/promo_lift"]),
+            PROMO_LIFT,
+        ),
+        (
             "Return initiation",
             "Susceptible, product A",
             sigmoid(susceptibility),
@@ -377,6 +426,131 @@ def recovery_table(fitted, data, volume):
     )
 
 
+# --- A standard time-series baseline --------------------------------------------------
+
+# Regressors are mean daily counts over windows of days before the forecast day: a coarse
+# delay curve, one weight per window, each bounded at zero (an upstream event can add
+# downstream events, never remove them). Receipts get sales from a week back (no return
+# starts, ships and arrives faster) and initiations from a day back; the initiation model,
+# which supplies future initiations, gets sales from a day back.
+SARIMAX_SALES_LAGS = ((7, 13), (14, 20), (21, 27), (28, 41), (42, 69))
+SARIMAX_INITIATION_LAGS = ((1, 3), (4, 6), (7, 9), (10, 13), (14, 20), (21, 30))
+INITIATION_SALES_LAGS = ((1, 3), (4, 7), (8, 14), (15, 28), (29, 56))
+
+
+def _lag_windows(series, index, lags, prefix):
+    """Mean of ``series`` over each ``(lo, hi)`` window of days before each day in ``index``."""
+    return pd.DataFrame(
+        {
+            f"{prefix}_{lo}_{hi}": (
+                sum(series.shift(k, freq="D") for k in range(lo, hi + 1)) / (hi - lo + 1)
+            ).reindex(index)
+            for lo, hi in lags
+        },
+        index=index,
+    )
+
+
+def _bounded_sarimax(y, train, future):
+    """Fit SARIMAX(1,0,0)(1,0,0)7 with lag weights bounded at zero; forecast ``future``.
+
+    Trains on every day with all regressors defined. Returns the fit and the forecast mean
+    and standard deviation.
+    """
+    from statsmodels.tools.sm_exceptions import ConvergenceWarning
+    from statsmodels.tsa.statespace.sarimax import SARIMAX
+
+    usable = train.notna().all(axis=1).to_numpy()
+    model = SARIMAX(
+        y[usable].asfreq("D"),
+        exog=train[usable].asfreq("D"),
+        order=(1, 0, 0),
+        seasonal_order=(1, 0, 0, 7),
+        trend="c",
+    )
+    # Regression coefficients are not transformed, so these bounds are on the weights.
+    lagged = ("sales_", "initiations_")
+    bounds = [(0, None) if n.startswith(lagged) else (None, None) for n in model.param_names]
+    with warnings.catch_warnings():  # non-convergence is reported to the caller instead
+        warnings.simplefilter("ignore", ConvergenceWarning)
+        fit = model.fit(disp=False, method="lbfgs", maxiter=1000, bounds=bounds)
+    predicted = fit.get_forecast(len(future), exog=future)
+    return fit, predicted.predicted_mean.to_numpy(), np.sqrt(predicted.var_pred_mean.to_numpy())
+
+
+def sarimax_baseline(
+    daily,
+    future_sales,
+    dates,
+    storm_spans,
+    sales_lags=SARIMAX_SALES_LAGS,
+    initiation_lags=SARIMAX_INITIATION_LAGS,
+    draws=1000,
+    seed=0,
+):
+    """A standard forecaster: SARIMAX(1,0,0)(1,0,0)7 on daily receipts, with lagged sales,
+    lagged return initiations, weekend and Monday dummies and the storm days as regressors.
+
+    Initiations after today are not yet known, so a second SARIMAX forecasts them from
+    lagged sales and its mean fills those days in. Lag weights are bounded at zero:
+    unbounded, an old sales window and the intercept trade off to fit the slow trend, and a
+    negative weight wipes out the forecast once a past sale enters that window.
+
+    ``daily`` is the ledger's daily counts (``date``, ``Sales``, ``Returns initiated``,
+    ``Returns received``); ``future_sales`` one expected sales value per forecast date in
+    ``dates``. Returns the daily mean as a series; ``attrs["draws"]`` holds ``[draws, days]``
+    samples of its Gaussian forecast, clipped at zero with closed weekends set to zero, so it
+    can be scored as a distribution, and ``attrs["converged"]`` whether both fits converged.
+    """
+    history = daily.set_index(pd.DatetimeIndex(daily.date))
+    days = pd.DatetimeIndex(dates)
+    sales = pd.concat(
+        [
+            history["Sales"].astype(float),
+            pd.Series(np.asarray(future_sales, dtype=float), index=days),
+        ]
+    )
+    initiated = history["Returns initiated"].astype(float)
+    initiation_fit, future_initiations, _ = _bounded_sarimax(
+        initiated,
+        _lag_windows(sales, initiated.index, INITIATION_SALES_LAGS, "sales"),
+        _lag_windows(sales, days, INITIATION_SALES_LAGS, "sales"),
+    )
+    initiations = pd.concat(
+        [initiated, pd.Series(np.clip(future_initiations, 0, None), index=days)]
+    )
+
+    def regressors(index):
+        frame = pd.concat(
+            [
+                _lag_windows(sales, index, sales_lags, "sales"),
+                _lag_windows(initiations, index, initiation_lags, "initiations"),
+            ],
+            axis=1,
+        )
+        frame["closed"] = (index.dayofweek >= 5).astype(float)
+        frame["monday"] = (index.dayofweek == 0).astype(float)
+        storm = np.zeros(len(index), dtype=bool)
+        for span in storm_spans.itertuples():
+            storm |= np.asarray((index >= span.start) & (index < span.end))
+        frame["storm"] = storm.astype(float)
+        return frame
+
+    receipts = history["Returns received"].astype(float)
+    receipt_fit, mean, sd = _bounded_sarimax(receipts, regressors(receipts.index), regressors(days))
+    samples = np.random.default_rng(seed).normal(mean, sd, size=(draws, len(days)))
+    samples = np.clip(samples, 0, None)
+    samples[:, days.dayofweek >= 5] = 0.0
+    series = pd.Series(samples.mean(axis=0), index=days, name="sarimax")
+    series.attrs.update(
+        draws=samples,
+        converged=bool(
+            initiation_fit.mle_retvals["converged"] and receipt_fit.mle_retvals["converged"]
+        ),
+    )
+    return series
+
+
 # --- The weekday-average baseline -----------------------------------------------------
 
 
@@ -391,38 +565,80 @@ def weekday_average(daily, held_out, weeks=8):
     )
 
 
-def baseline_scores(forecast, held_out, baseline, model_label, storm_week=slice(5, 14)):
-    """Daily error, daily CRPS, storm-fortnight error and 28-day total for model and baseline.
+def lagged_rate(units, as_of, future_sales, dates, mature_days=60, cohort_days=56, lag_step=1):
+    """The other usual shortcut: receipts are a return rate times sales, shifted by one lag.
 
-    A point forecast has no interval, so its CRPS is its absolute error and its total
-    interval is missing.
+    Both numbers come from cohorts old enough to have nearly finished returning (sold
+    ``mature_days`` to ``mature_days + cohort_days`` days before ``as_of``), so the rate is
+    not dragged down by recent units. The lag is their median sale-to-receipt time, rounded
+    to the nearest multiple of ``lag_step`` days (7 for whole weeks, as a planner would).
+    Sales before ``as_of`` are the ledger's; later sales are ``future_sales``, one value per
+    forecast date. Receipts that would land on a closed weekend move to the next Monday.
+    ``attrs`` keep the rate and lag the shortcut used.
+    """
+    as_of = np.datetime64(as_of, "D")
+    sold = units.sale_date.to_numpy().astype("datetime64[D]")
+    received = units.receipt_date.to_numpy().astype("datetime64[D]")
+    age = (as_of - sold).astype(int)
+    cohort = (age >= mature_days) & (age < mature_days + cohort_days)
+    seen = cohort & (received <= as_of)  # NaT compares False: unreceived units stay out
+    rate = seen.sum() / cohort.sum()
+    median = np.median((received[seen] - sold[seen]).astype(int))
+    lag = int(lag_step * round(median / lag_step))
+
+    days = pd.DatetimeIndex(dates)
+    past = units.groupby("sale_date").size()
+    sales = pd.concat([past, pd.Series(np.asarray(future_sales, dtype=float), index=days)])
+    point = rate * sales.reindex(days - pd.Timedelta(days=lag), fill_value=0).to_numpy()
+    weekend = days.dayofweek >= 5
+    for i in np.flatnonzero(weekend):
+        monday = i + (7 - days[i].dayofweek)
+        if monday < len(days):
+            point[monday] += point[i]
+    point[weekend] = 0.0
+    series = pd.Series(point, index=days, name="lagged_rate")
+    series.attrs.update(rate=float(rate), lag=lag)
+    return series
+
+
+def baseline_scores(forecast, held_out, baselines, model_label):
+    """Daily error, daily CRPS and 28-day total for each method.
+
+    ``baselines`` maps a label to a forecast. A plain point forecast has no interval, so its
+    CRPS is its absolute error and its total interval is missing; a forecast series carrying
+    ``attrs["draws"]`` (``[draws, days]``) is scored as a distribution.
     """
     actual = held_out.receipts.to_numpy()
-    point = baseline.to_numpy()
+    rows = []
+    for label, baseline in baselines.items():
+        point = np.asarray(baseline, dtype=float)
+        draws = getattr(baseline, "attrs", {}).get("draws")
+        totals = None if draws is None else np.asarray(draws).sum(axis=1)
+        rows.append(
+            {
+                "Method": label,
+                "mae": float(np.abs(point - actual).mean()),
+                "crps": float(np.abs(point - actual).mean())
+                if draws is None
+                else crps(draws, actual),
+                "total": float(point.sum()),
+                "total_lo": np.nan if totals is None else float(np.quantile(totals, 0.05)),
+                "total_hi": np.nan if totals is None else float(np.quantile(totals, 0.95)),
+            }
+        )
     model_mean = forecast.receipts.mean(axis=0)
     model_total = forecast.receipts.sum(axis=1)  # one 28-day total per posterior draw
-    return pd.DataFrame(
-        [
-            {
-                "Method": "Weekday average (last 8 weeks)",
-                "mae": float(np.abs(point - actual).mean()),
-                "crps": float(np.abs(point - actual).mean()),
-                "storm": float(np.abs(point[storm_week] - actual[storm_week]).mean()),
-                "total": float(baseline.sum()),
-                "total_lo": np.nan,
-                "total_hi": np.nan,
-            },
-            {
-                "Method": model_label,
-                "mae": float(np.abs(model_mean - actual).mean()),
-                "crps": crps(forecast.receipts, actual),
-                "storm": float(np.abs(model_mean[storm_week] - actual[storm_week]).mean()),
-                "total": float(model_total.mean()),
-                "total_lo": float(np.quantile(model_total, 0.05)),
-                "total_hi": float(np.quantile(model_total, 0.95)),
-            },
-        ]
+    rows.append(
+        {
+            "Method": model_label,
+            "mae": float(np.abs(model_mean - actual).mean()),
+            "crps": crps(forecast.receipts, actual),
+            "total": float(model_total.mean()),
+            "total_lo": float(np.quantile(model_total, 0.05)),
+            "total_hi": float(np.quantile(model_total, 0.95)),
+        }
     )
+    return pd.DataFrame(rows)
 
 
 # --- Consistency checks on a propagated forecast --------------------------------------
@@ -447,17 +663,6 @@ def check_closed_days(forecast):
         "No receipts on a closed warehouse day",
         bool((forecast.receipts[:, closed] == 0).all()),
         "Saturday and Sunday receipts are exactly zero in every draw",
-    )
-
-
-def check_owed_decomposes(forecast):
-    return (
-        "Owed returns decompose exactly",
-        np.allclose(
-            forecast.expected_existing_receipts,
-            forecast.expected_open_receipts + forecast.expected_uninitiated_receipts,
-        ),
-        "owed = in transit + not yet initiated, per draw",
     )
 
 

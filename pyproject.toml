@@ -24,6 +24,7 @@ examples = [
   "altair>=5.5",
   "coeftable>=0.12.1",
   "anywidget>=0.9.18",
+  "statsmodels>=0.14",
 ]
 
 [dependency-groups]
