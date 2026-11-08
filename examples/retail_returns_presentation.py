@@ -290,19 +290,6 @@ def swatch(color, dashed=False, block=False, opacity=0.35):
     return f'<span class="ttn-swatch" style="{style}"></span>'
 
 
-def checks_list(checks):
-    """A checklist of (label, passed, detail)."""
-    return mo.Html(
-        '<ul class="ttn-checks">'
-        + "".join(
-            f'<li class="{"" if ok else "ttn-check--fail"}">{"✓" if ok else "✗"} {label} '
-            f"<code>{detail}</code></li>"
-            for label, ok, detail in checks
-        )
-        + "</ul>"
-    )
-
-
 def source_md(*objects):
     """Markdown code blocks holding the actual source of the given functions."""
     return mo.md(
@@ -1033,52 +1020,43 @@ def owed_chart(forecast, eventual_truth):
     ).properties(height=150, width="container")
 
 
-def drift_chart(forecast, drift_forecast, sales_draws, drift_sales_draws, sales_actual, held_out):
-    """The Part 4 forecast against the drifting-level one, stage by stage."""
+def promotion_chart(planned, canceled, planned_sales, canceled_sales):
+    """One fitted model under two future promotion calendars; no counterfactual actuals."""
 
-    def panel(current, drifting, actual, color, title, show_axis):
-        now = fan(forecast.dates, current, "current")
-        new = fan(forecast.dates, drifting, "drifting level").assign(actual=actual)
+    def panel(current, alternative, title, show_axis):
+        now = fan(planned.dates, current, "Promotion planned")
+        new = fan(planned.dates, alternative, "Promotion canceled")
         x = alt.X(
             "date:T",
             title=None,
             axis=alt.Axis(format="%a %b %-d", labels=show_axis, ticks=show_axis, labelAngle=0),
         )
+        tooltip = [
+            alt.Tooltip("date:T", title="day", format="%a %b %-d"),
+            alt.Tooltip("series:N", title="plan"),
+            alt.Tooltip("mean:Q", title="mean", format=",.0f"),
+            alt.Tooltip("lo90:Q", title="5%", format=",.0f"),
+            alt.Tooltip("hi90:Q", title="95%", format=",.0f"),
+        ]
         return alt.layer(
             alt.Chart(now)
-            .mark_area(color=color, opacity=0.14)
+            .mark_area(color=ACCENT, opacity=0.14)
             .encode(x=x, y="lo90:Q", y2="hi90:Q"),
             alt.Chart(now)
-            .mark_line(color=color, strokeWidth=2)
-            .encode(x=x, y=alt.Y("mean:Q", title=title)),
+            .mark_line(color=ACCENT, strokeWidth=2)
+            .encode(x=x, y=alt.Y("mean:Q", title=title), tooltip=tooltip),
             alt.Chart(new)
-            .mark_area(color=SLATE, opacity=0.16)
+            .mark_area(color=VIOLET, opacity=0.09)
             .encode(x=x, y="lo90:Q", y2="hi90:Q"),
             alt.Chart(new)
-            .mark_line(color=SLATE, strokeWidth=2.2, strokeDash=[5, 3])
-            .encode(x=x, y="mean:Q"),
-            alt.Chart(new).mark_circle(color=INK, size=30, opacity=0.9).encode(x=x, y="actual:Q"),
-        ).properties(height=130, width="container")
+            .mark_line(color=VIOLET, opacity=0.65, strokeWidth=2.2, strokeDash=[5, 3])
+            .encode(x=x, y="mean:Q", tooltip=tooltip),
+        ).properties(height=155, width="container")
 
     return mo.vstack(
         [
-            panel(sales_draws, drift_sales_draws, sales_actual, MUTED, "Units sold", False),
-            panel(
-                forecast.initiations,
-                drift_forecast.initiations,
-                held_out.initiations,
-                AMBER,
-                "Returns started",
-                False,
-            ),
-            panel(
-                forecast.receipts,
-                drift_forecast.receipts,
-                held_out.receipts,
-                ACCENT,
-                "Returns received",
-                True,
-            ),
+            panel(planned_sales, canceled_sales, "Units sold per day", False),
+            panel(planned.receipts, canceled.receipts, "Returns received per day", True),
         ],
         gap=0,
     )

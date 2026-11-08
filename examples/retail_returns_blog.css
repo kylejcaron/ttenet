@@ -525,34 +525,6 @@
 }
 
 
-/* Status checks */
-
-.ttn-checks {
-  margin: 16px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.ttn-checks li {
-  margin: 0 0 8px;
-  padding-left: 12px;
-  border-left: 3px solid var(--ttn-accent);
-  font-size: 14px;
-  color: var(--ttn-ink);
-}
-
-.ttn-checks li.ttn-check--fail {
-  border-left-color: var(--ttn-red);
-  color: var(--ttn-red);
-}
-
-.ttn-checks code {
-  display: block;
-  margin-top: 2px;
-  font-family: var(--ttn-mono);
-  font-size: 12px;
-  color: var(--ttn-muted);
-}
 
 .ttn-footer {
   margin-top: 8px;

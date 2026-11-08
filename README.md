@@ -77,6 +77,10 @@ in static HTML exports as well as a running notebook:
   means and 50%/90% intervals; two tiles give the receipts difference during the
   storm and the week after. The gap is a paired per-draw difference: a storm
   moves receipts in time far more than it changes the monthly total.
+- **Cancel July's promotion** (Part 5): keep the fitted model and weather fixed,
+  change only the future promotion calendar, and compare sales and warehouse
+  receipts. The four-week receipt reduction has an interval from paired forecast
+  draws; returns from units already sold remain in the forecast.
 
 Both examples run on one synthetic world, `examples/retail_returns_world.py`. Its
 receipts follow the same discretized Weibull the receipt stage fits, so every fitted
@@ -149,9 +153,9 @@ posterior. See [One future-sales value](#one-future-sales-value).
 
 Upstream building blocks such as `innovations`, `markov_series` and `ssoe` let the
 sales model change without rewriting the return stages. The essay's
-[executed local-level example](examples/retail_returns_blog.py) fits a drifting
-sales model and propagates its draws through the already fitted return stages;
-replacing the model inside a joint fit is a separate operation.
+[promotion-cancellation example](examples/retail_returns_blog.py) instead changes
+the future sales calendar with the entire fitted model held fixed. Forecast paths
+retain their joint draw labels, so the receipt reduction is measured within each draw.
 
 `numpyro_forecast` is a required dependency (`>=0.4.0,<0.5`), including when sales
 are supplied externally: the event stages use it too. Upstream also provides

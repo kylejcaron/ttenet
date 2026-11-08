@@ -37,33 +37,13 @@ def _():
 
 @app.cell
 def _():
-    import jax
-    import jax.numpy as jnp
     import numpy as np
-    import numpyro
     import numpyro.distributions as dist
-    import numpyro_forecast
     import pandas as pd
-    from numpyro_forecast import Horizon, draw_posterior, innovations, predict
 
-    from ttenet import RetailData, SalesForecast, date_grid
+    from ttenet import RetailData, date_grid
 
-    return (
-        Horizon,
-        RetailData,
-        SalesForecast,
-        date_grid,
-        dist,
-        draw_posterior,
-        innovations,
-        jax,
-        jnp,
-        np,
-        numpyro,
-        numpyro_forecast,
-        pd,
-        predict,
-    )
+    return RetailData, date_grid, dist, np, pd
 
 
 @app.cell(hide_code=True)
@@ -137,10 +117,8 @@ def _():
         VIOLET,
         callout,
         cards,
-        checks_list,
         cohort_chart,
         convolution_icon,
-        drift_chart,
         figure,
         forecast_chart,
         hazard_charts,
@@ -148,6 +126,7 @@ def _():
         interval_value,
         nav_header,
         owed_chart,
+        promotion_chart,
         purchase_timeline,
         recovery_view,
         return_fates_chart,
@@ -174,10 +153,8 @@ def _():
         VIOLET,
         callout,
         cards,
-        checks_list,
         cohort_chart,
         convolution_icon,
-        drift_chart,
         figure,
         forecast_chart,
         hazard_charts,
@@ -185,6 +162,7 @@ def _():
         interval_value,
         nav_header,
         owed_chart,
+        promotion_chart,
         purchase_timeline,
         recovery_view,
         return_fates_chart,
@@ -202,9 +180,6 @@ def _():
     from retail_returns_analysis import (
         actual_sales,
         baseline_scores,
-        check_closed_days,
-        check_counted_once,
-        check_sales_propagated,
         crps,
         daily_counts,
         daily_totals,
@@ -227,9 +202,6 @@ def _():
     return (
         actual_sales,
         baseline_scores,
-        check_closed_days,
-        check_counted_once,
-        check_sales_propagated,
         crps,
         daily_counts,
         daily_totals,
@@ -1286,13 +1258,12 @@ def _(section):
         "scenarios",
         "Part 5",
         "Asking “what if?”",
-        "This is where the chain pays off. Its inputs can change without a refit: the storm "
-        "forecast feeding the receipt stage, or the sales forecast feeding the whole chain. The "
-        "fitted return stages stay exactly as they are.",
+        "Change the plan, not the fitted model: a different storm forecast, or cancel July's "
+        "promotion. Push the new inputs through the same chain to see what reaches the warehouse.",
         points=(
             "Choose a storm scenario",
-            "Receipts and returns in transit against the forecast storm",
-            "A drifting sales model through the same stages",
+            "Cancel July's promotion",
+            "See when warehouse workload changes",
         ),
     )
     return
@@ -1400,236 +1371,89 @@ def _(mo, source_md, storm_scenario):
 
 
 @app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ### A second sales model
+def _(mo, pd, promotion_window):
+    mo.md(f"""
+    ### What if we cancel July's promotion?
 
-    The alternative is a **local level**: each product's log sales rate takes a small
-    random-walk step every day, so the forecast can follow a drifted level instead of
-    returning to a fixed mean. It is ordinary numpyro_forecast code (`Horizon`, `predict`,
-    `innovations`), fitted on the training sales alone, and its 28-day draws go through the
-    return stages fitted in Part 3 by row: sales draw
-    $i$ runs through return draw $i$. Uncertainty flows down the chain, but neither side
-    was conditioned on the other.
+    The promotion is planned for {promotion_window.start:%b} {promotion_window.start.day}–{(promotion_window.end - pd.Timedelta(days=1)).day}.
+    Keep the same fitted model and weather; switch off that promotion in the future sales calendar.
+    Returns from units already sold still arrive. Only the future sales cohorts change.
     """)
-    return
-
-
-@app.cell
-def _(Horizon, dist, innovations, jnp, mo, numpyro, predict):
-    def drifting_sales_model(covariates, data=None):
-        """Poisson sales whose log rate follows a random walk (a drifting local level)."""
-        h = Horizon.from_data(covariates, data)
-        level0 = numpyro.sample("level0", dist.Normal(2.0, 1.0).expand([2]).to_event(1))
-        drift_scale = numpyro.sample("drift_scale", dist.HalfNormal(0.05).expand([2]).to_event(1))
-        weekday_effect = numpyro.sample(
-            "weekday_effect", dist.Normal(0, 0.4).expand([2]).to_event(1)
-        )
-        promo_lift = numpyro.sample("promo_lift", dist.Normal(0, 1))
-        with numpyro.plate("product", 2, dim=-1):  # one random walk per product
-            steps = innovations(h, "steps", dist.Normal(0.0, 1.0))
-        level = level0 + jnp.cumsum(steps * drift_scale, axis=-2)
-        calendar = covariates[..., :1] * weekday_effect + covariates[..., 1:] * promo_lift
-        predict(h, lambda value: dist.Poisson(jnp.exp(value)), level + calendar)
-
-    mo.show_code(position="above")
-    return (drifting_sales_model,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.accordion(
-        {
-            "Fitting it and handing it to the chain": mo.md(r"""
-    `numpyro_forecast.forecast` replays the training prefix from the fitted posterior and
-    samples the next 28 days; `SalesForecast.from_numpyro_forecast` binds those
-    `[draw, day, product]` counts to dates and products; `fitted.forecast(future_sales=...)`
-    pushes them through the return stages. Three ways to change the sales side, and what
-    each refits:
-
-    | What you change | What is refit | How sales draws meet return draws |
-    | --- | --- | --- |
-    | Hand in a future sales path (a plan, a promo) as `future_sales=` | Nothing | Paths from this fit keep their draw labels; a table from elsewhere is paired by row. |
-    | Fit another sales model separately and pass its forecast (this part) | Only the sales model | By row: sales draw $i$ through return draw $i$. Propagation, not joint conditioning. |
-    | Replace the model inside `RetailReturnModel(sales=CountProcess(model=...))`, then fit | Everything, jointly | A new joint posterior; not run in this post. |
-    """)
-        }
-    )
     return
 
 
 @app.cell(hide_code=True)
 def _(
+    AS_OF,
     HORIZON,
     SEED,
-    SalesForecast,
-    data,
-    draw_posterior,
-    drifting_sales_model,
     fitted,
     forecast_dates,
-    jax,
-    jnp,
+    mo,
     np,
-    numpyro,
-    numpyro_forecast,
+    pd,
+    promo_spans,
     sales_covariates,
 ):
-    from numpyro.infer import SVI, Trace_ELBO, init_to_median
-    from numpyro.infer.autoguide import AutoNormal
-
-    # Fit on the training window only: data.sales stops at the as_of snapshot.
-    training_sales = jnp.asarray(data.sales)  # [day, product] counts
-    # Start every random-walk step at its prior median (zero): a flat level. The default
-    # random start draws each step anywhere in (-2, 2), and SVI can settle with the walk
-    # soaking up the weekday swing.
-    guide = AutoNormal(drifting_sales_model, init_loc_fn=init_to_median)
-    svi = SVI(drifting_sales_model, guide, numpyro.optim.Adam(0.02), Trace_ELBO())
-    sales_fit = svi.run(
-        jax.random.PRNGKey(SEED),
-        2000,
-        sales_covariates(data.calendar),
-        training_sales,
-        progress_bar=False,
+    promotion_window = promo_spans[promo_spans.start > pd.Timestamp(AS_OF)].iloc[0]
+    canceled_calendar = np.array(sales_covariates(forecast_dates), copy=True)
+    _promo = (forecast_dates >= np.datetime64(promotion_window.start)) & (
+        forecast_dates < np.datetime64(promotion_window.end)
     )
-    sales_posterior = draw_posterior(
-        jax.random.PRNGKey(SEED + 1), guide, sales_fit.params, fitted.network.num_samples
+    # Columns are weekday season and promotion flag. Change only this promotion.
+    canceled_calendar[_promo, 1] = 0.0
+    promotion_canceled = fitted.forecast(
+        horizon=HORIZON,
+        covariates={"sales": canceled_calendar},
+        seed=SEED + 5,
     )
-
-    # Training prefix from the posterior, then the next 28 days sampled: [draw, day, product].
-    all_days = np.concatenate([data.calendar, forecast_dates])
-    drift_draws = numpyro_forecast.forecast(
-        jax.random.PRNGKey(SEED + 2),
-        drifting_sales_model,
-        sales_posterior,
-        training_sales,
-        sales_covariates(all_days),
-    )
-    drift_sales = SalesForecast.from_numpyro_forecast(
-        drift_draws, forecast_dates, groups=data.groups, prefix="drift"
-    )
-
-    # The same fitted return stages, no refit: only the sales source changes.
-    drift_forecast = fitted.forecast(horizon=HORIZON, future_sales=drift_sales, seed=SEED + 5)
-    return drift_forecast, drift_sales, sales_posterior
+    mo.show_code(position="above")
+    return promotion_canceled, promotion_window
 
 
 @app.cell(hide_code=True)
-def _(daily_totals, drift_forecast):
-    drift_sales_draws = daily_totals(drift_forecast.sales, drift_forecast.dates)
-    return (drift_sales_draws,)
+def _(daily_totals, forecast, promotion_canceled):
+    canceled_sales_draws = daily_totals(promotion_canceled.sales, promotion_canceled.dates)
+    promotion_receipt_reduction = (forecast.receipts - promotion_canceled.receipts).sum(axis=1)
+    return canceled_sales_draws, promotion_receipt_reduction
 
 
 @app.cell(hide_code=True)
 def _(
-    INK,
-    SLATE,
-    data,
-    drift_chart,
-    drift_forecast,
-    drift_sales_draws,
+    ACCENT,
+    VIOLET,
+    canceled_sales_draws,
     figure,
     forecast,
-    held_out,
-    np,
-    sales_actual,
+    promotion_canceled,
+    promotion_chart,
     sales_draws,
-    sales_posterior,
     swatch,
 ):
-    _order = list(data.groups["product"].to_numpy(int))
-    _scale = np.asarray(sales_posterior["drift_scale"]).mean(axis=0)
     figure(
-        drift_chart(
-            forecast, drift_forecast, sales_draws, drift_sales_draws, sales_actual, held_out
-        ),
-        "Two sales forecasters, one set of fitted return stages",
+        promotion_chart(forecast, promotion_canceled, sales_draws, canceled_sales_draws),
+        "Same fitted model. A different promotion plan.",
         [
-            ("", "Solid lines and light bands: the Part 4 forecast."),
-            (
-                swatch(SLATE, dashed=True),
-                "A drifting-level sales model, pushed through the same return stages.",
-            ),
-            (swatch(INK), "Dots: what actually happened."),
-            (
-                "",
-                f"Bands are 90% intervals. The drift is day-to-day noise (daily step "
-                f"{_scale[_order.index(0)]:.3f} for A, {_scale[_order.index(1)]:.3f} for B), "
-                "not a trend.",
-            ),
+            (swatch(ACCENT), "Promotion as planned."),
+            (swatch(VIOLET, dashed=True, opacity=0.65), "Promotion canceled."),
+            ("", "Bands are 90% forecast intervals; weather is unchanged."),
         ],
     )
     return
 
 
 @app.cell(hide_code=True)
-def _(
-    cards,
-    crps,
-    drift_forecast,
-    drift_sales_draws,
-    forecast,
-    held_out,
-    interval_value,
-    sales_actual,
-    sales_draws,
-):
-    _actual = held_out.receipts.to_numpy()
+def _(cards, interval_value, promotion_receipt_reduction):
     cards(
         [
             (
-                "Units sold, next 28 days",
-                interval_value(drift_sales_draws.sum(axis=1)),
-                f"Drifting level. Part 4 model: <b>{sales_draws.sum(axis=1).mean():,.0f}</b>. "
-                f"Actual: <b>{sales_actual.sum():,}</b>.",
-                None,
-            ),
-            (
-                "Returns started",
-                interval_value(drift_forecast.initiations.sum(axis=1)),
-                f"Part 4 model: <b>{forecast.initiations.sum(axis=1).mean():,.0f}</b>. "
-                f"Actual: <b>{held_out.initiations.sum():,}</b>.",
-                "amber",
-            ),
-            (
-                "Returns received",
-                interval_value(drift_forecast.receipts.sum(axis=1)),
-                f"Part 4 model: <b>{forecast.receipts.sum(axis=1).mean():,.0f}</b>. "
-                f"Actual: <b>{held_out.receipts.sum():,}</b>.",
+                "Fewer warehouse receipts, next four weeks",
+                interval_value(promotion_receipt_reduction),
+                "Planned minus canceled, paired draw by draw. Assumes the learned promotion "
+                "effect carries forward—not a causal guarantee.",
                 "accent",
-            ),
-            (
-                "Daily receipt CRPS",
-                f"{crps(drift_forecast.receipts, _actual):.2f}",
-                f"Part 4 model: {crps(forecast.receipts, _actual):.2f}. Lower is better.",
-                None,
-            ),
-        ]
-    )
-    return
-
-
-@app.cell(hide_code=True)
-def _(
-    check_closed_days,
-    check_counted_once,
-    check_sales_propagated,
-    checks_list,
-    data,
-    drift_forecast,
-    drift_sales,
-    mo,
-):
-    mo.accordion(
-        {
-            "Consistency checks on the propagated forecast": checks_list(
-                [
-                    check_counted_once(data.units, drift_forecast),
-                    check_sales_propagated(drift_forecast, drift_sales),
-                    check_closed_days(drift_forecast),
-                ]
             )
-        }
+        ]
     )
     return
 

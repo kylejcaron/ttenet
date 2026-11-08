@@ -644,36 +644,3 @@ def baseline_scores(forecast, held_out, baselines, model_label):
         }
     )
     return pd.DataFrame(rows)
-
-
-# --- Consistency checks on a propagated forecast --------------------------------------
-# Each returns (label, passed, detail); the essay shows them as a checklist.
-
-
-def check_counted_once(units, forecast):
-    open_now = int((units.initiation_date.notna() & units.receipt_date.isna()).sum())
-    return (
-        "Every return is counted exactly once",
-        np.array_equal(
-            forecast.open_returns + forecast.receipts.cumsum(axis=1),
-            open_now + forecast.initiations.cumsum(axis=1),
-        ),
-        "open + cumulative receipts = open today + cumulative initiations, per draw",
-    )
-
-
-def check_closed_days(forecast):
-    closed = (np.asarray(forecast.dates, "datetime64[D]").astype(int) + 3) % 7 >= 5  # Sat, Sun
-    return (
-        "No receipts on a closed warehouse day",
-        bool((forecast.receipts[:, closed] == 0).all()),
-        "Saturday and Sunday receipts are exactly zero in every draw",
-    )
-
-
-def check_sales_propagated(forecast, sales):
-    return (
-        "The stages saw exactly the forecaster's sales",
-        np.array_equal(forecast.sales.counts, sales.counts),
-        "the sales that were propagated equal the drifting model's draws",
-    )
