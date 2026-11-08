@@ -425,7 +425,9 @@ def _(
                     ("", "Each bar stacks one block per sale day; darker blocks sold later."),
                 ],
                 "The plot below shows the convolution in full effect. One day's sales "
-                "are propagated forward into future returns initiated and future returns received.",
+                "are propagated forward into future returns initiated and future returns received. "
+                "Illustration: product A, neutral weekday effect and clear weather; "
+                "weekends stay closed.",
             )
         )
     )

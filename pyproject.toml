@@ -24,11 +24,11 @@ examples = [
   "altair>=5.5",
   "coeftable>=0.12.1",
   "anywidget>=0.9.18",
-  "statsmodels>=0.14",
+  "statsmodels>=0.15",
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.0", "ruff>=0.12", "complexipy==8.0.1"]
+dev = ["pytest>=8.0", "ruff>=0.12", "complexipy==8.0.1", "statsmodels>=0.15"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ttenet"]
@@ -48,6 +48,7 @@ include = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: functional or scientific tests that take more than one second"]
 
 [tool.ruff]
 line-length = 100

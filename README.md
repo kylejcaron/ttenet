@@ -68,6 +68,9 @@ in static HTML exports as well as a running notebook:
   lagged return initiations (its weights bounded at zero; future initiations come
   from a second SARIMAX), and see it against the chain's forecast. The score table
   below shows all four: daily MAE, daily CRPS, the 28-day total and its error.
+  SARIMAX uses native simulated paths for the total interval, conditional on
+  fitted parameters and upstream point forecasts. Rate shortcuts move weekend
+  receipts to Monday before selecting the forecast window, including carry-in.
 - **Storm scenarios** (Part 5): no storm, the storm as forecast, or one that
   lingers, without refitting the return stages. Daily receipts, the backlog of
   returns in transit, and a cumulative gap against the baseline show predictive

@@ -454,8 +454,7 @@ def _lag_windows(series, index, lags, prefix):
 def _bounded_sarimax(y, train, future):
     """Fit SARIMAX(1,0,0)(1,0,0)7 with lag weights bounded at zero; forecast ``future``.
 
-    Trains on every day with all regressors defined. Returns the fit and the forecast mean
-    and standard deviation.
+    Trains on every day with all regressors defined. Returns the fit and forecast mean.
     """
     from statsmodels.tools.sm_exceptions import ConvergenceWarning
     from statsmodels.tsa.statespace.sarimax import SARIMAX
@@ -475,7 +474,7 @@ def _bounded_sarimax(y, train, future):
         warnings.simplefilter("ignore", ConvergenceWarning)
         fit = model.fit(disp=False, method="lbfgs", maxiter=1000, bounds=bounds)
     predicted = fit.get_forecast(len(future), exog=future)
-    return fit, predicted.predicted_mean.to_numpy(), np.sqrt(predicted.var_pred_mean.to_numpy())
+    return fit, predicted.predicted_mean.to_numpy()
 
 
 def sarimax_baseline(
@@ -499,8 +498,9 @@ def sarimax_baseline(
     ``daily`` is the ledger's daily counts (``date``, ``Sales``, ``Returns initiated``,
     ``Returns received``); ``future_sales`` one expected sales value per forecast date in
     ``dates``. Returns the daily mean as a series; ``attrs["draws"]`` holds ``[draws, days]``
-    samples of its Gaussian forecast, clipped at zero with closed weekends set to zero, so it
-    can be scored as a distribution, and ``attrs["converged"]`` whether both fits converged.
+    samples from native conditional forecast paths, clipped at zero with closed weekends
+    set to zero. These retain serial dependence but condition on the fitted parameters and
+    upstream point forecasts. ``attrs["converged"]`` reports whether both fits converged.
     """
     history = daily.set_index(pd.DatetimeIndex(daily.date))
     days = pd.DatetimeIndex(dates)
@@ -511,7 +511,7 @@ def sarimax_baseline(
         ]
     )
     initiated = history["Returns initiated"].astype(float)
-    initiation_fit, future_initiations, _ = _bounded_sarimax(
+    initiation_fit, future_initiations = _bounded_sarimax(
         initiated,
         _lag_windows(sales, initiated.index, INITIATION_SALES_LAGS, "sales"),
         _lag_windows(sales, days, INITIATION_SALES_LAGS, "sales"),
@@ -537,8 +537,17 @@ def sarimax_baseline(
         return frame
 
     receipts = history["Returns received"].astype(float)
-    receipt_fit, mean, sd = _bounded_sarimax(receipts, regressors(receipts.index), regressors(days))
-    samples = np.random.default_rng(seed).normal(mean, sd, size=(draws, len(days)))
+    future = regressors(days)
+    receipt_fit, _ = _bounded_sarimax(receipts, regressors(receipts.index), future)
+    samples = (
+        np.asarray(
+            receipt_fit.simulate(
+                nsimulations=len(days), anchor="end", exog=future, repetitions=draws, rng=seed
+            )
+        )
+        .reshape(len(days), draws)
+        .T
+    )
     samples = np.clip(samples, 0, None)
     samples[:, days.dayofweek >= 5] = 0.0
     series = pd.Series(samples.mean(axis=0), index=days, name="sarimax")
@@ -589,14 +598,10 @@ def lagged_rate(units, as_of, future_sales, dates, mature_days=60, cohort_days=5
     days = pd.DatetimeIndex(dates)
     past = units.groupby("sale_date").size()
     sales = pd.concat([past, pd.Series(np.asarray(future_sales, dtype=float), index=days)])
-    point = rate * sales.reindex(days - pd.Timedelta(days=lag), fill_value=0).to_numpy()
-    weekend = days.dayofweek >= 5
-    for i in np.flatnonzero(weekend):
-        monday = i + (7 - days[i].dayofweek)
-        if monday < len(days):
-            point[monday] += point[i]
-    point[weekend] = 0.0
-    series = pd.Series(point, index=days, name="lagged_rate")
+    due = pd.DatetimeIndex(sales.index) + pd.Timedelta(days=lag)
+    due += pd.to_timedelta(np.where(due.dayofweek >= 5, 7 - due.dayofweek, 0), unit="D")
+    point = pd.Series(rate * sales.to_numpy(), index=due).groupby(level=0).sum()
+    series = point.reindex(days, fill_value=0.0).rename("lagged_rate")
     series.attrs.update(rate=float(rate), lag=lag)
     return series
 

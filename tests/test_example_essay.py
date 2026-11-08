@@ -155,6 +155,21 @@ def test_lagged_rate_uses_mature_receipts_and_moves_weekends_to_monday():
     pd.testing.assert_series_equal(lagged, expected, check_names=False)
 
 
+def test_lagged_rate_carries_pre_window_weekend_receipts_into_monday():
+    units = pd.DataFrame(
+        {
+            "sale_date": pd.to_datetime(
+                ["2026-01-01"] * 4 + ["2026-03-21"] + ["2026-03-22"] * 2 + ["2026-03-23"] * 3
+            ),
+            "receipt_date": pd.to_datetime(["2026-01-15"] * 2 + [None] * 8),
+        }
+    )
+    dates = pd.date_range("2026-04-06", periods=7)  # Monday, after two closed days
+    result = analysis.lagged_rate(units, "2026-04-05", np.zeros(7), dates)
+    # A 50% rate and 14-day lag put 1 + 2 + 3 sales' returns on the opening Monday.
+    np.testing.assert_allclose(result, [3.0, 0, 0, 0, 0, 0, 0])
+
+
 def test_baseline_scores_treat_each_baseline_as_a_point_forecast():
     actual = np.tile([4.0, 2.0], 7)
     held_out = SimpleNamespace(receipts=pd.Series(actual))
@@ -183,6 +198,39 @@ def test_baseline_scores_score_a_baseline_with_draws_as_a_distribution():
     assert spread.mae == 0.0
     assert spread.crps == pytest.approx(0.5)
     assert spread.total_lo < spread.total < spread.total_hi
+
+
+@pytest.mark.slow
+def test_sarimax_monthly_paths_preserve_positive_serial_dependence():
+    rng = np.random.default_rng(609)
+    days = pd.date_range("2025-01-06", periods=280)
+    residual = np.zeros(len(days))
+    for i in range(1, len(days)):
+        residual[i] = 0.95 * residual[i - 1] + rng.normal(scale=0.8)
+    daily = pd.DataFrame(
+        {
+            "date": days,
+            "Sales": rng.poisson(100, len(days)),
+            "Returns initiated": rng.poisson(30, len(days)),
+            "Returns received": np.where(days.dayofweek < 5, 50 + residual, 0.0),
+        }
+    )
+    dates = pd.date_range(days[-1] + pd.Timedelta(days=1), periods=28)
+    result = analysis.sarimax_baseline(
+        daily,
+        np.full(28, 100.0),
+        dates,
+        pd.DataFrame(columns=["start", "end"]),
+        sales_lags=((7, 13),),
+        initiation_lags=((1, 3),),
+        draws=1500,
+        seed=42,
+    )
+    paths = result.attrs["draws"]
+    # Persistent daily errors reinforce each other in the total, rather than cancelling
+    # as independent daily samples would. The oracle follows from the positive-AR DGP.
+    independent_variance = paths.var(axis=0, ddof=1).sum()
+    assert paths.sum(axis=1).var(ddof=1) > 2 * independent_variance
 
 
 def _initiation_fit(logit, draws=3):
