@@ -117,6 +117,18 @@ SECTIONS = (
 # --- Page furniture -------------------------------------------------------------------
 
 
+def hero(title, subtitle, *, kicker, byline):
+    """Header layout; subtitle and byline accept trusted inline HTML from the essay."""
+    credits = "\n".join(f"<li>{entry}</li>" for entry in byline)
+    return mo.Html(
+        '<div id="top" class="ttn-hero">'
+        f'<p class="ttn-kicker">{escape(kicker)}</p>'
+        f'<h1 class="ttn-title">{escape(title)}</h1>'
+        f'<p class="ttn-dek">{subtitle}</p>'
+        f'<ul class="ttn-byline">{credits}</ul></div>'
+    )
+
+
 def nav_header(brand):
     """The sticky top bar: the brand and a link to every section."""
     links = "".join(

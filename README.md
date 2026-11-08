@@ -2,6 +2,10 @@
 
 Calendar-aware count and time-to-event forecasting with JAX and NumPyro.
 
+> **This is a demo package.** TTENet is a reference implementation of forecasting
+> returns as a chain of forecasts, meant to be read, run and adapted—not a
+> maintained production library.
+
 **Sale → return initiated → return received**
 
 Some purchases never initiate a return; some initiated returns never arrive.
@@ -83,8 +87,9 @@ convolution for the TL;DR figure, `retail_returns_scenario.py` builds the JSON f
 storm scenarios, `retail_returns_controls.py` packages the other controls' complete
 datasets and Vega-Lite templates, `retail_returns_overview.py` packages the configured
 model and its actual source, and `retail_returns_presentation.py` holds the palette,
-themes and one chart per figure. Python computes every model number; the views in
-`examples/widgets/` draw it and handle selections entirely in the browser.
+themes, header/layout markup and one chart per figure. Python computes every model
+number; the views in `examples/widgets/` draw it and handle selections entirely in
+the browser. CSS stays in `retail_returns_blog.css` and the widgets' own stylesheets.
 
 ### Native survival convolutions
 
@@ -116,6 +121,39 @@ sales forecasts. Sampling uses actual origins; this small demonstration's
 explicit all-origin mean-convolution oracle uses quadratic calendar storage,
 unlike production source-aware pool propagation. Short variational fits
 establish execution, not calibration or production-scale performance.
+
+## Built on `numpyro_forecast`
+
+[`numpyro_forecast`](https://github.com/juanitorduz/numpyro_forecast) supplies the
+native fit-and-forecast protocol for both sales and return events. TTENet adds
+the susceptibility-capable event law, calendar rules and source-aware cohort
+composition. Network-level inference is ordinary NumPyro SVI with an `AutoNormal`
+guide and posterior replay; the native upstream protocol supplies the stage
+observation and forecast-boundary semantics.
+
+| Piece | Integration |
+| --- | --- |
+| `CountProcess(model=...)` | A plain NumPyro function uses `Horizon.from_data` and `predict`, observing `obs` and recording `forecast` |
+| Return stages | `EventTime` uses the same native observation, censoring and forecast-boundary protocol |
+| Network fitting | Stage likelihoods compose into one NumPyro program; `shared_model` can introduce shared latent effects |
+| Sales-to-returns handoff | `SalesForecast.from_numpyro_forecast` binds `[draw, future_day, group]` paths to dated cohorts |
+
+The layout already matches: time is axis `-2` and the product/series axis is `-1`.
+One function handles the observed prefix and future suffix, and forecast draws
+remain the interface between stages rather than being collapsed to a mean.
+Externally fitted sales paths are paired by row; they are not a new joint
+posterior. See [One future-sales value](#one-future-sales-value).
+
+Upstream building blocks such as `innovations`, `markov_series` and `ssoe` let the
+sales model change without rewriting the return stages. The essay's
+[executed local-level example](examples/retail_returns_blog.py) fits a drifting
+sales model and propagates its draws through the already fitted return stages;
+replacing the model inside a joint fit is a separate operation.
+
+`numpyro_forecast` is a required dependency (`>=0.4.0,<0.5`), including when sales
+are supplied externally: the event stages use it too. Upstream also provides
+sales-model backtesting and scoring (`backtest`, `eval_crps`); see its
+[documentation](https://juanitorduz.github.io/numpyro_forecast/).
 
 ## Fit and forecast
 

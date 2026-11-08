@@ -144,6 +144,7 @@ def _():
         figure,
         forecast_chart,
         hazard_charts,
+        hero,
         interval_value,
         nav_header,
         owed_chart,
@@ -180,6 +181,7 @@ def _():
         figure,
         forecast_chart,
         hazard_charts,
+        hero,
         interval_value,
         nav_header,
         owed_chart,
@@ -256,22 +258,20 @@ def _(nav_header):
 
 
 @app.cell(hide_code=True)
-def _(mo):
-    mo.Html("""
-        <div id="top" class="ttn-hero">
-          <p class="ttn-kicker">Forecasting · Time-to-event · Supply chain · Bayesian modeling</p>
-          <h1 class="ttn-title">Forecasting Returns</h1>
-          <p class="ttn-dek">
-            Forecasting retail returns highlights interesting first-principles solutions: <b>forecast chaining</b> and <b>time-to-event convolutions</b>. We create a model where we fit the forecast chain once, then push any
-            sales forecast through it to get a returns forecast, uncertainty and all.
-          </p>
-          <ul class="ttn-byline">
-            <li><b>Kyle Caron</b></li>
-            <li>September 2026</li>
-            <li>Built with <b>numpyro_forecast</b>, ttenet (a demo package) &amp; marimo</li>
-          </ul>
-        </div>
-    """)
+def _(hero):
+    hero(
+        "Forecasting Returns",
+        "Forecasting retail returns highlights interesting first-principles solutions: "
+        "<b>forecast chaining</b> and <b>time-to-event convolutions</b>. We create a model "
+        "where we fit the forecast chain once, then push any sales forecast through it to get a "
+        "returns forecast, uncertainty and all.",
+        kicker="Forecasting · Time-to-event · Supply chain · Bayesian modeling",
+        byline=(
+            "<b>Kyle Caron</b>",
+            "September 2026",
+            "Built with <b>numpyro_forecast</b>, ttenet (a demo package) &amp; marimo",
+        ),
+    )
     return
 
 
