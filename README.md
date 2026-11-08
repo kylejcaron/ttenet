@@ -3,8 +3,8 @@
 Calendar-aware count and time-to-event forecasting with JAX and NumPyro.
 
 > **This is a demo package.** TTENet is a reference implementation of forecasting
-> returns as a chain of forecasts, meant to be read, run and adapted—not a
-> maintained production library.
+> returns as a chain of forecasts, meant to be read, run and adapted.
+> It is not a maintained production library.
 
 **Sale → return initiated → return received**
 
@@ -79,8 +79,9 @@ in static HTML exports as well as a running notebook:
   moves receipts in time far more than it changes the monthly total.
 - **Cancel July's promotion** (Part 5): keep the fitted model and weather fixed,
   change only the future promotion calendar, and compare sales and warehouse
-  receipts. The four-week receipt reduction has an interval from paired forecast
-  draws; returns from units already sold remain in the forecast.
+  receipts, with the assumed storm shaded only on the receipts panel. A KDE plot
+  shows paired four-week receipt reductions, with the mean and central 90% interval
+  taken from the original draws; returns from units already sold remain in the forecast.
 
 Both examples run on one synthetic world, `examples/retail_returns_world.py`. Its
 receipts follow the same discretized Weibull the receipt stage fits, so every fitted

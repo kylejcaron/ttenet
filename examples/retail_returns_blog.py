@@ -123,10 +123,10 @@ def _():
         forecast_chart,
         hazard_charts,
         hero,
-        interval_value,
         nav_header,
         owed_chart,
         promotion_chart,
+        promotion_distribution_chart,
         purchase_timeline,
         recovery_view,
         return_fates_chart,
@@ -159,10 +159,10 @@ def _():
         forecast_chart,
         hazard_charts,
         hero,
-        interval_value,
         nav_header,
         owed_chart,
         promotion_chart,
+        promotion_distribution_chart,
         purchase_timeline,
         recovery_view,
         return_fates_chart,
@@ -1421,6 +1421,7 @@ def _(daily_totals, forecast, promotion_canceled):
 @app.cell(hide_code=True)
 def _(
     ACCENT,
+    AMBER,
     VIOLET,
     canceled_sales_draws,
     figure,
@@ -1428,32 +1429,31 @@ def _(
     promotion_canceled,
     promotion_chart,
     sales_draws,
+    storm_spans,
     swatch,
 ):
     figure(
-        promotion_chart(forecast, promotion_canceled, sales_draws, canceled_sales_draws),
+        promotion_chart(
+            forecast, promotion_canceled, sales_draws, canceled_sales_draws, storm_spans
+        ),
         "Same fitted model. A different promotion plan.",
         [
             (swatch(ACCENT), "Promotion as planned."),
-            (swatch(VIOLET, dashed=True, opacity=0.65), "Promotion canceled."),
-            ("", "Bands are 90% forecast intervals; weather is unchanged."),
+            (swatch(VIOLET, dashed=True), "Promotion canceled."),
+            (swatch(AMBER, block=True, opacity=0.12), "Assumed storm (same in both plans)."),
+            ("", "Bands are 90% forecast intervals."),
         ],
     )
     return
 
 
 @app.cell(hide_code=True)
-def _(cards, interval_value, promotion_receipt_reduction):
-    cards(
-        [
-            (
-                "Fewer warehouse receipts, next four weeks",
-                interval_value(promotion_receipt_reduction),
-                "Planned minus canceled, paired draw by draw. Assumes the learned promotion "
-                "effect carries forward—not a causal guarantee.",
-                "accent",
-            )
-        ]
+def _(figure, promotion_distribution_chart, promotion_receipt_reduction):
+    figure(
+        promotion_distribution_chart(promotion_receipt_reduction),
+        "Fewer warehouse receipts, next four weeks",
+        "Smoothed paired forecast differences; labels use the original draws. Assumes past promotion "
+        "effects carry forward. Not a causal estimate.",
     )
     return
 

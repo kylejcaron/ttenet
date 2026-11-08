@@ -250,14 +250,6 @@ def cards(items):
     return mo.Html(f'<div class="ttn-cards" style="--ttn-card-count:{len(items)}">{body}</div>')
 
 
-def interval_value(draws):
-    """Card value: the mean with its 90% interval underneath."""
-    return (
-        f"{draws.mean():,.0f}"
-        f"<small>[{np.quantile(draws, 0.05):,.0f}–{np.quantile(draws, 0.95):,.0f}]</small>"
-    )
-
-
 def figure(chart, title, caption):
     """A titled figure. ``caption`` is prose, or a list of ``(swatch, text)`` rows drawn as a
     key with every swatch in one left-hand column; use ``""`` as the swatch for a plain row."""
@@ -1020,10 +1012,10 @@ def owed_chart(forecast, eventual_truth):
     ).properties(height=150, width="container")
 
 
-def promotion_chart(planned, canceled, planned_sales, canceled_sales):
+def promotion_chart(planned, canceled, planned_sales, canceled_sales, storm_spans):
     """One fitted model under two future promotion calendars; no counterfactual actuals."""
 
-    def panel(current, alternative, title, show_axis):
+    def panel(current, alternative, title, show_axis, shade_storm=False):
         now = fan(planned.dates, current, "Promotion planned")
         new = fan(planned.dates, alternative, "Promotion canceled")
         x = alt.X(
@@ -1038,7 +1030,7 @@ def promotion_chart(planned, canceled, planned_sales, canceled_sales):
             alt.Tooltip("lo90:Q", title="5%", format=",.0f"),
             alt.Tooltip("hi90:Q", title="95%", format=",.0f"),
         ]
-        return alt.layer(
+        layers = [
             alt.Chart(now)
             .mark_area(color=ACCENT, opacity=0.14)
             .encode(x=x, y="lo90:Q", y2="hi90:Q"),
@@ -1051,15 +1043,94 @@ def promotion_chart(planned, canceled, planned_sales, canceled_sales):
             alt.Chart(new)
             .mark_line(color=VIOLET, opacity=0.65, strokeWidth=2.2, strokeDash=[5, 3])
             .encode(x=x, y="mean:Q", tooltip=tooltip),
-        ).properties(height=155, width="container")
+        ]
+        if shade_storm:
+            visible = storm_spans[
+                (storm_spans.end > pd.Timestamp(planned.dates[0]))
+                & (storm_spans.start <= pd.Timestamp(planned.dates[-1]))
+            ]
+            layers.insert(
+                0,
+                alt.Chart(visible)
+                .mark_rect(color=AMBER, opacity=0.07)
+                .encode(x="start:T", x2="end:T"),
+            )
+        return alt.layer(*layers).properties(height=155, width="container")
 
     return mo.vstack(
         [
             panel(planned_sales, canceled_sales, "Units sold per day", False),
-            panel(planned.receipts, canceled.receipts, "Returns received per day", True),
+            panel(
+                planned.receipts,
+                canceled.receipts,
+                "Returns received per day",
+                True,
+                shade_storm=True,
+            ),
         ],
         gap=0,
     )
+
+
+def promotion_distribution_chart(draws):
+    """Kernel-smoothed paired draws; mean and interval remain empirical summaries."""
+    draws = np.asarray(draws)
+    lo, hi = np.quantile(draws, [0.05, 0.95])
+    frame = pd.DataFrame({"reduction": draws})
+    summary = pd.DataFrame(
+        [
+            {
+                "lo": lo,
+                "hi": hi,
+                "mid": (lo + hi) / 2,
+                "mean": draws.mean(),
+                "interval": f"90% interval: {lo:,.0f}–{hi:,.0f}",
+                "mean_label": f"Mean {draws.mean():,.0f}",
+            }
+        ]
+    )
+    margin = 0.15 * np.ptp(draws)
+    curve = (
+        alt.Chart(frame)
+        .transform_density(
+            "reduction",
+            as_=["reduction", "density"],
+            counts=False,
+            extent=[float(draws.min() - margin), float(draws.max() + margin)],
+            steps=256,
+        )
+        .encode(
+            x=alt.X(
+                "reduction:Q",
+                scale=alt.Scale(zero=False),
+                title="Fewer warehouse receipts over four weeks",
+            ),
+            y=alt.Y(
+                "density:Q",
+                title="Density",
+                axis=alt.Axis(labels=False, ticks=False, domain=False, grid=False),
+            ),
+            tooltip=[
+                alt.Tooltip("reduction:Q", title="Fewer receipts", format=",.0f"),
+                alt.Tooltip("density:Q", title="Density", format=".4f"),
+            ],
+        )
+    )
+    central = curve.transform_filter(
+        (alt.datum.reduction >= float(lo)) & (alt.datum.reduction <= float(hi))
+    )
+    return alt.layer(
+        curve.mark_area(color=ACCENT, opacity=0.10),
+        central.mark_area(color=ACCENT, opacity=0.32),
+        curve.mark_line(color=ACCENT, strokeWidth=2.2),
+        alt.Chart(summary).mark_rule(color=INK, strokeWidth=1.5).encode(x="mean:Q"),
+        alt.Chart(summary)
+        .mark_text(color=MUTED, fontSize=11, baseline="bottom")
+        .encode(x="mid:Q", y=alt.value(-20), text="interval:N"),
+        alt.Chart(summary)
+        .mark_text(color=INK, fontSize=11, align="left", dx=5, baseline="bottom")
+        .encode(x="mean:Q", y=alt.value(-3), text="mean_label:N"),
+    ).properties(height=170, width="container", padding={"top": 35, "bottom": 5})
 
 
 def baseline_chart(forecast, held_out, baselines, spans, promos, recent, colors=None, y_max=None):
