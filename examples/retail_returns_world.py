@@ -1,8 +1,9 @@
 """The synthetic retail world shared by the returns essay and the command-line example.
 
-Two products, a 90-day return policy, abandonment, storms, weekend receipt closures, and
-the model inputs that describe them. Receipts arrive by the same discretized Weibull law
-the receipt stage fits, so every fitted receipt parameter has a true value to check.
+Two products, a 90-day return policy, abandonment, storms, a late-May sale and a planned
+early-July one, weekend receipt closures, and the model inputs that describe them. Receipts
+arrive by the same discretized Weibull law the receipt stage fits, so every fitted receipt
+parameter has a true value to check.
 """
 
 from __future__ import annotations
@@ -25,11 +26,15 @@ RECEIPT_SCALE, RECEIPT_SHAPE, RECEIPT_STORM, RECEIPT_RECEIVABLE = 6.0, 1.8, -1.5
 # Daily sales rates before ``volume``, and the weekday swing of each product.
 SALES_RATES = (1.2, 0.8)
 WEEKDAY_SWING = (0.3, -0.2)
+# Each sale day multiplies both products' daily sales rate by exp(PROMO_LIFT).
+PROMO_LIFT = float(np.log(4.0))
 
 # Return initiation. A sale is susceptible with probability
-# sigmoid(SUSCEPTIBLE + SUSCEPTIBLE_PRODUCT * product). A susceptible unit of age a starts a
-# return on a day with hazard sigmoid(HAZARD_BASE + HAZARD_AGE * cos(min(a, 15) / 5)
+# sigmoid(SUSCEPTIBLE + SUSCEPTIBLE_PRODUCT * product). Nobody can start a return before the
+# parcel arrives, DELIVERY_DAYS after the sale. From then on, a susceptible unit of age a
+# starts a return on a day with hazard sigmoid(HAZARD_BASE + HAZARD_AGE * age_shape(a)
 # + HAZARD_PRODUCT * product + HAZARD_WEEKDAY * sin(2 * pi * weekday / 7)), through day 90.
+DELIVERY_DAYS = 3
 SUSCEPTIBLE, SUSCEPTIBLE_PRODUCT = -0.8, 0.45
 HAZARD_BASE, HAZARD_AGE, HAZARD_PRODUCT, HAZARD_WEEKDAY = -2.5, 0.35, -0.25, 0.3
 
@@ -38,9 +43,16 @@ def sigmoid(value):
     return 1 / (1 + np.exp(-value))
 
 
+def age_shape(age):
+    """Highest on delivery day, falling until age 15, flat after."""
+    return np.cos((np.minimum(age, 15) - DELIVERY_DAYS) / 4)
+
+
 def true_initiation_hazard(age):
     """The simulator's daily initiation hazard: product A, a neutral weekday."""
-    return sigmoid(HAZARD_BASE + HAZARD_AGE * np.cos(np.minimum(age, 15) / 5))
+    age = np.asarray(age)
+    hazard = sigmoid(HAZARD_BASE + HAZARD_AGE * age_shape(age))
+    return np.where(age < DELIVERY_DAYS, 0.0, hazard)
 
 
 def true_receipt_hazard(age):
@@ -54,8 +66,16 @@ def storms(days):
     """An explicitly supplied historical/future weather scenario, not a forecast."""
     age = (np.asarray(days, dtype="datetime64[D]") - np.datetime64("2026-01-01")).astype(int)
     return (
-        ((age >= 45) & (age <= 49)) | ((age >= 125) & (age <= 129)) | ((age >= 185) & (age <= 189))
+        ((age >= 45) & (age <= 49)) | ((age >= 95) & (age <= 99)) | ((age >= 195) & (age <= 199))
     ).astype(float)
+
+
+def promotions(days):
+    """The marketing calendar: a one-week sale about four weeks before the snapshot, so most
+    of its returns are in by then, and a planned one-week sale inside the forecast window.
+    Both are known in advance."""
+    age = (np.asarray(days, dtype="datetime64[D]") - np.datetime64("2026-01-01")).astype(int)
+    return (((age >= 145) & (age <= 151)) | ((age >= 183) & (age <= 189))).astype(float)
 
 
 def simulate_retail(seed=21, training_days=180, horizon=28, volume=1.0):
@@ -65,7 +85,8 @@ def simulate_retail(seed=21, training_days=180, horizon=28, volume=1.0):
     sales_days = date_grid(start, start + np.timedelta64(training_days + horizon - 1, "D"))
     weekday = pd.DatetimeIndex(sales_days).dayofweek.to_numpy()
     season = np.sin(2 * np.pi * weekday / 7)
-    rates = volume * np.exp(np.log(SALES_RATES) + season[:, None] * np.array(WEEKDAY_SWING))
+    log_rates = np.log(SALES_RATES) + season[:, None] * np.array(WEEKDAY_SWING)
+    rates = volume * np.exp(log_rates + PROMO_LIFT * promotions(sales_days)[:, None])
     daily_sales = rng.poisson(rates)
     rows = []
     for day_index, date in enumerate(sales_days):
@@ -75,12 +96,12 @@ def simulate_retail(seed=21, training_days=180, horizon=28, volume=1.0):
                 received = np.datetime64("NaT", "D")
                 susceptible = rng.random() < sigmoid(SUSCEPTIBLE + SUSCEPTIBLE_PRODUCT * product)
                 if susceptible:
-                    for age in range(91):
+                    for age in range(DELIVERY_DAYS, 91):
                         day = date + np.timedelta64(age, "D")
                         week = pd.Timestamp(day).dayofweek
                         hazard = sigmoid(
                             HAZARD_BASE
-                            + HAZARD_AGE * np.cos(min(age, 15) / 5)
+                            + HAZARD_AGE * age_shape(age)
                             + HAZARD_PRODUCT * product
                             + HAZARD_WEEKDAY * np.sin(2 * np.pi * week / 7)
                         )
@@ -136,13 +157,15 @@ def receipt_covariates(frame, calendar):
 
 
 def sales_covariates(calendar):
+    """Weekday season and the promotion flag: both known in advance for any date."""
     weekday = pd.DatetimeIndex(calendar).dayofweek.to_numpy()
-    return jnp.asarray(np.sin(2 * np.pi * weekday / 7)[:, None])
+    return jnp.asarray(np.column_stack([np.sin(2 * np.pi * weekday / 7), promotions(calendar)]))
 
 
 def sales_model(covariates, data=None):
     h = Horizon.from_data(covariates, data)
     log_rate = numpyro.sample("log_rate", dist.Normal(0, 0.6).expand([2]).to_event(1))
     weekday_effect = numpyro.sample("weekday_effect", dist.Normal(0, 0.4).expand([2]).to_event(1))
-    eta = log_rate + covariates * weekday_effect
+    promo_lift = numpyro.sample("promo_lift", dist.Normal(0, 1))
+    eta = log_rate + covariates[..., :1] * weekday_effect + covariates[..., 1:] * promo_lift
     predict(h, lambda value: dist.Poisson(jnp.exp(value)), eta)
