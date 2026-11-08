@@ -1103,7 +1103,7 @@ def promotion_distribution_chart(draws):
             x=alt.X(
                 "reduction:Q",
                 scale=alt.Scale(zero=False),
-                title="Fewer warehouse receipts over four weeks",
+                title="Fewer receipts over four weeks",
             ),
             y=alt.Y(
                 "density:Q",
