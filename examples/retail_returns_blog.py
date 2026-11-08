@@ -11,7 +11,7 @@
 #     "numpyro-forecast>=0.4.0,<0.5",
 #     "ttenet @ git+https://github.com/kylejcaron/ttenet@84b67dd52a63eefe21b8b0841fcf9ef076c30770",
 #     "anywidget>=0.9.18",
-#     "statsmodels>=0.14",
+#     "statsmodels>=0.15",
 # ]
 # [tool.marimo.display]
 # theme = "light"
