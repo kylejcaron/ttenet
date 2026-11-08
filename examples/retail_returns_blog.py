@@ -46,7 +46,6 @@ def _():
     import pandas as pd
     from numpyro_forecast import Horizon, draw_posterior, innovations, predict
 
-    import ttenet
     from ttenet import RetailData, SalesForecast, date_grid
 
     return (
@@ -64,23 +63,31 @@ def _():
         numpyro_forecast,
         pd,
         predict,
-        ttenet,
     )
 
 
 @app.cell(hide_code=True)
 def _():
-    # The interactive figures live beside this notebook: Python computes, they only draw.
+    # Browser-owned views receive computed data or the configured model and its source.
     from retail_returns_controls import baseline_data, history_data, sale_day_data
-    from retail_returns_widgets import BaselineComparison, HistoryRange, SaleDay, ScenarioForecast
+    from retail_returns_overview import model_overview_data
+    from retail_returns_widgets import (
+        BaselineComparison,
+        HistoryRange,
+        ModelOverview,
+        SaleDay,
+        ScenarioForecast,
+    )
 
     return (
         BaselineComparison,
         HistoryRange,
+        ModelOverview,
         SaleDay,
         ScenarioForecast,
         baseline_data,
         history_data,
+        model_overview_data,
         sale_day_data,
     )
 
@@ -147,7 +154,6 @@ def _():
         scores_view,
         section,
         source_md,
-        stage_cards,
         swatch,
         wait_charts,
     )
@@ -184,7 +190,6 @@ def _():
         scores_view,
         section,
         source_md,
-        stage_cards,
         swatch,
         wait_charts,
     )
@@ -718,26 +723,11 @@ def _(mo):
     data is still censored. Looking back three months, we can see both the return rate and
     how long the returns took. But what about two weeks ago, when many returns haven't had
     time to happen yet? We shouldn't wait 90 days to learn when we can do better.
-
-
-
-    ### The full model
-
-    The full model chains three forecasts:
-    1. Sales
-    2. Returns started
-    3. Returns received
-
-    Steps 2 and 3 each get their own conversion rate and time to event estimate.
-
-    Chaining them is the **survival convolution** from the TL;DR: each day's sales spread
-    forward through the time to event, then summed, which turns the return stages into a
-    daily forecast.
     """)
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(dist, mo, sales_model):
     from ttenet import CountProcess, EventProcess, RetailReturnModel, WeibullFamily
 
@@ -755,12 +745,23 @@ def _(dist, mo, sales_model):
         ),
     )
     mo.show_code(position="above")
-    return WeibullFamily, model
+    return (model,)
 
 
 @app.cell(hide_code=True)
-def _(model, stage_cards):
-    stage_cards(model.receipt.family)
+def _(
+    ModelOverview,
+    initiation_covariates,
+    mo,
+    model,
+    model_overview_data,
+    receipt_covariates,
+):
+    mo.ui.anywidget(
+        ModelOverview(
+            data=model_overview_data(model, initiation_covariates, receipt_covariates)
+        )
+    )
     return
 
 
@@ -771,151 +772,6 @@ def _(callout):
         r"""An order silent for $a$ days is either never returning or still on its way:
         $(1-\pi) + \pi\,S(a)$, with conversion rate $\pi$ and time-to-event survival $S(a)$.
         That is what fixes the collapsing line in Part 1.""",
-    )
-    return
-
-
-@app.cell(hide_code=True)
-def _(
-    WeibullFamily,
-    initiation_covariates,
-    mo,
-    receipt_covariates,
-    sales_model,
-    source_md,
-    ttenet,
-):
-    _convolution = mo.md(r"""
-    A sale does not promise a return on one particular day. It spreads probability across
-    the days ahead. A **survival kernel** captures **susceptible × still waiting × event today**:
-
-    $$
-    K(s,t) = \pi\,S(s,t^-)\,h(t-s,t).
-    $$
-
-    The mass left outside the forecast window means *not by then*, not necessarily
-    *never*. Write the initiation kernel as $K_0$ and the receipt kernel as $K_1$.
-    For a new, homogeneous cohort, with parameters fixed, their composition is a
-    **survival convolution**:
-
-    $$
-    (K_0 K_1)(s,t) = \sum_u K_0(s,u)\,K_1(u,t).
-    $$
-
-    Ordinary convolution shifts one lag curve along time. Here, storms and weekends can
-    change the curve for each source date, so the composition runs **within each posterior
-    draw**, and simulated paths still allocate whole units and carry their actual parent
-    dates forward. The interface does not prescribe a delay family: leaving `family` unset
-    gives the default random-walk hazard (initiation here), `WeibullFamily` (receipt here)
-    supplies the same kernel from a two-parameter curve, and a custom NumPyro model joins
-    through an `EventFamily` wrapper. A family only states how the delay behaves; the
-    shared core handles closed days, exposure, the mixture-cure marginalization, dated
-    cohorts and integer counts. The wiring is in the *Internals* tab and the README.
-    """)
-
-    _sales = mo.vstack(
-        [
-            mo.md(r"""
-    The sales process is an ordinary NumPyro model following the
-    [`numpyro_forecast`](https://github.com/juanitorduz/numpyro_forecast) protocol: it
-    receives covariates with time on axis `-2`, and `predict` handles the observed prefix
-    versus the future suffix. The two functions after it are the event covariate providers
-    passed to `fit`.
-    """),
-            source_md(sales_model, initiation_covariates, receipt_covariates),
-            mo.md(r"""
-    **The covariate contract.** A provider is called as `provider(frame, calendar)`, where
-    `frame` holds the historical units followed by any new sales cohorts and `calendar` the
-    days requested, and returns a mapping of up to three arrays:
-
-    - `features`, shape `[unit, day, P]`: time-varying regressors, defined for every
-      historical and future day. In the default family they shift the hazard logit; in
-      `WeibullFamily` they multiply each day's cumulative-hazard increment by
-      $e^{x_t^\top\beta}$. Same array, different effect, so the coefficients are not
-      interchangeable between the two.
-    - `susceptibility_features`, shape `[unit, Q]`: static attributes known when the
-      source event happens. They enter the susceptibility logit, and for units that already
-      exist they cannot change in a scenario.
-    - `allowed`, an optional boolean mask over days (or units and days) that closes further
-      days on top of the process's own `allowed_weekdays`.
-
-    Each feature must keep one meaning across fitting and forecasting windows, which is why
-    `product`, the weekday sine and the promotion flag are defined by formula rather than by
-    position.
-    """),
-        ]
-    )
-
-    _initiation = mo.vstack(
-        [
-            mo.md(r"""
-    **Initiation** is the default `EventProcess`. It samples `age_scale ~ HalfNormal(1)`,
-    `age_init ~ Normal(0, 2)` and standardized steps `age_steps ~ Normal(0, 1)` for the
-    random-walk baseline, plus `beta ~ Normal(0, 1)` for the hazard regressors and
-    `susceptibility_intercept ~ Normal(0, 2)` and `susceptibility_beta ~ Normal(0, 1)` for
-    susceptibility. `default_timing` turns one draw into the law:
-    """),
-            source_md(ttenet.event_times.default_timing),
-            mo.accordion(
-                {
-                    "The default random-walk prior, in full": source_md(
-                        ttenet.models.sample_stage_parameters
-                    )
-                }
-            ),
-        ]
-    )
-
-    _receipt = mo.vstack(
-        [
-            mo.md(r"""
-    **Receipt** is `WeibullFamily`. Scalar NumPyro priors are sampled at the sites `scale`,
-    `shape` and `susceptibility_intercept`. A fixed positive scale or shape (say
-    `scale_prior=6.0`) is used as given and creates no site; a fixed susceptibility logit
-    can be any finite number. `susceptibility_logit_prior` is on log-odds, not probability.
-    Regressors add `beta` for the cumulative-hazard multiplier, and static susceptibility
-    features would add `susceptibility_beta`; neither exists unless supplied. This is the
-    family's entire model:
-    """),
-            source_md(WeibullFamily.model),
-        ]
-    )
-
-    _internals = mo.vstack(
-        [
-            mo.md(
-                "One stage's model: the family's law, masked by the stage's exposure and "
-                "closures, observed at the native `EventTime` site through "
-                "`numpyro_forecast.predict`. These are private helpers and may change; they "
-                "are shown so nothing is hidden."
-            ),
-            source_md(
-                ttenet.network._event_model,
-                ttenet.models.observation_kernel,
-                ttenet.models._observe,
-                ttenet.families._weibull_log_increment,
-                ttenet.families._timing_from_log_increment,
-            ),
-        ]
-    )
-
-    mo.vstack(
-        [
-            mo.md(r"""
-    ### Under the hood
-
-    The same model in more detail. Each tab stands on its own; skip them on a first read and come back when you want the math or the code.
-    """),
-            mo.ui.tabs(
-                {
-                    "Survival convolution": _convolution,
-                    "Sales and covariates": _sales,
-                    "Initiation": _initiation,
-                    "Receipt": _receipt,
-                    "Internals": _internals,
-                }
-            ),
-        ]
     )
     return
 
@@ -1794,11 +1650,6 @@ def _(mo):
 
     This allows us to match the data generating process in our model, and build a better and more interpretable forecast than we could have otherwise.
     """)
-    return
-
-
-@app.cell
-def _():
     return
 
 

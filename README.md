@@ -44,7 +44,7 @@ uv sync --all-extras   # the essay's extras include statsmodels for the SARIMAX 
 uv run marimo run examples/retail_returns_blog.py   # or `marimo edit` to see the code
 ```
 
-Four interactive figures sit inside the parts they explain. All their controls work
+The essay's interactive views sit inside the parts they explain. Their controls work
 in static HTML exports as well as a running notebook:
 
 - **History and forecast** (TL;DR): move either handle of the history range slider
@@ -54,6 +54,11 @@ in static HTML exports as well as a running notebook:
   day they came from, with the chosen day in black, so its units visibly spread out
   and add up with every other sale day's. This is the survival convolution,
   computed from the fitted timing curves (`retail_returns_chain.py`).
+- **Three forecasts. One chain.** (Part 2): the full model call appears as a code block
+  above the overview. Constructor fields line up with sales, return starts and receipts,
+  with one takeaway per stage and a shared convolution diagram. Select a piece for its
+  mechanism and real source; equations, configured priors and full implementation details
+  expand only when requested.
 - **Comparing against four baselines** (Part 4): pick a weekday average, a settled
   or a naive return rate times lagged sales, or a SARIMAX with lagged sales and
   lagged return initiations (its weights bounded at zero; future initiations come
@@ -76,9 +81,10 @@ numbers (cohort rates, parameter recovery, the four baselines and their scores, 
 typical return drawn in Part 1), `retail_returns_chain.py` computes the survival
 convolution for the TL;DR figure, `retail_returns_scenario.py` builds the JSON for the
 storm scenarios, `retail_returns_controls.py` packages the other controls' complete
-datasets and Vega-Lite templates, and `retail_returns_presentation.py` holds the
-palette, themes and one chart per figure. Python computes every number; the figures
-in `examples/widgets/` draw it and handle selections entirely in the browser.
+datasets and Vega-Lite templates, `retail_returns_overview.py` packages the configured
+model and its actual source, and `retail_returns_presentation.py` holds the palette,
+themes and one chart per figure. Python computes every model number; the views in
+`examples/widgets/` draw it and handle selections entirely in the browser.
 
 ### Native survival convolutions
 

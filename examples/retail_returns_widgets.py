@@ -1,8 +1,8 @@
 """Interactive figures for the retail returns blog.
 
-Every figure receives plain JSON computed by the notebook from the fitted model and the
-simulated ledger; the browser code only draws it and handles its own buttons. Nothing here
-calls back into Python, so the figures keep working in a static export of the notebook.
+Each view receives plain JSON: computed forecasts or model configuration and source.
+The browser code draws it and handles its own controls without calling Python, so
+interactions keep working in a static export of the notebook.
 """
 
 from pathlib import Path
@@ -46,4 +46,12 @@ class BaselineComparison(anywidget.AnyWidget):
 
     _esm = WIDGETS / "controls.js"
     _css = WIDGETS / "controls.css"
+    data = traitlets.Dict().tag(sync=True)
+
+
+class ModelOverview(anywidget.AnyWidget):
+    """Three configured stages and one browser-owned mechanism/source detail panel."""
+
+    _esm = WIDGETS / "overview.js"
+    _css = WIDGETS / "overview.css"
     data = traitlets.Dict().tag(sync=True)
