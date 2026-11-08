@@ -1452,8 +1452,7 @@ def _(figure, promotion_distribution_chart, promotion_receipt_reduction):
     figure(
         promotion_distribution_chart(promotion_receipt_reduction),
         "Fewer warehouse receipts, next four weeks",
-        "Smoothed paired forecast differences; labels use the original draws. Assumes past promotion "
-        "effects carry forward. Not a causal estimate.",
+        "Smoothed paired forecasted differences",
     )
     return
 
