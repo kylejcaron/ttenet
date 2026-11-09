@@ -11,17 +11,19 @@
 #     "numpyro-forecast>=0.4.0,<0.5",
 #     "ttenet @ git+https://github.com/kylejcaron/ttenet@84b67dd52a63eefe21b8b0841fcf9ef076c30770",
 #     "anywidget>=0.9.18",
+#     "statsmodels>=0.15",
 # ]
 # [tool.marimo.display]
 # theme = "light"
 # ///
+
 import marimo
 
 __generated_with = "0.25.0"
 app = marimo.App(
     width="full",
-    css_file="retail_returns_blog.css",
     app_title="Returns you haven't seen yet",
+    css_file="retail_returns_blog.css",
 )
 
 
@@ -35,47 +37,39 @@ def _():
 
 @app.cell
 def _():
-    import jax
-    import jax.numpy as jnp
     import numpy as np
-    import numpyro
     import numpyro.distributions as dist
-    import numpyro_forecast
     import pandas as pd
-    from numpyro_forecast import Horizon, draw_posterior, innovations, predict
 
-    import ttenet
-    from ttenet import RetailData, SalesForecast, date_grid
+    from ttenet import RetailData, date_grid
 
-    return (
-        Horizon,
-        RetailData,
-        SalesForecast,
-        date_grid,
-        dist,
-        draw_posterior,
-        innovations,
-        jax,
-        jnp,
-        np,
-        numpyro,
-        numpyro_forecast,
-        pd,
-        predict,
-        ttenet,
-    )
+    return RetailData, date_grid, dist, np, pd
 
 
 @app.cell(hide_code=True)
 def _():
-    # The interactive figures live beside this notebook: Python computes, they only draw.
+    # Browser-owned views receive computed data or the configured model and its source.
+    from retail_returns_controls import baseline_data, history_data, sale_day_data
+    from retail_returns_overview import model_overview_data
     from retail_returns_widgets import (
-        ChainStepper,
-        PurchaseStory,
+        BaselineComparison,
+        HistoryRange,
+        ModelOverview,
+        SaleDay,
         ScenarioForecast,
     )
 
-    return ChainStepper, PurchaseStory, ScenarioForecast
+    return (
+        BaselineComparison,
+        HistoryRange,
+        ModelOverview,
+        SaleDay,
+        ScenarioForecast,
+        baseline_data,
+        history_data,
+        model_overview_data,
+        sale_day_data,
+    )
 
 
 @app.cell(hide_code=True)
@@ -85,6 +79,7 @@ def _():
     # fits, so every fitted receipt parameter has a true value to check.
     from retail_returns_world import (
         initiation_covariates,
+        promotions,
         receipt_covariates,
         sales_covariates,
         sales_model,
@@ -94,6 +89,7 @@ def _():
 
     return (
         initiation_covariates,
+        promotions,
         receipt_covariates,
         sales_covariates,
         sales_model,
@@ -109,113 +105,119 @@ def _():
     from retail_returns_presentation import (
         ACCENT,
         AMBER,
+        AMBER_LIGHT,
         INK,
         MODEL_NAME,
         MUTED,
+        RATE,
+        RATE_LIGHT,
         RED,
         SLATE,
         STORM,
-        baseline_chart,
+        VIOLET,
         callout,
         cards,
-        checks_list,
         cohort_chart,
-        daily_history_chart,
-        drift_chart,
+        convolution_icon,
         figure,
         forecast_chart,
         hazard_charts,
-        interval_value,
+        hero,
         nav_header,
         owed_chart,
+        promotion_chart,
+        promotion_distribution_chart,
+        purchase_timeline,
         recovery_view,
+        return_fates_chart,
+        sale_echo,
         scores_view,
         section,
         source_md,
-        stage_cards,
-        status_figure,
         swatch,
-        tldr_chart,
+        wait_charts,
     )
 
     return (
         ACCENT,
         AMBER,
+        AMBER_LIGHT,
         INK,
         MODEL_NAME,
         MUTED,
+        RATE,
+        RATE_LIGHT,
         RED,
         SLATE,
         STORM,
-        baseline_chart,
+        VIOLET,
         callout,
         cards,
-        checks_list,
         cohort_chart,
-        daily_history_chart,
-        drift_chart,
+        convolution_icon,
         figure,
         forecast_chart,
         hazard_charts,
-        interval_value,
+        hero,
         nav_header,
         owed_chart,
+        promotion_chart,
+        promotion_distribution_chart,
+        purchase_timeline,
         recovery_view,
+        return_fates_chart,
+        sale_echo,
         scores_view,
         section,
         source_md,
-        stage_cards,
-        status_figure,
         swatch,
-        tldr_chart,
+        wait_charts,
     )
 
 
 @app.cell(hide_code=True)
 def _():
     from retail_returns_analysis import (
-        abandoned_share,
         actual_sales,
         baseline_scores,
-        check_closed_days,
-        check_counted_once,
-        check_owed_decomposes,
-        check_sales_propagated,
-        classify_units,
         crps,
         daily_counts,
         daily_totals,
         eventual_counts,
         hazard_curves,
         held_out_counts,
+        lagged_rate,
         post_storm_check,
         recovery_table,
+        return_fates,
+        sarimax_baseline,
         storm_runs,
+        time_between_events,
+        typical_return,
         weekday_average,
         weekly_cohort_rates,
     )
     from retail_returns_scenario import scenario_data, storm_labels
 
     return (
-        abandoned_share,
         actual_sales,
         baseline_scores,
-        check_closed_days,
-        check_counted_once,
-        check_owed_decomposes,
-        check_sales_propagated,
-        classify_units,
         crps,
         daily_counts,
         daily_totals,
         eventual_counts,
         hazard_curves,
         held_out_counts,
+        lagged_rate,
         post_storm_check,
         recovery_table,
+        return_fates,
+        sarimax_baseline,
         scenario_data,
         storm_labels,
         storm_runs,
+        time_between_events,
+        typical_return,
         weekday_average,
         weekly_cohort_rates,
     )
@@ -228,23 +230,20 @@ def _(nav_header):
 
 
 @app.cell(hide_code=True)
-def _(mo):
-    mo.Html("""
-        <div id="top" class="ttn-hero">
-          <p class="ttn-kicker">Forecasting · Time-to-event · Supply chain · Bayesian modeling</p>
-          <h1 class="ttn-title">Returns you haven't seen yet</h1>
-          <p class="ttn-dek">
-            Forecasting retail returns as a chain of forecasts. Sales feed return
-            initiations, which feed warehouse receipts. Fit the chain once, then push any
-            sales forecast through it, uncertainty and all.
-          </p>
-          <ul class="ttn-byline">
-            <li><b>Kyle Caron</b></li>
-            <li>September 2026</li>
-            <li>Built with <b>numpyro_forecast</b>, ttenet (a demo package) &amp; marimo</li>
-          </ul>
-        </div>
-    """)
+def _(hero):
+    hero(
+        "Forecasting Returns",
+        "Forecasting retail returns highlights interesting first-principles solutions: "
+        "<b>forecast chaining</b> and <b>time-to-event convolutions</b>. We create a model "
+        "where we fit the forecast chain once, then push any sales forecast through it to get a "
+        "returns forecast, uncertainty and all.",
+        kicker="Forecasting · Time-to-event · Supply chain · Bayesian modeling",
+        byline=(
+            "<b>Kyle Caron</b>",
+            "September 2026",
+            "Built with <b>numpyro_forecast</b>, ttenet (a demo package) &amp; marimo",
+        ),
+    )
     return
 
 
@@ -253,73 +252,66 @@ def _(section):
     section(
         "tldr",
         "TL;DR",
-        "Returns are a forecast of a forecast",
+        "Returns are a time-dependent chain of forecasts",
         "Next week's warehouse receipts depend on the returns customers start this week, "
-        "which depend on what sold last month and on what sells this month. Forecast each "
-        "step, chain them, and push a sales forecast all the way through.",
+        "which depend on what sold last month and on what sells this month. We show how we can "
+        "improve inference and forecast performance with a lesser-known solution: forecasting "
+        "with a chain of time-to-event convolutions.",
     )
     return
 
 
 @app.cell(hide_code=True)
 def _(
-    ACCENT,
-    AMBER,
-    INK,
+    AS_OF,
+    HORIZON,
+    HistoryRange,
     MUTED,
+    SLATE,
     STORM,
-    figure,
+    daily_history,
     forecast,
     held_out,
+    history_data,
+    mo,
+    pd,
+    promo_spans,
     sales_actual,
     sales_draws,
     storms,
     swatch,
-    tldr_chart,
 ):
-    figure(
-        tldr_chart(forecast, sales_draws, sales_actual, held_out, storms),
-        "One sales forecast, propagated twice",
-        f"{swatch(MUTED)}The sales forecast for the next four weeks (top). Every simulated "
-        f"sale starts a return clock {swatch(AMBER)}(middle), and every started return, "
-        "including those started before today, starts a shipping clock "
-        f"{swatch(ACCENT)}(bottom). Bands are 50% and 90% intervals; {swatch(INK)}dots are "
-        "what actually happened. Receipts are zero on weekends and slow to a trickle during "
-        f"the {swatch(STORM, block=True, opacity=0.55)}early-July storm, a weather input the "
-        "forecast is given.",
-    )
-    return
-
-
-@app.cell(hide_code=True)
-def _(cards, forecast, held_out, interval_value, sales_actual, sales_draws):
-    cards(
-        [
-            (
-                "Units sold, next 28 days",
-                interval_value(sales_draws.sum(axis=1)),
-                f"The sales forecast going in. Actual: <b>{sales_actual.sum():,}</b>.",
-                None,
-            ),
-            (
-                "Returns started",
-                interval_value(forecast.initiations.sum(axis=1)),
-                f"Propagated once. Actual: <b>{held_out.initiations.sum():,}</b>.",
-                "amber",
-            ),
-            (
-                "Returns received",
-                interval_value(forecast.receipts.sum(axis=1)),
-                f"Propagated twice. Actual: <b>{held_out.receipts.sum():,}</b>.",
-                "accent",
-            ),
-            (
-                "Still owed by past sales",
-                f"{forecast.expected_existing_receipts.mean():,.0f}",
-                "Eventual receipts from units already sold, whenever they arrive.",
-                None,
-            ),
-        ]
+    _past = promo_spans[promo_spans.end <= pd.Timestamp(AS_OF)].iloc[-1]
+    _planned = promo_spans[promo_spans.start > pd.Timestamp(AS_OF)].iloc[0]
+    _last = _planned.end - pd.Timedelta(days=1)
+    mo.ui.anywidget(
+        HistoryRange(
+            data=history_data(
+                forecast,
+                sales_draws,
+                sales_actual,
+                held_out,
+                storms,
+                promo_spans,
+                daily_history,
+                AS_OF,
+                HORIZON,
+                "One sales forecast, propagated twice",
+                [
+                    (swatch(MUTED), "Historical observations"),
+                    (
+                        swatch(SLATE, block=True),
+                        f"Sales: the {_past.start:%b} {_past.start.day} sale's returns are in by today; "
+                        f"the {_planned.start:%b} {_planned.start.day}–{_last.day} sale's land late.",
+                    ),
+                    (
+                        swatch(STORM, block=True, opacity=0.55),
+                        "Storm: receipts stall, then catch up.",
+                    ),
+                    ("", "Bands are 50% and 90% intervals."),
+                ],
+            )
+        )
     )
     return
 
@@ -327,17 +319,90 @@ def _(cards, forecast, held_out, interval_value, sales_actual, sales_draws):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    The usual shortcut multiplies a sales forecast by a return rate and shifts it by a
-    typical lag. It holds until something changes: a promo, a storm, a new policy, or a
-    quarter whose recent sales haven't had time to come back yet. This post treats returns
-    as a **chain of forecasts** instead, built on
-    [numpyro_forecast](https://github.com/juanitorduz/numpyro_forecast): sales is an
-    ordinary numpyro_forecast model, and each return stage is a time-to-event model that
-    speaks the same protocol. A small demo package,
+    The usual shortcut multiplies a sales forecast by a return rate and shifts it by a typical lag. In regular weeks it does fine: steady sales make steady returns. It breaks when something changes: a promo, a storm, a new policy, or a quarter whose recent sales haven't had time to come back yet.
+
+    This post treats returns as a **chain of forecasts** instead (the *chained convolution
+    model*, or just *the chain*), built on [numpyro_forecast](https://github.com/juanitorduz/numpyro_forecast): sales is an
+    ordinary `numpyro_forecast` model, and each return stage is a time-to-event model. A small demo package,
     [ttenet](https://github.com/kylejcaron/ttenet), wires them together: one call fits the
-    chain, one call pushes any sales forecast through it with uncertainty intact, and a
-    storm scenario or a different sales model is one argument.
+    chain, one call pushes any sales forecast through it with uncertainty intact, and covariates can impact any part of the chain:
+    * Promos, seasonality, stockouts, etc. can impact the demand forecast.
+    * Policy changes, fulfillment speed, quality control, etc. can impact the return initiation.
+    * Storms, warehouse availability, etc. can impact when returns are actually received.
     """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(callout, convolution_icon):
+    callout(
+        "The trick: a survival convolution",
+        """We break returns down into a conversion rate and a time-to-event (survival analysis) process, both downstream of sales. But survival models are famously hard to turn into forecasts, so we use a __survival convolution__.
+
+    The survival convolution spreads each day's sales over the days that follow using the time-to-event curve, then adds them up.
+
+    That gives us properties that match how the
+    data is generated: delays like storms or
+    warehouse closures are covariates on a
+    calendar day, so they hit every order in
+    transit that day, whichever day it was sold.
+    """,
+        icon=convolution_icon(size=48),
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(fitted, forecast, sales_draws):
+    from retail_returns_chain import convolution_kernels, follow_sales
+
+    # Every forecast sale day, followed forward nine weeks through both fitted timing curves.
+    conv_days = 63
+    conv_followed = follow_sales(
+        convolution_kernels(fitted), sales_draws.mean(axis=0), forecast.dates[0], conv_days
+    )
+    return (conv_followed,)
+
+
+@app.cell(hide_code=True)
+def _(
+    ACCENT,
+    AMBER,
+    AS_OF,
+    INK,
+    SaleDay,
+    conv_followed,
+    forecast,
+    mo,
+    pd,
+    promo_spans,
+    sale_day_data,
+    sales_draws,
+    swatch,
+):
+    _planned = promo_spans[promo_spans.start > pd.Timestamp(AS_OF)].iloc[0].start
+    _default = int((_planned - pd.Timestamp(forecast.dates[0])).days)
+    mo.ui.anywidget(
+        SaleDay(
+            data=sale_day_data(
+                conv_followed,
+                sales_draws.mean(axis=0),
+                forecast.dates[0],
+                _default,
+                "Follow one day's sales forward",
+                [
+                    (swatch(INK, block=True, opacity=0.9), ""),
+                    (swatch(AMBER, block=True, opacity=0.9), "Returns started each day."),
+                    (swatch(ACCENT, block=True, opacity=0.9), "Returns received each day."),
+                    ("", "Each bar stacks one block per sale day; darker blocks sold later."),
+                ],
+                "The plot below shows the convolution in full effect. One day's sales "
+                "are propagated forward into future returns initiated and future returns received. "
+                "Illustration: product A, neutral weekday effect and clear weather; "
+                "weekends stay closed.",
+            )
+        )
+    )
     return
 
 
@@ -352,7 +417,8 @@ def _(section):
         "things happened to it.",
         points=(
             "Follow one purchase through both clocks",
-            "What the ledger can and cannot see yet",
+            "Close-ups: how long each step takes, and a sale's returns",
+            "What the data can and cannot see yet",
             "Why the return-rate shortcut breaks",
         ),
     )
@@ -363,7 +429,7 @@ def _(section):
 def _(np, simulate_retail):
     SEED = 21
     TRAINING_DAYS, HORIZON = 180, 28
-    VOLUME = 10.0  # scales both products' daily sales
+    VOLUME = 30.0  # scales both products' daily sales
     START = np.datetime64("2026-01-01")
     TRAINING_START = np.datetime64("2026-01-31")
     AS_OF = START + np.timedelta64(TRAINING_DAYS - 1, "D")
@@ -388,38 +454,24 @@ def _(AS_OF, RetailData, TRAINING_START, date_grid, ledger, mo):
 
 
 @app.cell(hide_code=True)
-def _(AS_OF, classify_units, data):
-    # RetailData imposes no deadline; the 90-day policy belongs to the initiation process.
-    unit_status = classify_units(data.units, AS_OF)
-    return (unit_status,)
-
-
-@app.cell(hide_code=True)
-def _(AS_OF, PurchaseStory, data, mo, pd, storms, truth):
-    from retail_returns_story import purchase_story
-
-    _story = purchase_story(truth, AS_OF, storms)
-    _sale = pd.Timestamp(_story["sale"])
-    _sold = f"{_sale:%A, %B} {_sale.day}"
+def _(AS_OF, data, mo, purchase_timeline, typical_return):
     mo.vstack(
         [
             mo.md(
-                f"""
+                """
     ### Follow one purchase
 
-    Each unit runs on two clocks. The first starts at the sale and can stop when the
-    customer starts a return, which the policy allows up to day 90. The second starts at
-    that initiation and stops when the parcel is scanned in at the warehouse; it has no
-    deadline. {_story["cohort_units"]} units sold on {_sold}; three of them are below.
-    Choose one and move through time. The figure shows only what the ledger had recorded
-    by the chosen day.
+    Every unit runs on two clocks. The first starts at the sale and stops if the customer
+    starts a return, which the policy allows through day 90. The second starts then and
+    stops when the parcel is scanned in at the warehouse. Here is one typical return from
+    the data:
     """
             ),
-            mo.ui.anywidget(PurchaseStory(data=_story)),
+            purchase_timeline(typical_return(data.units, AS_OF)),
             # A published page has no Python to page through data, so show a fixed sample.
             mo.accordion(
                 {
-                    f"A sample of the ledger: the first 25 of {len(data.units):,} units": mo.ui.table(
+                    f"A sample of the data: the first 25 of {len(data.units):,} units": mo.ui.table(
                         data.units[
                             ["item_id", "product", "sale_date", "initiation_date", "receipt_date"]
                         ].head(25),
@@ -434,76 +486,143 @@ def _(AS_OF, PurchaseStory, data, mo, pd, storms, truth):
 
 
 @app.cell(hide_code=True)
-def _(AS_OF, abandoned_share, data, status_figure, truth, unit_status):
-    status_figure(unit_status, abandoned_share(data.units, unit_status, truth), AS_OF)
+def _(
+    ACCENT,
+    AMBER,
+    AS_OF,
+    data,
+    figure,
+    mo,
+    source_md,
+    swatch,
+    time_between_events,
+    wait_charts,
+):
+    _to_start, _in_transit = time_between_events(data.units, AS_OF)
+    mo.vstack(
+        [
+            figure(
+                wait_charts(_to_start, _in_transit),
+                "How long each step takes",
+                [
+                    (
+                        swatch(AMBER, block=True, opacity=0.85),
+                        "Time from sale to starting a return.",
+                    ),
+                    (
+                        swatch(ACCENT, block=True, opacity=0.85),
+                        "In transit: usually under two weeks.",
+                    ),
+                ],
+            ),
+            mo.accordion({"How these waits are computed": source_md(time_between_events)}),
+        ]
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    ACCENT,
+    AMBER,
+    AS_OF,
+    SLATE,
+    daily_history,
+    figure,
+    pd,
+    promo_spans,
+    sale_echo,
+    swatch,
+):
+    _sale = promo_spans[promo_spans.end <= pd.Timestamp(AS_OF)].iloc[-1]
+    figure(
+        sale_echo(daily_history, _sale, before=21),
+        "A spike in sales leads to an increase in returns",
+        [
+            (
+                swatch(SLATE, block=True),
+                f"The {_sale.start:%b %-d} sale: about four times the usual orders, for one week.",
+            ),
+            (swatch(AMBER), "Returns started peak about a week later."),
+            (swatch(ACCENT), "Returns received peak about two weeks after the sale."),
+        ],
+    )
     return
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    The middle of the bar is **censored**: the clock is still running and the ledger
-    cannot say where it will stop. The in-transit pile is the sneakiest. In this world
-    about one in five initiated returns is never shipped back, and the ledger records no
-    "abandoned" event, so the model has to learn that share from how long open returns
-    stay open. The same events as daily time series:
+    Today many units are still mid-story: a return could start tomorrow, or a
+    parcel could still be on its way. Those records are **censored**: the clock is still
+    running and the ledger cannot say where it will stop. Open returns are the sneakiest.
+    In this world about one in five initiated returns is never shipped back, and no
+    "abandoned" event is ever recorded, so the model has to learn that share from how long open
+    returns stay open.
     """)
     return
 
 
 @app.cell(hide_code=True)
-def _(AS_OF, HORIZON, START, daily_counts, data, np, storm_runs, storms):
+def _(
+    AS_OF,
+    HORIZON,
+    START,
+    daily_counts,
+    data,
+    np,
+    promotions,
+    storm_runs,
+    storms,
+):
     daily_history = daily_counts(data.units, START, AS_OF)
+    # The last six observed weeks lead into every forecast figure: long enough to show the
+    # May sale and its returns before the snapshot.
+    recent_history = daily_history.tail(42)
     # Contiguous storm spans over the full simulated period, for shading.
     storm_spans = storm_runs(storms, START, AS_OF + np.timedelta64(HORIZON, "D"))
-    return daily_history, storm_spans
-
-
-@app.cell(hide_code=True)
-def _(
-    AMBER,
-    TRAINING_START,
-    daily_history,
-    daily_history_chart,
-    figure,
-    storm_spans,
-    swatch,
-):
-    figure(
-        daily_history_chart(daily_history, storm_spans, TRAINING_START),
-        "Six months of the ledger, as daily counts",
-        "The dotted line marks where the <b>sales</b> training window starts (Jan 31); units "
-        "sold before it keep their full histories and clocks. Shaded bands "
-        f"{swatch(AMBER, block=True)}are storms: receipts stall, then catch up. Receipts are "
-        "exactly zero on weekends because the warehouse is closed.",
-    )
-    return
+    promo_spans = storm_runs(promotions, START, AS_OF + np.timedelta64(HORIZON, "D"))
+    return daily_history, promo_spans, recent_history, storm_spans
 
 
 @app.cell(hide_code=True)
 def _(cohort_rates, mo):
     _recent = cohort_rates.tail(4)
+    _seen, _eventual = _recent.observed.mean(), _recent.eventual.mean()
     mo.md(rf"""
     ### Why the return-rate shortcut breaks
 
-    The shortcut needs a return rate, and the obvious estimate is returns so far divided
-    by units sold. For the last four weeks of sales that comes out
-    **{(_recent.eventual - _recent.observed).mean() * 100:.0f} points** below the rate those
-    same units eventually reach. Recent units haven't had time: a unit sold three weeks ago
-    with no return yet has only told us "not yet", and the average treats it as "never".
+    The shortcut is one number, *"we expect {_eventual:.0%} of orders to start a return"*, applied
+    to sales after a typical lag.
+
+    | What it misses | What goes wrong |
+    | :--- | :--- |
+    | Recent orders haven't finished returning | Last four weeks: **{_seen:.0%}** returned so far, **{_eventual:.0%}** eventually |
+    | Return rates change | A change shows up only once orders finish returning, about 90 days later |
+    | Returns spread over weeks | One lag lands a whole sale's returns at once |
+    | Storms | Warehouse receipts stall, then catch up |
+    | The warehouse shuts at weekends | Receipts pile up on Mondays |
+    | Some started returns never ship | Returns started overstate returns received |
+
+    The chain below asks *will* an order be returned and *when* separately, so "not yet"
+    never counts as "never".
     """)
     return
 
 
 @app.cell(hide_code=True)
-def _(RED, SLATE, cohort_chart, cohort_rates, figure, swatch):
+def _(INK, RED, SLATE, cohort_chart, cohort_rates, figure, swatch):
     figure(
         cohort_chart(cohort_rates),
         "Recent sales look like they never get returned",
-        f"{swatch(RED)}<b>Returns so far</b> collapse for recent cohorts: those units simply "
-        "haven't had time. The truth (dashed) doesn't fall at all. The model's estimate "
-        f"{swatch(SLATE)} adds, for every still-eligible unit, the probability it starts a "
-        "return before its deadline given that it hasn't yet. Band: 90% posterior interval.",
+        [
+            (swatch(RED), "Returned so far: collapses for recent weeks, which haven't had time."),
+            (swatch(INK, dashed=True), "Eventually returned (the truth): doesn't fall at all."),
+            (
+                swatch(SLATE),
+                "The model: adds each open unit's chance of a later return. Band: 90% interval.",
+            ),
+        ],
     )
     return
 
@@ -517,9 +636,9 @@ def _(section):
         "Each step gets its own model: a count forecast for sales, and a time-to-event "
         "forecast for each return stage. The output of one is the input of the next.",
         points=(
-            "The model, in one cell",
+            "Modeling returns: will it, and when?",
             "What each stage learns and what it is told",
-            "How censoring enters the likelihood",
+            "Why will-it and when are fitted together",
         ),
     )
     return
@@ -528,26 +647,67 @@ def _(section):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ### The model, in one cell
+    ### Modeling returns
 
-    Sales are an ordinary [numpyro_forecast](https://github.com/juanitorduz/numpyro_forecast)
-    model (`sales_model`, in the tabs below): `Horizon` and `predict` split the observed
-    days from the forecast days. Each return stage is an `EventProcess`: initiation takes
-    the defaults, a flexible random-walk hazard with a 90-day deadline; receipt uses the
-    packaged Weibull family on a warehouse that opens Monday to Friday. `dist` is
-    `numpyro.distributions`.
+    Each return stage is two models in one:
+    1. a **conversion rate** (will this order ever be returned?)
+    2. a **time to event** (if so, when?).
+
+    An order with no return yet is either one that will never come back, or one that hasn't
+    come back *yet*.
     """)
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
+def _(
+    AMBER,
+    AMBER_LIGHT,
+    AS_OF,
+    figure,
+    return_fates,
+    return_fates_chart,
+    swatch,
+    truth,
+):
+    _fates = return_fates(truth, AS_OF)
+    figure(
+        return_fates_chart(_fates),
+        "Where a batch of orders stands, day by day",
+        [
+            (
+                swatch(AMBER, block=True, opacity=0.9),
+                "Returned so far: climbs at the pace of the time to event.",
+            ),
+            (
+                swatch(AMBER_LIGHT, block=True, opacity=0.9),
+                "Will return, not yet: silent today, but coming.",
+            ),
+            (swatch("#e3e5da", block=True, opacity=1), "Never returns: the rest."),
+            ("", "Orders sold more than 90 days ago, so every fate is known."),
+        ],
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    They have to be fitted together, because you can't learn one without the other while the
+    data is still censored. Looking back three months, we can see both the return rate and
+    how long the returns took. But what about two weeks ago, when many returns haven't had
+    time to happen yet? We shouldn't wait 90 days to learn when we can do better.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
 def _(dist, mo, sales_model):
     from ttenet import CountProcess, EventProcess, RetailReturnModel, WeibullFamily
 
     model = RetailReturnModel(
         sales=CountProcess(model=sales_model),
-        # age_bins=16: one learned hazard level for each day of age 0-14, and one shared
-        # level for every age from 15 on. It is the number of parameters, not a max delay.
+        # age_bins=16 specifies discrete hazard functions bins
         initiation=EventProcess(age_bins=16, deadline_days=90),
         receipt=EventProcess(
             family=WeibullFamily(
@@ -559,210 +719,31 @@ def _(dist, mo, sales_model):
         ),
     )
     mo.show_code(position="above")
-    return WeibullFamily, model
-
-
-@app.cell(hide_code=True)
-def _(model, stage_cards):
-    stage_cards(model.receipt.family)
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    Each stage separates what is **learned** from what is **declared**: whether a unit
-    ever does it and when are estimated from the ledger; the deadline and the opening
-    days are rules you state. For each unit, four things happen (or don't):
-
-    1. **Sales.** Product $p$ sells $\text{sales}_{t,p} \sim \text{Poisson}\big(\exp(\alpha_p + \gamma_p \sin(2\pi\,\text{weekday}_t / 7))\big)$ units on day $t$.
-    2. **Will this unit start a return?** A sale is *susceptible* with probability $\pi^{\text{init}}_p = \sigma(a + b\,x_p)$; the rest never start one, however long you wait. The ledger never labels which units are which.
-    3. **When?** A susceptible unit of age $a$ starts a return on day $t$ with hazard $h(a, t) = \sigma\big(\ell_{\min(a,\,15)} + \beta^\top x_t\big)$, through day 90 of the policy. The $\ell$'s are a regularized random walk over age, so nothing forces a parametric shape.
-    4. **Will it arrive, and when?** With probability $\pi^{\text{rec}} = \sigma(c)$ an initiated return is receivable. Its arrival follows a Weibull clock, $S(a) = \exp\!\big(-(a/\lambda)^k\big)$, discretized to days; a storm multiplies each day's hazard increment by $e^{\beta x_t}$, and weekends are exactly zero. No deadline.
-    """)
-    return
-
-
-@app.cell(hide_code=True)
-def _(callout):
-    callout(
-        "Built on numpyro_forecast",
-        """Every stage speaks the numpyro_forecast protocol. Sales is any model written with
-        `Horizon` and `predict`, so you can bring your own. Each return stage is observed
-        through `predict` too, with a time-to-event law in place of a count. Forecasting
-        replays every posterior draw through those same programs, and a different
-        numpyro_forecast sales model can replace the first stage without touching the other
-        two (Part 6).""",
-    )
-    return
-
-
-@app.cell(hide_code=True)
-def _(callout):
-    callout(
-        "Key point",
-        """Propagation happens per draw. A sale simulated for Jul 3 in posterior draw 17
-        starts its own return clock in draw 17, with draw 17's parameters, and so on down
-        the chain. That is why any sales forecast can be swapped in and pushed through with
-        its uncertainty intact, and why every stage's counts add up exactly.""",
-    )
-    return
-
-
-@app.cell(hide_code=True)
-def _(callout):
-    callout(
-        "How censoring is handled",
-        r"""A unit quiet for $a$ days contributes $(1-\pi) + \pi\,S(a)$ to the likelihood:
-        either it is not susceptible, or it is and hasn't returned yet. Given the silence,
-        the chance it is still susceptible is $\pi S(a) / \big((1-\pi) + \pi S(a)\big)$,
-        which falls the longer the silence lasts but never reaches a verdict. That is what
-        fixes the collapsing line in Part 1.""",
-    )
-    return
+    return (model,)
 
 
 @app.cell(hide_code=True)
 def _(
-    WeibullFamily,
+    ModelOverview,
     initiation_covariates,
     mo,
+    model,
+    model_overview_data,
     receipt_covariates,
-    sales_model,
-    source_md,
-    ttenet,
 ):
-    _convolution = mo.md(r"""
-    A sale does not promise a return on one particular day. It spreads probability across
-    the days ahead. A **survival kernel** captures **susceptible × still waiting × event today**:
-
-    $$
-    K(s,t) = \pi\,S(s,t^-)\,h(t-s,t).
-    $$
-
-    The mass left outside the forecast window means *not by then*, not necessarily
-    *never*. Write the initiation kernel as $K_0$ and the receipt kernel as $K_1$.
-    For a new, homogeneous cohort, with parameters fixed, their composition is a
-    **survival convolution**:
-
-    $$
-    (K_0 K_1)(s,t) = \sum_u K_0(s,u)\,K_1(u,t).
-    $$
-
-    Ordinary convolution shifts one lag curve along time. Here, storms and weekends can
-    change the curve for each source date, so the composition runs **within each posterior
-    draw**, and simulated paths still allocate whole units and carry their actual parent
-    dates forward. The interface does not prescribe a delay family: leaving `family` unset
-    gives the default random-walk hazard (initiation here), `WeibullFamily` (receipt here)
-    supplies the same kernel from a two-parameter curve, and a custom NumPyro model joins
-    through an `EventFamily` wrapper. A family only states how the delay behaves; the
-    shared core handles closed days, exposure, the mixture-cure marginalization, dated
-    cohorts and integer counts. The wiring is in the *Internals* tab and the README.
-    """)
-
-    _sales = mo.vstack(
-        [
-            mo.md(r"""
-    The sales process is an ordinary NumPyro model following the
-    [`numpyro_forecast`](https://github.com/juanitorduz/numpyro_forecast) protocol: it
-    receives covariates with time on axis `-2`, and `predict` handles the observed prefix
-    versus the future suffix. The two functions after it are the event covariate providers
-    passed to `fit`.
-    """),
-            source_md(sales_model, initiation_covariates, receipt_covariates),
-            mo.md(r"""
-    **The covariate contract.** A provider is called as `provider(frame, calendar)`, where
-    `frame` holds the historical units followed by any new sales cohorts and `calendar` the
-    days requested, and returns a mapping of up to three arrays:
-
-    - `features`, shape `[unit, day, P]`: time-varying regressors, defined for every
-      historical and future day. In the default family they shift the hazard logit; in
-      `WeibullFamily` they multiply each day's cumulative-hazard increment by
-      $e^{x_t^\top\beta}$. Same array, different effect, so the coefficients are not
-      interchangeable between the two.
-    - `susceptibility_features`, shape `[unit, Q]`: static attributes known when the
-      source event happens. They enter the susceptibility logit, and for units that already
-      exist they cannot change in a scenario.
-    - `allowed`, an optional boolean mask over days (or units and days) that closes further
-      days on top of the process's own `allowed_weekdays`.
-
-    Each feature must keep one meaning across fitting and forecasting windows, which is why
-    `product` and the weekday sine are defined by formula rather than by position.
-    """),
-        ]
+    mo.ui.anywidget(
+        ModelOverview(data=model_overview_data(model, initiation_covariates, receipt_covariates))
     )
+    return
 
-    _initiation = mo.vstack(
-        [
-            mo.md(r"""
-    **Initiation** is the default `EventProcess`. It samples `age_scale ~ HalfNormal(1)`,
-    `age_init ~ Normal(0, 2)` and standardized steps `age_steps ~ Normal(0, 1)` for the
-    random-walk baseline, plus `beta ~ Normal(0, 1)` for the hazard regressors and
-    `susceptibility_intercept ~ Normal(0, 2)` and `susceptibility_beta ~ Normal(0, 1)` for
-    susceptibility. `default_timing` turns one draw into the law:
-    """),
-            source_md(ttenet.event_times.default_timing),
-            mo.accordion(
-                {
-                    "The default random-walk prior, in full": source_md(
-                        ttenet.models.sample_stage_parameters
-                    )
-                }
-            ),
-        ]
-    )
 
-    _receipt = mo.vstack(
-        [
-            mo.md(r"""
-    **Receipt** is `WeibullFamily`. Scalar NumPyro priors are sampled at the sites `scale`,
-    `shape` and `susceptibility_intercept`. A fixed positive scale or shape (say
-    `scale_prior=6.0`) is used as given and creates no site; a fixed susceptibility logit
-    can be any finite number. `susceptibility_logit_prior` is on log-odds, not probability.
-    Regressors add `beta` for the cumulative-hazard multiplier, and static susceptibility
-    features would add `susceptibility_beta`; neither exists unless supplied. This is the
-    family's entire model:
-    """),
-            source_md(WeibullFamily.model),
-        ]
-    )
-
-    _internals = mo.vstack(
-        [
-            mo.md(
-                "One stage's model: the family's law, masked by the stage's exposure and "
-                "closures, observed at the native `EventTime` site through "
-                "`numpyro_forecast.predict`. These are private helpers and may change; they "
-                "are shown so nothing is hidden."
-            ),
-            source_md(
-                ttenet.network._event_model,
-                ttenet.models.observation_kernel,
-                ttenet.models._observe,
-                ttenet.families._weibull_log_increment,
-                ttenet.families._timing_from_log_increment,
-            ),
-        ]
-    )
-
-    mo.vstack(
-        [
-            mo.md(r"""
-    ### Under the hood
-
-    The same model in more detail. Each tab stands on its own; skip them on a first read
-    and come back when you want the math or the code.
-    """),
-            mo.ui.tabs(
-                {
-                    "Survival convolution": _convolution,
-                    "Sales and covariates": _sales,
-                    "Initiation": _initiation,
-                    "Receipt": _receipt,
-                    "Internals": _internals,
-                }
-            ),
-        ]
+@app.cell(hide_code=True)
+def _(callout):
+    callout(
+        "One likelihood, both parts",
+        r"""An order silent for $a$ days is either never returning or still on its way:
+        $(1-\pi) + \pi\,S(a)$, with conversion rate $\pi$ and time-to-event survival $S(a)$.
+        That is what fixes the collapsing line in Part 1.""",
     )
     return
 
@@ -815,10 +796,16 @@ def _(
 def _(mo):
     mo.md(r"""
     Because this world is simulated, every fitted parameter can be checked against its true
-    value, including what the ledger never shows directly: the share of units susceptible
+    value, including what the data never shows directly: the share of units susceptible
     to returning and the share of initiated returns that ever arrive. The bars put every
     row on one scale, the posterior divided by the truth: a bar that covers 1 contains the
     truth, and a narrow bar is a precise estimate.
+
+    One row misses: the weekday effect on starting a return comes out low. In this world
+    nothing can be returned before the parcel arrives on day 3. The model's curve over age
+    can drop to zero for those days, but it is built to change smoothly, so it blurs the
+    cliff and the weekday effect soaks up the difference. It's a small limitation with an
+    easy next step: tell the model returns can't start before delivery.
     """)
     return
 
@@ -827,20 +814,33 @@ def _(mo):
 def _(VOLUME, data, fitted, recovery_table, recovery_view):
     recovery = recovery_table(fitted, data, VOLUME)
     recovery_view(recovery)
-    return (recovery,)
+    return
 
 
 @app.cell(hide_code=True)
-def _(ACCENT, AMBER, INK, figure, fitted, hazard_charts, hazard_curves, swatch):
+def _(
+    ACCENT,
+    AMBER,
+    INK,
+    figure,
+    fitted,
+    hazard_charts,
+    hazard_curves,
+    swatch,
+):
     figure(
         hazard_charts(*hazard_curves(fitted)),
         "The two clocks: one flexible, one Weibull",
-        f"Daily hazard for a susceptible unit on an open day ({swatch(AMBER)}initiation: the "
-        f"random-walk baseline, product A, neutral weekday; {swatch(ACCENT)}receipt: the "
-        "Weibull family, clear weather) with 90% posterior bands, each replayed from the "
-        f"fitted stage. {swatch(INK, dashed=True)}Dashed lines are the simulator's true "
-        "hazards. Both initiation curves hold their last value from age 15 on; the receipt "
-        "stage fits the same Weibull family the simulator draws from.",
+        [
+            (
+                swatch(AMBER),
+                "Starting a return: a flexible curve. It learns that nothing starts before the "
+                "parcel arrives on day 3.",
+            ),
+            (swatch(ACCENT), "Arriving at the warehouse: a Weibull curve, clear weather."),
+            (swatch(INK, dashed=True), "The simulator's true daily chance."),
+            ("", "Bands are 90% intervals. Product A, neutral weekday, warehouse open."),
+        ],
     )
     return
 
@@ -856,12 +856,13 @@ def _(section):
     section(
         "forecast",
         "Part 4",
-        "Forecasting the next four weeks",
-        "The fitted network simulates new sales, pushes every cohort (old and new) through "
-        "both clocks, and keeps integer counts consistent in every posterior draw.",
+        "Does it work?",
+        "The fitted chain forecasts the next four weeks: it simulates new sales and pushes every "
+        "cohort, old and new, through both clocks. Then we score it on held-out days, against "
+        "three planning shortcuts and a standard time-series model.",
         points=(
-            "The fitted chain, one stage at a time",
             "Receipts against held-out days",
+            "Four baselines, scored on held-out days",
             "Returns still owed",
         ),
     )
@@ -879,7 +880,7 @@ def _(HORIZON, SEED, fitted, forecast_dates, mo, sales_covariates):
     # Simulate sales, then push every cohort through both clocks: one call.
     forecast = fitted.forecast(
         horizon=HORIZON,
-        covariates={"sales": sales_covariates(forecast_dates)},  # the weather is a known input
+        covariates={"sales": sales_covariates(forecast_dates)},  # weekdays and the sale calendar
         seed=SEED + 5,
     )
     mo.show_code(position="above")
@@ -902,26 +903,11 @@ def _(actual_sales, daily_totals, forecast, truth):
 
 
 @app.cell(hide_code=True)
-def _(ChainStepper, fitted, forecast, mo, sales_draws, storms):
-    from retail_returns_chain import chain_data
-
-    mo.vstack(
-        [
-            mo.md(r"""
-    ### How the forecast is assembled
-
-    The call above ran the whole chain. Step through it one stage at a time: the sales
-    forecast, when the fitted model expects returns to start, when started returns arrive,
-    and the receipt forecast that results. The timing bars are probabilities out of all
-    units entering the stage, not hazards.
-    """),
-            mo.ui.anywidget(
-                ChainStepper(
-                    data=chain_data(fitted, forecast, sales_draws, storm=storms(forecast.dates) > 0)
-                )
-            ),
-        ]
-    )
+def _(mo):
+    mo.md(r"""
+    The TL;DR's "Follow one day's sales forward" figure shows how that call builds the forecast: each day's sales spread
+    forward through both clocks, then added up.
+    """)
     return
 
 
@@ -933,24 +919,34 @@ def _(forecast, held_out, post_storm_check, storm_spans):
 
 @app.cell(hide_code=True)
 def _(
-    INK,
+    AMBER,
+    MUTED,
+    SLATE,
     figure,
     forecast,
     forecast_chart,
     held_out,
+    promo_spans,
     receipt_check,
+    recent_history,
     storm_spans,
     swatch,
 ):
     figure(
-        forecast_chart(forecast, held_out, storm_spans),
+        forecast_chart(forecast, held_out, storm_spans, promo_spans, recent_history),
         "Daily forecasts against what actually happened",
-        f"Bands are 50% and 90% predictive intervals; {swatch(INK)}dots are held-out actuals "
-        "the model never saw. Receipts slow during the storm, then the backlog drains over "
-        f"the open days after it: on {receipt_check['date']:%a %b} {receipt_check['date'].day} "
-        f"the forecast mean is {receipt_check['mean']:.1f} (90% interval "
-        f"{receipt_check['lo']:.0f}–{receipt_check['hi']:.0f}) against "
-        f"{receipt_check['actual']} observed.",
+        [
+            (swatch(MUTED), "Historical observations"),
+            (swatch(SLATE, block=True), "The May and July sales."),
+            (
+                swatch(AMBER, block=True),
+                "Storm: receipts stall, then the backlog drains. "
+                f"{receipt_check['date']:%a %b} {receipt_check['date'].day}: forecast "
+                f"{receipt_check['mean']:.0f} ({receipt_check['lo']:.0f}–{receipt_check['hi']:.0f}), "
+                f"actual {receipt_check['actual']}.",
+            ),
+            ("", "Bands are 50% and 90% intervals."),
+        ],
     )
     return
 
@@ -968,7 +964,7 @@ def _(cards, crps, forecast, held_out, np):
             (
                 "28-day receipts",
                 f"{_total.mean():,.0f}<small>[{_lo:,.0f}–{_hi:,.0f}]</small>",
-                f"Held-out actual: <b>{held_out.receipts.sum():,}</b>.",
+                f"Actual: <b>{held_out.receipts.sum():,}</b>",
                 "accent",
             ),
             (
@@ -980,7 +976,7 @@ def _(cards, crps, forecast, held_out, np):
             (
                 "Daily receipt CRPS",
                 f"{crps(forecast.receipts, held_out.receipts.to_numpy()):.2f}",
-                "Units per day; lower is better. Scores the whole predictive distribution.",
+                "Lower is better.",
                 None,
             ),
         ]
@@ -991,43 +987,267 @@ def _(cards, crps, forecast, held_out, np):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ### Returns still owed
+    ### Comparing against four baselines
 
-    Planning often needs a number no finite horizon gives you: how many units **already
-    sold** will eventually come back? The fitted chain computes it per posterior draw and
-    splits it by where each unit is today.
+    Three common shortcuts for warehouse planning, and one standard forecaster:
+
+    - **Weekday average:** each weekday's receipts over the last eight weeks.
+    - **Settled return rate × sales, lagged:** the shortcut from the introduction, at its best.
+      The rate and lag come from orders 60–115 days old, whose returns have nearly all
+      arrived; the lag is rounded to whole weeks.
+    - **Return rate so far × sales, lagged:** the same, with the rate taken naively from
+      recent orders.
+    - **SARIMAX with lagged sales + return initiations:** a seasonal ARIMA model of daily
+      receipts. Its regressors are average sales over windows one to ten weeks back, average
+      initiations over windows one to 30 days back, and weekend, Monday and storm indicators.
+      It learns its own delay curves, one weight per window, none below zero (a sale can't
+      remove returns). Initiations after today come from a second SARIMAX on lagged sales.
+
+    The rate shortcuts and SARIMAX use the chain's own sales forecast and know the warehouse
+    is shut at weekends; SARIMAX also gets the storm dates.
     """)
     return
 
 
+@app.cell
+def _(
+    AS_OF,
+    daily_history,
+    data,
+    forecast,
+    held_out,
+    lagged_rate,
+    sales_draws,
+    sarimax_baseline,
+    storm_spans,
+    weekday_average,
+):
+    weekday_avg = weekday_average(daily_history, held_out)
+    _sales = sales_draws.mean(axis=0)
+    # The careful shortcut: a rate from orders old enough to have finished returning.
+    lagged = lagged_rate(data.units, AS_OF, _sales, forecast.dates, lag_step=7)
+    # The naive one: returns so far over units sold in the last eight weeks.
+    naive_lagged = lagged_rate(
+        data.units, AS_OF, _sales, forecast.dates, mature_days=0, cohort_days=56, lag_step=7
+    )
+    baselines = {
+        "Weekday average (last 8 weeks)": weekday_avg,
+        f"Settled return rate × sales, lagged {lagged.attrs['lag']} days": lagged,
+        f"Return rate so far × sales, lagged {naive_lagged.attrs['lag']} days": naive_lagged,
+    }
+
+    # A standard forecaster: SARIMAX on daily receipts with lagged sales and lagged return
+    # initiations as regressors, given the same sales forecast and storm dates as the chain.
+    sarimax = sarimax_baseline(daily_history, _sales, forecast.dates, storm_spans)
+    baselines["SARIMAX with lagged sales + return initiations"] = sarimax
+
+    return baselines, lagged, naive_lagged, sarimax
+
+
 @app.cell(hide_code=True)
-def _(AMBER, eventual_truth, figure, forecast, owed_chart, swatch):
-    figure(
-        owed_chart(forecast, eventual_truth),
-        "Where the owed returns are hiding",
-        "Bars are posterior means with 90% intervals; the black tick is how many actually "
-        f"arrived in the simulated future. Most owed returns sit with customers who haven't "
-        f'clicked "return" yet {swatch(AMBER)}, the population a return-rate shortcut '
-        "undercounts. Eventual counts assume the warehouse keeps opening on weekdays.",
+def _(daily_history, forecast, sales_draws, sarimax_baseline, storm_spans):
+    # How much SARIMAX's forecast depends on the sales lag windows it is given: other reasonable
+    # choices, each scored on nothing but its 28-day total. Fits that fail to converge are left out.
+    _weekly = [(7 + 7 * i, 13 + 7 * i) for i in range(12)]
+    _fits = {
+        _name: sarimax_baseline(
+            daily_history, sales_draws.mean(axis=0), forecast.dates, storm_spans, sales_lags=_lags
+        )
+        for _name, _lags in {
+            "weekly windows to 90 days": _weekly,
+            "weekly to 48 days, then 49-90": _weekly[:6] + [(49, 90)],
+            "two-week windows to 90 days": [
+                (7, 20),
+                (21, 34),
+                (35, 48),
+                (49, 62),
+                (63, 76),
+                (77, 90),
+            ],
+            "four windows to 90 days": [(7, 13), (14, 27), (28, 55), (56, 90)],
+            "daily to 30 days, then 31-60 and 61-90": [(k, k) for k in range(7, 31)]
+            + [(31, 60), (61, 90)],
+        }.items()
+    }
+    sarimax_lag_totals = {_n: float(_f.sum()) for _n, _f in _fits.items() if _f.attrs["converged"]}
+    return (sarimax_lag_totals,)
+
+
+@app.cell(hide_code=True)
+def _(
+    ACCENT,
+    AMBER,
+    BaselineComparison,
+    MUTED,
+    RATE,
+    RATE_LIGHT,
+    RED,
+    SLATE,
+    VIOLET,
+    baseline_data,
+    baselines,
+    forecast,
+    held_out,
+    lagged,
+    mo,
+    naive_lagged,
+    promo_spans,
+    recent_history,
+    storm_spans,
+    swatch,
+):
+    _names = list(baselines)
+    _style = {
+        _names[0]: (
+            RED,
+            "Repeating recent receipts misses the planned sale",
+            "Weekday average of the last eight weeks: can't know about July's sale.",
+        ),
+        _names[1]: (
+            RATE,
+            "A single lag piles each sale's returns into one week",
+            f"{lagged.attrs['rate']:.0%} of sales reach the warehouse (the rate settled orders show), "
+            f"{lagged.attrs['lag']} days later: each sale's returns land at once.",
+        ),
+        _names[2]: (
+            RATE_LIGHT,
+            "Counting returns so far undercounts every sale",
+            f"The same, with the rate so far from recent orders "
+            f"({naive_lagged.attrs['rate']:.0%}): too low, they haven't finished returning.",
+        ),
+        _names[3]: (
+            VIOLET,
+            "A standard time-series model, given every upstream series",
+            "SARIMAX on daily receipts with lagged sales and return initiations.",
+        ),
+    }
+    _short = ["Weekday average", "Settled return rate", "Return rate so far", "SARIMAX"]
+    _choices = [
+        {
+            "label": _label,
+            "series": _name,
+            "color": _style[_name][0],
+            "title": _style[_name][1],
+            "caption": _style[_name][2],
+            "mark": swatch(_style[_name][0], dashed=True),
+        }
+        for _label, _name in zip(_short, baselines)
+    ]
+    mo.ui.anywidget(
+        BaselineComparison(
+            data=baseline_data(
+                forecast,
+                held_out,
+                baselines,
+                storm_spans,
+                promo_spans,
+                recent_history,
+                _choices,
+                [
+                    (
+                        swatch(ACCENT),
+                        "The chain: tracks every unit sold, simulates the July sale, expects the storm.",
+                    ),
+                    (swatch(MUTED), "Historical observations"),
+                    (swatch(SLATE, block=True), "The May and July sales."),
+                    (swatch(AMBER, block=True), "The storm."),
+                ],
+            )
+        )
     )
     return
 
 
 @app.cell(hide_code=True)
+def _(MODEL_NAME, baseline_scores, baselines, forecast, held_out, scores_view):
+    receipt_scores = baseline_scores(forecast, held_out, baselines, MODEL_NAME)
+    scores_view(receipt_scores, held_out.receipts.sum())
+    return (receipt_scores,)
+
+
+@app.cell(hide_code=True)
 def _(
-    check_closed_days,
-    check_counted_once,
-    check_owed_decomposes,
-    checks_list,
-    data,
-    forecast,
+    AS_OF,
+    held_out,
+    lagged,
+    mo,
+    np,
+    receipt_scores,
+    sarimax,
+    sarimax_lag_totals,
+    truth,
 ):
-    checks_list(
+    _weekday, _lagged, _naive, _sarimax, _model = (receipt_scores.iloc[i] for i in range(5))
+    _actual = held_out.receipts.sum()
+    _peak = int(np.argmax(lagged.to_numpy()))
+    _day = held_out.date.iloc[_peak]
+    _from_new_sales = (
+        (truth.sale_date > AS_OF) & truth.receipt_date.isin(held_out.date)
+    ).sum() / _actual
+    _pile = lagged.iloc[_peak] / held_out.receipts.iloc[_peak]
+    _best = min(_weekday.mae, _lagged.mae, _naive.mae, _sarimax.mae)
+    _band = np.quantile(sarimax.attrs["draws"], [0.05, 0.95], axis=0)
+    _sarimax_cover = np.mean((held_out.receipts >= _band[0]) & (held_out.receipts <= _band[1]))
+    _lag_totals = list(sarimax_lag_totals.values())
+    _covers = (
+        ", and its interval covers the actual"
+        if _model.total_lo <= _actual <= _model.total_hi
+        else ""
+    )
+    mo.md(rf"""
+    *(For a point forecast CRPS equals absolute error, so the shortcuts' two columns match.)*
+
+    - **Weekday average** misses {1 - _weekday.total / _actual:.0%} of the month. Much of this
+      window's returns come from the July sale, which hadn't happened yet ({_from_new_sales:.0%}
+      of receipts), and no history of past receipts can contain them.
+    - **Settled return rate** gets the month about right but the days wrong. One lag drops the
+      whole sale's returns on a single day, {_day:%A %b} {_day.day}: {_pile:.1f} times what
+      actually arrived.
+    - **Return rate so far** misses {1 - _naive.total / _actual:.0%}. Recent orders that haven't
+      returned *yet* count as *never*, so its rate comes out too low.
+    - **SARIMAX** is the strongest baseline, but misses {abs(_sarimax.total / _actual - 1):.0%} of
+      the month. It learns its delay curves from daily totals, where only one past sale stands
+      out, so its 90% intervals hold {_sarimax_cover:.0%} of days, and other reasonable sales lag
+      windows put the month anywhere from {min(_lag_totals):,.0f} to {max(_lag_totals):,.0f}.
+    - **The chain** lands within {abs(_model.total / _actual - 1):.0%} of the month{_covers}.
+      Its daily error is {_best / _model.mae:.1f} times smaller than the best baseline's, and
+      it is the only one that can say how many returns are still owed or what a storm would do.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    ACCENT,
+    AMBER,
+    INK,
+    eventual_truth,
+    figure,
+    forecast,
+    mo,
+    owed_chart,
+    swatch,
+):
+    figure(
+        mo.vstack(
+            [
+                mo.md(
+                    "How many units **already sold** will eventually come back? No finite "
+                    "horizon answers that, but the chain can, and it can say *why*."
+                ),
+                owed_chart(forecast, eventual_truth),
+            ]
+        ),
+        "An interpretable model: where the owed returns are",
         [
-            check_counted_once(data.units, forecast),
-            check_closed_days(forecast),
-            check_owed_decomposes(forecast),
-        ]
+            (swatch(ACCENT, block=True, opacity=0.9), "In transit."),
+            (
+                swatch(AMBER, block=True, opacity=0.9),
+                "Not started yet: uncertain, spread over weeks.",
+            ),
+            (swatch(INK, block=True, opacity=0.9), "Total: the refund reserve."),
+            ("", "Each line is a 90% interval; the tick marks the actual observation."),
+        ],
     )
     return
 
@@ -1038,13 +1258,12 @@ def _(section):
         "scenarios",
         "Part 5",
         "Asking “what if?”",
-        "This is where the chain pays off. Weather enters the receipt stage as an input, so "
-        "you can ask how next month's receipts change if the storm forecast is wrong: no "
-        "storm at all, or one that lingers. Nothing is refit; the fitted stages stay exactly "
-        "as they are and only the storm input changes.",
+        "Change the plan, not the fitted model: a different storm forecast, or cancel July's "
+        "promotion. Push the new inputs through the same chain to see what reaches the warehouse.",
         points=(
             "Choose a storm scenario",
-            "Receipts and returns in transit against the forecast storm",
+            "Cancel July's promotion",
+            "See when warehouse workload changes",
         ),
     )
     return
@@ -1077,7 +1296,15 @@ def _(np, storm_start, storms):
 
 
 @app.cell(hide_code=True)
-def _(HORIZON, SEED, fitted, forecast, forecast_dates, sales_covariates, storm_scenario):
+def _(
+    HORIZON,
+    SEED,
+    fitted,
+    forecast,
+    forecast_dates,
+    sales_covariates,
+    storm_scenario,
+):
     # Same fitted model, no refit: only the storm input to the receipt stage changes. All
     # three runs are computed here, so the figure below needs no Python once it is drawn
     # and its buttons work on a published page. The forecast's own storm is the baseline.
@@ -1144,304 +1371,89 @@ def _(mo, source_md, storm_scenario):
 
 
 @app.cell(hide_code=True)
-def _(section):
-    section(
-        "sales-model",
-        "Part 6",
-        "Swap the sales model, then beat a baseline",
-        "Two more things the chain buys you. A different sales forecaster can feed the same "
-        "fitted return stages without a refit. And against the usual warehouse shortcut, the "
-        "chain wins on timing, which is what a warehouse staffs for.",
-        points=(
-            "A drifting sales model through the same stages",
-            "The weekday-average shortcut, scored on held-out days",
-        ),
-    )
-    return
+def _(mo, pd, promotion_window):
+    mo.md(f"""
+    ### What if we cancel July's promotion?
 
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ### A second sales model
-
-    The alternative is a **local level**: each product's log sales rate takes a small
-    random-walk step every day, so the forecast can follow a drifted level instead of
-    returning to a fixed mean. It is ordinary numpyro_forecast code (`Horizon`, `predict`,
-    `innovations`), fitted on the training sales alone, and its 28-day draws go through the
-    return stages fitted in Part 3 by row: sales draw
-    $i$ runs through return draw $i$. Uncertainty flows down the chain, but neither side
-    was conditioned on the other.
+    The promotion is planned for {promotion_window.start:%b} {promotion_window.start.day}–{(promotion_window.end - pd.Timedelta(days=1)).day}.
+    Keep the same fitted model and weather; switch off that promotion in the future sales calendar.
+    Returns from units already sold still arrive. Only the future sales cohorts change.
     """)
-    return
-
-
-@app.cell
-def _(Horizon, dist, innovations, jnp, mo, numpyro, predict):
-    def drifting_sales_model(covariates, data=None):
-        """Poisson sales whose log rate follows a random walk (a drifting local level)."""
-        h = Horizon.from_data(covariates, data)
-        level0 = numpyro.sample("level0", dist.Normal(2.0, 1.0).expand([2]).to_event(1))
-        drift_scale = numpyro.sample("drift_scale", dist.HalfNormal(0.05).expand([2]).to_event(1))
-        weekday_effect = numpyro.sample(
-            "weekday_effect", dist.Normal(0, 0.4).expand([2]).to_event(1)
-        )
-        with numpyro.plate("product", 2, dim=-1):  # one random walk per product
-            steps = innovations(h, "steps", dist.Normal(0.0, 1.0))
-        level = level0 + jnp.cumsum(steps * drift_scale, axis=-2)
-        predict(h, lambda value: dist.Poisson(jnp.exp(value)), level + covariates * weekday_effect)
-
-    mo.show_code(position="above")
-    return (drifting_sales_model,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.accordion(
-        {
-            "Fitting it and handing it to the chain": mo.md(r"""
-    `numpyro_forecast.forecast` replays the training prefix from the fitted posterior and
-    samples the next 28 days; `SalesForecast.from_numpyro_forecast` binds those
-    `[draw, day, product]` counts to dates and products; `fitted.forecast(future_sales=...)`
-    pushes them through the return stages. Three ways to change the sales side, and what
-    each refits:
-
-    | What you change | What is refit | How sales draws meet return draws |
-    | --- | --- | --- |
-    | Hand in a future sales path (a plan, a promo) as `future_sales=` | Nothing | Paths from this fit keep their draw labels; a table from elsewhere is paired by row. |
-    | Fit another sales model separately and pass its forecast (this part) | Only the sales model | By row: sales draw $i$ through return draw $i$. Propagation, not joint conditioning. |
-    | Replace the model inside `RetailReturnModel(sales=CountProcess(model=...))`, then fit | Everything, jointly | A new joint posterior; not run in this post. |
-    """)
-        }
-    )
     return
 
 
 @app.cell(hide_code=True)
 def _(
+    AS_OF,
     HORIZON,
     SEED,
-    SalesForecast,
-    data,
-    draw_posterior,
-    drifting_sales_model,
     fitted,
     forecast_dates,
-    jax,
-    jnp,
+    mo,
     np,
-    numpyro,
-    numpyro_forecast,
+    pd,
+    promo_spans,
     sales_covariates,
 ):
-    from numpyro.infer import SVI, Trace_ELBO
-    from numpyro.infer.autoguide import AutoNormal
-
-    # Fit on the training window only: data.sales stops at the as_of snapshot.
-    training_sales = jnp.asarray(data.sales)  # [day, product] counts
-    guide = AutoNormal(drifting_sales_model)
-    svi = SVI(drifting_sales_model, guide, numpyro.optim.Adam(0.02), Trace_ELBO())
-    sales_fit = svi.run(
-        jax.random.PRNGKey(SEED),
-        2000,
-        sales_covariates(data.calendar),
-        training_sales,
-        progress_bar=False,
+    promotion_window = promo_spans[promo_spans.start > pd.Timestamp(AS_OF)].iloc[0]
+    canceled_calendar = np.array(sales_covariates(forecast_dates), copy=True)
+    _promo = (forecast_dates >= np.datetime64(promotion_window.start)) & (
+        forecast_dates < np.datetime64(promotion_window.end)
     )
-    sales_posterior = draw_posterior(
-        jax.random.PRNGKey(SEED + 1), guide, sales_fit.params, fitted.network.num_samples
+    # Columns are weekday season and promotion flag. Change only this promotion.
+    canceled_calendar[_promo, 1] = 0.0
+    promotion_canceled = fitted.forecast(
+        horizon=HORIZON,
+        covariates={"sales": canceled_calendar},
+        seed=SEED + 5,
     )
-
-    # Training prefix from the posterior, then the next 28 days sampled: [draw, day, product].
-    all_days = np.concatenate([data.calendar, forecast_dates])
-    drift_draws = numpyro_forecast.forecast(
-        jax.random.PRNGKey(SEED + 2),
-        drifting_sales_model,
-        sales_posterior,
-        training_sales,
-        sales_covariates(all_days),
-    )
-    drift_sales = SalesForecast.from_numpyro_forecast(
-        drift_draws, forecast_dates, groups=data.groups, prefix="drift"
-    )
-
-    # The same fitted return stages, no refit: only the sales source changes.
-    drift_forecast = fitted.forecast(horizon=HORIZON, future_sales=drift_sales, seed=SEED + 5)
-    return drift_forecast, drift_sales, sales_fit, sales_posterior
+    mo.show_code(position="above")
+    return promotion_canceled, promotion_window
 
 
 @app.cell(hide_code=True)
-def _(daily_totals, drift_forecast):
-    drift_sales_draws = daily_totals(drift_forecast.sales, drift_forecast.dates)
-    return (drift_sales_draws,)
+def _(daily_totals, forecast, promotion_canceled):
+    canceled_sales_draws = daily_totals(promotion_canceled.sales, promotion_canceled.dates)
+    promotion_receipt_reduction = (forecast.receipts - promotion_canceled.receipts).sum(axis=1)
+    return canceled_sales_draws, promotion_receipt_reduction
 
 
 @app.cell(hide_code=True)
 def _(
-    INK,
-    SLATE,
-    data,
-    drift_chart,
-    drift_forecast,
-    drift_sales_draws,
+    ACCENT,
+    AMBER,
+    VIOLET,
+    canceled_sales_draws,
     figure,
     forecast,
-    held_out,
-    np,
-    sales_actual,
+    promotion_canceled,
+    promotion_chart,
     sales_draws,
-    sales_posterior,
+    storm_spans,
     swatch,
 ):
-    _order = list(data.groups["product"].to_numpy(int))
-    _scale = np.asarray(sales_posterior["drift_scale"]).mean(axis=0)
     figure(
-        drift_chart(
-            forecast, drift_forecast, sales_draws, drift_sales_draws, sales_actual, held_out
+        promotion_chart(
+            forecast, promotion_canceled, sales_draws, canceled_sales_draws, storm_spans
         ),
-        "Two sales forecasters, one set of fitted return stages",
-        f"Solid lines and light bands: the Part 4 forecast. {swatch(SLATE)}Dashed slate line "
-        "and band: the drifting level, fitted only to the training days and pushed through "
-        f"the same return stages. Bands are 90% intervals; {swatch(INK)}dots are held-out "
-        f"actuals. The drifting model's daily log-rate step is about "
-        f"{_scale[_order.index(0)]:.3f} (product A) and {_scale[_order.index(1)]:.3f} "
-        "(product B): day-to-day volatility, not a trend.",
-    )
-    return
-
-
-@app.cell(hide_code=True)
-def _(
-    cards,
-    crps,
-    drift_forecast,
-    drift_sales_draws,
-    forecast,
-    held_out,
-    interval_value,
-    sales_actual,
-    sales_draws,
-):
-    _actual = held_out.receipts.to_numpy()
-    cards(
+        "Same fitted model. A different promotion plan.",
         [
-            (
-                "Units sold, next 28 days",
-                interval_value(drift_sales_draws.sum(axis=1)),
-                f"Drifting level. Part 4 model: <b>{sales_draws.sum(axis=1).mean():,.0f}</b>. "
-                f"Actual: <b>{sales_actual.sum():,}</b>.",
-                None,
-            ),
-            (
-                "Returns started",
-                interval_value(drift_forecast.initiations.sum(axis=1)),
-                f"Part 4 model: <b>{forecast.initiations.sum(axis=1).mean():,.0f}</b>. "
-                f"Actual: <b>{held_out.initiations.sum():,}</b>.",
-                "amber",
-            ),
-            (
-                "Returns received",
-                interval_value(drift_forecast.receipts.sum(axis=1)),
-                f"Part 4 model: <b>{forecast.receipts.sum(axis=1).mean():,.0f}</b>. "
-                f"Actual: <b>{held_out.receipts.sum():,}</b>.",
-                "accent",
-            ),
-            (
-                "Daily receipt CRPS",
-                f"{crps(drift_forecast.receipts, _actual):.2f}",
-                f"Part 4 model: {crps(forecast.receipts, _actual):.2f}. Lower is better.",
-                None,
-            ),
-        ]
+            (swatch(ACCENT), "Promotion as planned."),
+            (swatch(VIOLET, dashed=True), "Promotion canceled."),
+            (swatch(AMBER, block=True, opacity=0.12), "Assumed storm (same in both plans)."),
+            ("", "Bands are 90% forecast intervals."),
+        ],
     )
     return
 
 
 @app.cell(hide_code=True)
-def _(
-    check_closed_days,
-    check_counted_once,
-    check_sales_propagated,
-    checks_list,
-    data,
-    drift_forecast,
-    drift_sales,
-    mo,
-):
-    mo.accordion(
-        {
-            "Consistency checks on the propagated forecast": checks_list(
-                [
-                    check_counted_once(data.units, drift_forecast),
-                    check_sales_propagated(drift_forecast, drift_sales),
-                    check_closed_days(drift_forecast),
-                ]
-            )
-        }
-    )
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ### Against a simple baseline
-
-    A common shortcut for warehouse planning: forecast each day's receipts as the average
-    for that weekday over the last eight weeks.
-    """)
-    return
-
-
-@app.cell
-def _(daily_history, held_out, weekday_average):
-    weekday_avg = weekday_average(daily_history, held_out)
-    return (weekday_avg,)
-
-
-@app.cell(hide_code=True)
-def _(
-    ACCENT, INK, RED, baseline_chart, figure, forecast, held_out, storm_spans, swatch, weekday_avg
-):
+def _(figure, promotion_distribution_chart, promotion_receipt_reduction):
     figure(
-        baseline_chart(forecast, held_out, weekday_avg, storm_spans),
-        "The baseline doesn't know about the storm or the backlog. The model forecasts "
-        "a post-storm catch-up, but does not guarantee a one-day spike.",
-        f"{swatch(RED)}The weekday average repeats the recent past. {swatch(ACCENT)}The chain "
-        "knows which units are in transit, how old they are, and that the storm will hold "
-        f"them up. {swatch(INK)}Dots: held-out actuals.",
+        promotion_distribution_chart(promotion_receipt_reduction),
+        "Fewer warehouse receipts, next four weeks",
+        "Smoothed paired forecasted differences",
     )
-    return
-
-
-@app.cell(hide_code=True)
-def _(MODEL_NAME, baseline_scores, forecast, held_out, scores_view, weekday_avg):
-    scores_view(
-        baseline_scores(forecast, held_out, weekday_avg, MODEL_NAME),
-        held_out.receipts.sum(),
-    )
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    For a point forecast, CRPS reduces to absolute error, so the baseline's two columns
-    match.
-
-    On the monthly total the two land in the same place, and that is expected here. This
-    simulated world is flat: sales rates and return behaviour never change, and the last
-    eight weeks already contain a storm with its dip and catch-up. Repeating the recent
-    average therefore gets a month's total about right; its daily misses largely cancel
-    when summed. One 28-day window is also a single noisy draw, so it cannot show whether
-    either method is biased; the actual total falls inside the model's 90% interval.
-
-    The shortcut's weakness is *when* receipts arrive, which is what a warehouse staffs
-    for: around the storm its daily error is several times the model's. It also has no
-    answer for *returns still owed*, no interval, and no way to take in a sales forecast
-    or a storm scenario. In a world that changes (sales growth, a promo, a new policy) the
-    recent average would miss the total too.
-    """)
     return
 
 
@@ -1454,38 +1466,13 @@ def _(section):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    Returns forecasting is an old problem. Splitting it into a chain of small forecasts,
-    sales then initiation then receipt, is what makes it convenient. Each stage is a
-    numpyro_forecast program, so the chain inherits its protocol: write the sales model with
-    `Horizon` and `predict`, fit, and forecast. ttenet, a small demo package, fits the chain
-    in one call and propagates through it in another. Because each stage consumes the
-    previous stage's forecast draw by draw, the same machinery answers daily receipts,
-    returns still owed, "what if the storm lingers?" and "what if a different model
-    forecasts sales?" without refitting the return stages, with uncertainty carried end
-    to end.
+    Returns forecasting is an old problem. Splitting it into a chain of smaller forecasts, with time-to-event convolutions to link them makes it interpretable and outperforms classical baselines.
 
-    ### Limits
 
-    - Finite follow-up can't fully separate "never" from "very late". Quiet days lower a
-      unit's chance of being susceptible but never settle it; the susceptible share leans
-      on mature cohorts and the priors. Check calibration on held-out periods.
-    - One event of each type per unit, daily resolution, no repeated return attempts, no
-      inventory feedback, and weather is an input you supply. "Returns still owed" assumes
-      the warehouse keeps reopening.
-    - The posterior is a variational (AutoNormal) approximation. For publication-grade
-      intervals, hand `network.numpyro_model(...)` to NUTS.
+    While the convolutions were difficult to implement in `ttenet` (a demo package for time-to-event bayesian networks), `numpyro_forecast` makes using them and chaining forecasts easy.
 
-    The command-line version of this example lives in `examples/retail_returns.py`.
+    This allows us to match the data generating process in our model, and build a better and more interpretable forecast than we could have otherwise.
     """)
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.Html(
-        '<p class="ttn-footer">Simulated data throughout: every "truth" in this post is the '
-        "simulator's, and none of it reaches the estimator.</p>"
-    )
     return
 
 

@@ -2,6 +2,10 @@
 
 Calendar-aware count and time-to-event forecasting with JAX and NumPyro.
 
+> **This is a demo package.** TTENet is a reference implementation of forecasting
+> returns as a chain of forecasts, meant to be read, run and adapted.
+> It is not a maintained production library.
+
 **Sale → return initiated → return received**
 
 Some purchases never initiate a return; some initiated returns never arrive.
@@ -27,35 +31,57 @@ uv run python examples/retail_returns.py --steps 600 --draws 100 \
 ```
 
 The example jointly fits a real NumPyro sales model and two return processes.
-It includes two products, a 90-day initiation policy, abandonment, storms,
-weekend receipt closures, and histories preceding the sales training window.
+It includes two products, a 90-day initiation policy, abandonment, storms, a
+one-week sale about a month before the snapshot and a planned one inside the forecast window
+(a known sales covariate), weekend receipt closures, and histories preceding the sales
+training window.
 It prints held-out scores and checks count conservation. Latent abandonment
 labels never enter fitting. Short runs are execution checks, not convergence
 or calibration guarantees.
 
-The same example as an illustrated, interactive essay: a marimo notebook in six
-parts, from the raw ledger through fitting, forecasting, scenarios, and a simple
-baseline:
+The same example as an illustrated, interactive essay: a marimo notebook in five
+parts, from the raw ledger through fitting, scoring against baselines, and
+scenarios:
 
 ```bash
-uv sync --all-extras
+uv sync --all-extras   # the essay's extras include statsmodels for the SARIMAX baseline
 uv run marimo run examples/retail_returns_blog.py   # or `marimo edit` to see the code
 ```
 
-Three interactive figures sit inside the parts they explain:
+The essay's interactive views sit inside the parts they explain. Their controls work
+in static HTML exports as well as a running notebook:
 
-- **Follow one purchase** (Part 1): scrub three simulated ledger records through
-  the inclusive day-90 initiation deadline and end-of-day censoring. An
-  observation lesson, not a forecast; hindsight is an explicit toggle.
-- **How the forecast is assembled** (Part 4): step through sales, return
-  initiation, receipt timing, and the resulting receipt forecast. Timing bars
-  are daily event probabilities from the fitted survival kernel, not hazards.
+- **History and forecast** (TL;DR): move either handle of the history range slider
+  to change the shared date window across sales, returns started and returns received.
+- **Follow one day's sales forward** (TL;DR): pick a forecast sale day with the
+  slider. Each day's returns started and returns received are stacked by the sale
+  day they came from, with the chosen day in black, so its units visibly spread out
+  and add up with every other sale day's. This is the survival convolution,
+  computed from the fitted timing curves (`retail_returns_chain.py`).
+- **Three forecasts. One chain.** (Part 2): the full model call appears as a code block
+  above the overview. Constructor fields line up with sales, return starts and receipts,
+  with one takeaway per stage and a shared convolution diagram. Select a piece for its
+  mechanism and real source; equations, configured priors and full implementation details
+  expand only when requested.
+- **Comparing against four baselines** (Part 4): pick a weekday average, a settled
+  or a naive return rate times lagged sales, or a SARIMAX with lagged sales and
+  lagged return initiations (its weights bounded at zero; future initiations come
+  from a second SARIMAX), and see it against the chain's forecast. The score table
+  below shows all four: daily MAE, daily CRPS, the 28-day total and its error.
+  SARIMAX uses native simulated paths for the total interval, conditional on
+  fitted parameters and upstream point forecasts. Rate shortcuts move weekend
+  receipts to Monday before selecting the forecast window, including carry-in.
 - **Storm scenarios** (Part 5): no storm, the storm as forecast, or one that
   lingers, without refitting the return stages. Daily receipts, the backlog of
   returns in transit, and a cumulative gap against the baseline show predictive
   means and 50%/90% intervals; two tiles give the receipts difference during the
   storm and the week after. The gap is a paired per-draw difference: a storm
   moves receipts in time far more than it changes the monthly total.
+- **Cancel July's promotion** (Part 5): keep the fitted model and weather fixed,
+  change only the future promotion calendar, and compare sales and warehouse
+  receipts, with the assumed storm shaded only on the receipts panel. A KDE plot
+  shows paired four-week receipt reductions, with the mean and central 90% interval
+  taken from the original draws; returns from units already sold remain in the forecast.
 
 Both examples run on one synthetic world, `examples/retail_returns_world.py`. Its
 receipts follow the same discretized Weibull the receipt stage fits, so every fitted
@@ -63,11 +89,15 @@ parameter has a true value to check.
 
 The essay keeps data work and drawing apart. The notebook holds the narrative, the
 model and the fit and forecast calls. `retail_returns_analysis.py` computes the
-numbers (cohort rates, parameter recovery, baseline scores), `retail_returns_story.py`,
-`retail_returns_chain.py` and `retail_returns_scenario.py` build the JSON for the three
-interactive figures, and `retail_returns_presentation.py` holds the palette, themes and
-one chart per figure. Python computes every number; the figures in `examples/widgets/`
-only draw it.
+numbers (cohort rates, parameter recovery, the four baselines and their scores, the
+typical return drawn in Part 1), `retail_returns_chain.py` computes the survival
+convolution for the TL;DR figure, `retail_returns_scenario.py` builds the JSON for the
+storm scenarios, `retail_returns_controls.py` packages the other controls' complete
+datasets and Vega-Lite templates, `retail_returns_overview.py` packages the configured
+model and its actual source, and `retail_returns_presentation.py` holds the palette,
+themes, header/layout markup and one chart per figure. Python computes every model
+number; the views in `examples/widgets/` draw it and handle selections entirely in
+the browser. CSS stays in `retail_returns_blog.css` and the widgets' own stylesheets.
 
 ### Native survival convolutions
 
@@ -99,6 +129,39 @@ sales forecasts. Sampling uses actual origins; this small demonstration's
 explicit all-origin mean-convolution oracle uses quadratic calendar storage,
 unlike production source-aware pool propagation. Short variational fits
 establish execution, not calibration or production-scale performance.
+
+## Built on `numpyro_forecast`
+
+[`numpyro_forecast`](https://github.com/juanitorduz/numpyro_forecast) supplies the
+native fit-and-forecast protocol for both sales and return events. TTENet adds
+the susceptibility-capable event law, calendar rules and source-aware cohort
+composition. Network-level inference is ordinary NumPyro SVI with an `AutoNormal`
+guide and posterior replay; the native upstream protocol supplies the stage
+observation and forecast-boundary semantics.
+
+| Piece | Integration |
+| --- | --- |
+| `CountProcess(model=...)` | A plain NumPyro function uses `Horizon.from_data` and `predict`, observing `obs` and recording `forecast` |
+| Return stages | `EventTime` uses the same native observation, censoring and forecast-boundary protocol |
+| Network fitting | Stage likelihoods compose into one NumPyro program; `shared_model` can introduce shared latent effects |
+| Sales-to-returns handoff | `SalesForecast.from_numpyro_forecast` binds `[draw, future_day, group]` paths to dated cohorts |
+
+The layout already matches: time is axis `-2` and the product/series axis is `-1`.
+One function handles the observed prefix and future suffix, and forecast draws
+remain the interface between stages rather than being collapsed to a mean.
+Externally fitted sales paths are paired by row; they are not a new joint
+posterior. See [One future-sales value](#one-future-sales-value).
+
+Upstream building blocks such as `innovations`, `markov_series` and `ssoe` let the
+sales model change without rewriting the return stages. The essay's
+[promotion-cancellation example](examples/retail_returns_blog.py) instead changes
+the future sales calendar with the entire fitted model held fixed. Forecast paths
+retain their joint draw labels, so the receipt reduction is measured within each draw.
+
+`numpyro_forecast` is a required dependency (`>=0.4.0,<0.5`), including when sales
+are supplied externally: the event stages use it too. Upstream also provides
+sales-model backtesting and scoring (`backtest`, `eval_crps`); see its
+[documentation](https://juanitorduz.github.io/numpyro_forecast/).
 
 ## Fit and forecast
 

@@ -175,3 +175,9 @@ cython_debug/
 # roborev snapshots
 /.roborev/
 .kata.local.toml
+
+# git worktrees
+/.worktrees/
+
+# marimo session cache
+__marimo__/

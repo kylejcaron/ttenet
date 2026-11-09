@@ -17,13 +17,22 @@ import coeftable as ct
 import marimo as mo
 import numpy as np
 import pandas as pd
+from great_tables import html as gt_html
+from great_tables import loc as gt_loc
+from great_tables import style as gt_style
 from retail_returns_analysis import fan
 
 #: What the fitted chain is called in chart legends and tables.
-MODEL_NAME = "Chained model"
+MODEL_NAME = "Chained convolution model"
 
-INK, MUTED, ACCENT, AMBER, RED = "#292d26", "#62695d", "#42644d", "#956017", "#a23c3c"
+# ACCENT is the model's colour, the essay's link green, bright enough to stand out from
+# the grey history and the dashed shortcuts.
+INK, MUTED, ACCENT, AMBER, RED = "#292d26", "#62695d", "#0a8a45", "#d18f00", "#d03b2f"
 RULE, GRID, PAPER, SLATE, STORM = "#dcded1", "#ecefe4", "#fffef9", "#4c5a6b", "#e9d6b0"
+AMBER_LIGHT = "#edd295"  # the gold at 40% on paper: returns still to come
+# The return-rate shortcuts: blues, clearly apart from the chain's green.
+RATE, RATE_LIGHT = "#2f6db5", "#8db3e2"
+VIOLET = "#7b52c7"  # the standard time-series baseline
 
 
 @alt.theme.register("returns_paper", enable=True)
@@ -99,14 +108,25 @@ SECTIONS = (
     ("data", "1", "Data"),
     ("model", "2", "Model"),
     ("fit", "3", "Fit"),
-    ("forecast", "4", "Forecast"),
+    ("forecast", "4", "Does it work?"),
     ("scenarios", "5", "What if?"),
-    ("sales-model", "6", "Swap & compare"),
     ("wrap-up", "", "Wrap-up"),
 )
 
 
 # --- Page furniture -------------------------------------------------------------------
+
+
+def hero(title, subtitle, *, kicker, byline):
+    """Header layout; subtitle and byline accept trusted inline HTML from the essay."""
+    credits = "\n".join(f"<li>{entry}</li>" for entry in byline)
+    return mo.Html(
+        '<div id="top" class="ttn-hero">'
+        f'<p class="ttn-kicker">{escape(kicker)}</p>'
+        f'<h1 class="ttn-title">{escape(title)}</h1>'
+        f'<p class="ttn-dek">{subtitle}</p>'
+        f'<ul class="ttn-byline">{credits}</ul></div>'
+    )
 
 
 def nav_header(brand):
@@ -154,11 +174,68 @@ def section(anchor, kicker, title, lede="", points=()):
     )
 
 
-def callout(label, body, tone="note"):
+def callout(label, body, tone="note", icon=""):
+    """An aside with a small uppercase label; ``icon`` is optional inline SVG before it."""
     tone_class = " ttn-callout--warn" if tone == "warn" else ""
+    mark = (
+        f'<span style="display:inline-block;vertical-align:middle;margin:-4px 8px 0 0">{icon}</span>'
+        if icon
+        else ""
+    )
     return mo.Html(
         f'<aside class="ttn-callout{tone_class}">'
-        f'<p class="ttn-callout-label">{escape(label)}</p>{mo.md(body).text}</aside>'
+        f'<p class="ttn-callout-label">{mark}{escape(label)}</p>{mo.md(body).text}</aside>'
+    )
+
+
+def convolution_icon(size=30, days=4, chosen=1, shift=6):
+    """The survival-convolution mark: one time-to-event curve shifted by each sale day and
+    stacked, so the outline is their sum. The chosen day is solid ink over a haloed dot;
+    the others keep their own light-to-dark green as a translucent fill with an outline."""
+
+    def mix(a, b, t):
+        return "#" + "".join(f"{round(x + (y - x) * t):02x}" for x, y in zip(a, b))
+
+    xs = np.arange(0, 40.5, 0.5)
+    curve = np.where(xs > 0, np.power(np.clip(xs, 0, None), 1.6) * np.exp(-xs / 4), 0.0)
+    layers = np.stack([np.interp(xs - k * shift, xs, curve, left=0) for k in range(days)])
+    tops = layers.cumsum(0)
+    base, top, left = 34, 7, 5
+    height = base - (tops / tops[-1].max()) * (base - top)
+    shapes, dots = [], []
+    for k in range(days):
+        t = k / (days - 1)
+        upper = [f"{left + x:.1f},{y:.1f}" for x, y in zip(xs, height[k])]
+        lower = [
+            f"{left + x:.1f},{y:.1f}"
+            for x, y in zip(xs[::-1], (height[k - 1] if k else np.full_like(xs, base))[::-1])
+        ]
+        points = " ".join(upper + lower)
+        cx = left + k * shift + 0.6
+        if k == chosen:
+            shapes.append(f'<polygon points="{points}" fill="{INK}"/>')
+            dots.append(
+                f'<circle cx="{cx}" cy="41.5" r="3.6" fill="none" stroke="{INK}" stroke-width="1"/>'
+                f'<circle cx="{cx}" cy="41.5" r="2" fill="{INK}"/>'
+            )
+        else:
+            fill = mix((207, 224, 210), (66, 100, 77), t)
+            line = mix((150, 180, 156), (96, 130, 105), t)
+            shapes.append(
+                f'<polygon points="{points}" fill="{fill}" fill-opacity="0.35" stroke="{line}" '
+                'stroke-width="0.8" stroke-linejoin="round"/>'
+            )
+            dots.append(
+                f'<circle cx="{cx}" cy="41.5" r="1.4" fill="none" stroke="{line}" stroke-width="0.9"/>'
+            )
+    axis = f'<line x1="3" y1="{base + 0.5}" x2="46" y2="{base + 0.5}" stroke="{INK}" stroke-width="0.9"/>'
+    return (
+        f'<svg width="{size}" height="{size}" viewBox="0 0 48 48" role="img" '
+        f'aria-label="One sale day\'s spread among the others, adding up">'
+        + "".join(shapes)
+        + axis
+        + "".join(dots)
+        + "</svg>"
     )
 
 
@@ -173,20 +250,22 @@ def cards(items):
     return mo.Html(f'<div class="ttn-cards" style="--ttn-card-count:{len(items)}">{body}</div>')
 
 
-def interval_value(draws):
-    """Card value: the mean with its 90% interval underneath."""
-    return (
-        f"{draws.mean():,.0f}"
-        f"<small>[{np.quantile(draws, 0.05):,.0f}–{np.quantile(draws, 0.95):,.0f}]</small>"
-    )
-
-
 def figure(chart, title, caption):
+    """A titled figure. ``caption`` is prose, or a list of ``(swatch, text)`` rows drawn as a
+    key with every swatch in one left-hand column; use ``""`` as the swatch for a plain row."""
+    if isinstance(caption, str):
+        body = f'<p class="ttn-caption">{caption}</p>'
+    else:
+        rows = "".join(
+            f'<li><span class="ttn-key-mark">{mark}</span><span>{text}</span></li>'
+            for mark, text in caption
+        )
+        body = f'<ul class="ttn-caption ttn-key">{rows}</ul>'
     return mo.vstack(
         [
             mo.Html(f'<p class="ttn-figure-title">{title}</p>'),
             chart,
-            mo.Html(f'<p class="ttn-caption">{caption}</p>'),
+            mo.Html(body),
         ],
         gap=0.25,
     )
@@ -203,114 +282,12 @@ def swatch(color, dashed=False, block=False, opacity=0.35):
     return f'<span class="ttn-swatch" style="{style}"></span>'
 
 
-def checks_list(checks):
-    """A checklist of (label, passed, detail)."""
-    return mo.Html(
-        '<ul class="ttn-checks">'
-        + "".join(
-            f'<li class="{"" if ok else "ttn-check--fail"}">{"✓" if ok else "✗"} {label} '
-            f"<code>{detail}</code></li>"
-            for label, ok, detail in checks
-        )
-        + "</ul>"
-    )
-
-
 def source_md(*objects):
     """Markdown code blocks holding the actual source of the given functions."""
     return mo.md(
         "\n\n".join(
             f"```python\n{textwrap.dedent(inspect.getsource(obj)).rstrip()}\n```" for obj in objects
         )
-    )
-
-
-def status_figure(status, abandoned, as_of):
-    """The stacked bar of where every unit stands at the snapshot, with its legend."""
-    counts = pd.Series(status).value_counts()
-    snapshot = pd.Timestamp(str(as_of))
-    total = len(status)
-    # Settled outcomes at the two ends, the censored ones (clock still running) between.
-    parts = [
-        ("Received", "received", True, "Back on the shelf. The only fully observed outcome."),
-        (
-            "Return in transit",
-            "transit",
-            False,
-            f"Started, not received. Secretly, <b>{abandoned:.0%}</b> of these are abandoned; "
-            "the ledger can't say which.",
-        ),
-        ("Could still return", "eligible", False, "No return yet, still inside the 90-day window."),
-        ("Window closed", "expired", True, "Kept for good: past the deadline with no return."),
-    ]
-    bar = "".join(
-        f'<span class="ttn-status-seg ttn-status-seg--{key}" '
-        f'style="flex-grow:{counts.get(label, 0)}" title="{label}: {counts.get(label, 0):,}">'
-        "</span>"
-        for label, key, _, _ in parts
-    )
-    legend = "".join(
-        f'<li class="ttn-status-item ttn-status-item--{key}">'
-        f'<span class="ttn-status-key"></span><b>{counts.get(label, 0):,}</b> {label}'
-        f'<span class="ttn-status-state">{"settled" if settled else "clock running"}</span>'
-        f"<p>{detail}</p></li>"
-        for label, key, settled, detail in parts
-    )
-    return mo.Html(
-        '<figure class="ttn-status">'
-        f'<p class="ttn-figure-title">Where all {total:,} units sold so far stand at the '
-        f"snapshot, {snapshot:%b} {snapshot.day}</p>"
-        f'<div class="ttn-status-bar" role="img" aria-label="Status of every unit">{bar}</div>'
-        f'<ul class="ttn-status-legend">{legend}</ul>'
-        "</figure>"
-    )
-
-
-def stage_cards(family):
-    """Side-by-side cards: what each return stage learns and what it is told."""
-    share = 1 / (1 + np.exp(-float(family.susceptibility_logit_prior.loc)))
-
-    def stage(name, code, happen, when, rules):
-        facets = (
-            ("Will it happen?", "learned", happen),
-            ("When?", "learned", when),
-            ("Rules", "declared", rules),
-        )
-        rows = "".join(
-            f'<dt>{label}<span class="ttn-tag ttn-tag--{kind}">{kind}</span></dt><dd>{text}</dd>'
-            for label, kind, text in facets
-        )
-        return f'<article class="ttn-stage"><h4>{name}</h4><code>{code}</code><dl>{rows}</dl></article>'
-
-    return mo.Html(
-        '<div class="ttn-stages">'
-        + stage(
-            "Return initiated",
-            "EventProcess(age_bins=16, deadline_days=90)",
-            "A susceptibility logit, intercept plus a product effect: "
-            "<code>susceptibility_intercept ~ Normal(0, 2)</code>, "
-            "<code>susceptibility_beta ~ Normal(0, 1)</code>.",
-            "The default <b>random-walk</b> daily hazard over 16 age bins, plus effects of "
-            "product and weekday.",
-            "The 90-day policy, inclusive, measured from the sale. Open every day.",
-        )
-        + stage(
-            "Return received",
-            "EventProcess(family=WeibullFamily(...), allowed_weekdays=range(5))",
-            "A susceptibility logit: <code>susceptibility_intercept ~ "
-            f"Normal({float(family.susceptibility_logit_prior.loc):g}, "
-            f"{float(family.susceptibility_logit_prior.scale):g})</code>, "
-            f"a prior median of {share:.0%} of initiated returns being receivable.",
-            "A <b>Weibull</b> delay: <code>scale ~ LogNormal("
-            f"{float(family.scale_prior.loc):g}, {float(family.scale_prior.scale):g})</code> "
-            f"(median {np.exp(float(family.scale_prior.loc)):.1f} days), "
-            f"<code>shape ~ LogNormal({float(family.shape_prior.loc):g}, "
-            f"{float(family.shape_prior.scale):g})</code> "
-            f"(median {np.exp(float(family.shape_prior.loc)):.1f}). A storm rescales each "
-            "day's hazard increment.",
-            "Monday to Friday only. No receipt deadline.",
-        )
-        + "</div>"
     )
 
 
@@ -344,108 +321,498 @@ def recovery_view(recovery):
     )
 
 
-def scores_view(scores, actual_total):
-    """Baseline against model: daily error, CRPS, storm-fortnight error and 28-day total."""
-    return (
-        ct.CoefTable(scores, rows="Method")
+def scores_view(scores, actual_total, close=0.05):
+    """Baselines against the model: daily error, CRPS, 28-day total (the actual total in
+    small type under that column's header) and the total's signed error against the actual,
+    green within ``close`` and red outside it. The model is the last row and is highlighted.
+    """
+    total, error = "28-day total", "Total error"
+    misses = scores.total / actual_total - 1
+    table = (
+        ct.CoefTable(scores.assign(miss=misses), rows="Method")
         .estimate("Daily MAE", "mae", fmt=ct.Number(decimals=2))
         .estimate("Daily CRPS", "crps", fmt=ct.Number(decimals=2))
-        .estimate("MAE, storm fortnight", "storm", fmt=ct.Number(decimals=2))
-        .estimate(
-            f"28-day total (actual {actual_total:,})",
-            "total",
-            ci=("total_lo", "total_hi"),
-            fmt=ct.Number(decimals=0),
-        )
+        .estimate(total, "total", ci=("total_lo", "total_hi"), fmt=ct.Number(decimals=0))
+        .estimate(error, "miss", fmt=ct.Percent(decimals=0, scale=100))
         .with_theme(TABLE_THEME)
     )
+    model = len(scores) - 1
+    styled = (
+        table.gt()
+        .cols_label(
+            cases={
+                total: gt_html(
+                    f'{total}<br><span style="font-size:0.78em;font-weight:400">'
+                    f"actual {actual_total:,}</span>"
+                )
+            }
+        )
+        .tab_style(
+            style=[gt_style.fill(color="#e6f4ea"), gt_style.text(weight="bold", color=INK)],
+            locations=[gt_loc.body(rows=[model]), gt_loc.stub(rows=[model])],
+        )
+    )
+    for row, miss in enumerate(misses):
+        styled = styled.tab_style(
+            style=gt_style.text(color=ACCENT if abs(miss) <= close else RED, weight="bold"),
+            locations=gt_loc.body(columns=error, rows=[row]),
+        )
+    return styled
 
 
 # --- Charts ---------------------------------------------------------------------------
 
 
-def tldr_chart(forecast, sales_draws, sales_actual, held_out, storms):
-    """The opening figure: sales, returns started and returns received, storm shaded."""
-    # One shaded rectangle per supplied storm day in the forecast window, labelled once.
-    days = pd.DatetimeIndex(forecast.dates)
-    stormy = storms(forecast.dates) > 0
-    storm = pd.DataFrame({"start": days[stormy], "end": days[stormy] + pd.Timedelta(days=1)})
-    first = stormy & ~pd.Series(stormy).shift(1, fill_value=False).to_numpy()
-    storm_label = pd.DataFrame({"start": days[first]})
+def sale_shade(promos, first_day):
+    """Slate bands for the sale spans that reach past ``first_day``."""
+    return (
+        alt.Chart(promos[promos.end > pd.Timestamp(first_day)])
+        .mark_rect(color=SLATE, opacity=0.08)
+        .encode(x="start:T", x2="end:T")
+    )
 
-    def panel(draws, actual, color, title, show_axis, with_storm=False):
-        frame = fan(forecast.dates, draws, title).assign(actual=actual)
-        base = alt.Chart(frame).encode(
-            x=alt.X(
-                "date:T",
-                title=None,
-                axis=alt.Axis(format="%a %b %-d", labels=show_axis, ticks=show_axis, labelAngle=0),
-            )
+
+def observed(recent, column, x="date:T", clip=False):
+    """Recorded daily counts before the snapshot, in grey so the forecast stands out."""
+    frame = recent[["date", column]].rename(columns={column: "value"})
+    return (
+        alt.Chart(frame)
+        .mark_line(color=MUTED, strokeWidth=1.4, opacity=0.85, clip=clip)
+        .encode(
+            x=x,
+            y="value:Q",
+            tooltip=[
+                alt.Tooltip("date:T", format="%a %b %-d"),
+                alt.Tooltip("value:Q", title=column.lower()),
+            ],
         )
+    )
+
+
+def snapshot_rule(recent, label=False, x="date:T"):
+    """A dotted line between the last observed day and the first forecast day."""
+    at = pd.DataFrame({"date": [recent.date.max() + pd.Timedelta(hours=12)]})
+    rule = alt.Chart(at).mark_rule(color=MUTED, strokeDash=[3, 3], clip=True).encode(x=x)
+    if not label:
+        return rule
+    return rule + alt.Chart(at).mark_text(
+        align="right", baseline="top", dx=-4, dy=4, fontSize=11, color=MUTED, clip=True
+    ).encode(x=x, y=alt.value(0), text=alt.value("today"))
+
+
+def _local(day):
+    """A Vega-Lite DateTime read in local time, like the dates in the data."""
+    return alt.DateTime(year=day.year, month=day.month, date=day.day, hours=day.hour)
+
+
+def window_x(first, last, show_axis=True, field="date"):
+    """A shared date axis from day ``first`` to day ``last``, both inclusive.
+
+    An explicit domain keeps every panel of a figure on the same scale. Ticks sit on
+    Sundays, spaced so about seven fit, so no label lands near an edge and shrinks the panel
+    that shows it.
+    """
+    lo = pd.Timestamp(first) - pd.Timedelta(hours=12)
+    hi = pd.Timestamp(last) + pd.Timedelta(hours=12)
+    sundays = pd.date_range(lo.ceil("D"), hi.floor("D"), freq="W-SUN")
+    ticks = sundays[:: max(1, int(np.ceil(len(sundays) / 7)))]
+    return alt.X(
+        f"{field}:T",
+        title=None,
+        scale=alt.Scale(domain=[_local(lo), _local(hi)]),
+        axis=alt.Axis(
+            values=[_local(day) for day in ticks],
+            format="%a %b %-d",
+            labels=show_axis,
+            ticks=show_axis,
+            labelAngle=0,
+        ),
+    )
+
+
+def tldr_panels(forecast, sales_draws, sales_actual, held_out, storms, promos, history, window):
+    """Sales, starts and receipts as three shared-date Altair panels.
+
+    ``history`` is the whole ledger as daily counts; ``window`` is the inclusive
+    ``(first, last)`` pair. The browser can change that domain without recomputing data.
+    """
+    first, last = (pd.Timestamp(day) for day in window)
+    snapshot = pd.Timestamp(history.date.max())
+
+    def x(show_axis, field="date"):
+        return window_x(first, last, show_axis, field)
+
+    # One shaded rectangle per supplied storm day, each run labelled once.
+    days = pd.DatetimeIndex(history.date).append(pd.DatetimeIndex(forecast.dates))
+    stormy = storms(days.values) > 0
+    storm = pd.DataFrame({"start": days[stormy], "end": days[stormy] + pd.Timedelta(days=1)})
+    starts = stormy & ~pd.Series(stormy).shift(1, fill_value=False).to_numpy()
+    storm_label = pd.DataFrame({"start": days[starts]})
+    sales = promos.assign(label=lambda f: np.where(f.start > snapshot, "planned sale", "sale"))
+
+    def sale_layers(show_axis, label):
+        shade = (
+            alt.Chart(sales)
+            .mark_rect(color=SLATE, opacity=0.08, clip=True)
+            .encode(x=x(show_axis, "start"), x2="end:T")
+        )
+        if not label:
+            return [shade]
+        text = (
+            alt.Chart(sales)
+            .mark_text(
+                align="left", baseline="top", dx=5, dy=4, fontSize=11, color=SLATE, clip=True
+            )
+            .encode(x=x(show_axis, "start"), y=alt.value(0), text="label:N")
+        )
+        return [shade, text]
+
+    def panel(draws, actual, color, title, column, show_axis, storm_shade=False, labels=False):
+        frame = fan(forecast.dates, draws, title).assign(actual=actual)
+        base = alt.Chart(frame).encode(x=x(show_axis))
         layers = [
-            base.mark_area(color=color, opacity=0.14).encode(y="lo90:Q", y2="hi90:Q"),
-            base.mark_area(color=color, opacity=0.26).encode(y="lo50:Q", y2="hi50:Q"),
-            base.mark_line(color=color, strokeWidth=2).encode(y=alt.Y("mean:Q", title=title)),
-            base.mark_circle(color=INK, size=26, opacity=0.85).encode(y="actual:Q"),
+            *sale_layers(show_axis, labels),
+            snapshot_rule(history, label=column == "Returns initiated", x=x(show_axis)),
+            observed(history, column, x=x(show_axis), clip=True),
+            base.mark_area(color=color, opacity=0.14, clip=True).encode(y="lo90:Q", y2="hi90:Q"),
+            base.mark_area(color=color, opacity=0.26, clip=True).encode(y="lo50:Q", y2="hi50:Q"),
+            base.mark_line(color=color, strokeWidth=2, clip=True).encode(
+                y=alt.Y("mean:Q", title=title)
+            ),
+            base.mark_circle(color=INK, size=26, opacity=0.85, clip=True).encode(y="actual:Q"),
         ]
-        if with_storm:
+        if storm_shade:
             layers = [
                 alt.Chart(storm)
-                .mark_rect(color=STORM, opacity=0.55)
-                .encode(x="start:T", x2="end:T"),
+                .mark_rect(color=STORM, opacity=0.3, clip=True)
+                .encode(x=x(show_axis, "start"), x2="end:T"),
                 alt.Chart(storm_label)
-                .mark_text(align="left", baseline="top", dx=5, dy=4, fontSize=11, color=AMBER)
-                .encode(x="start:T", y=alt.value(0), text=alt.value("storm")),
+                .mark_text(
+                    align="left", baseline="top", dx=5, dy=4, fontSize=11, color=AMBER, clip=True
+                )
+                .encode(x=x(show_axis, "start"), y=alt.value(0), text=alt.value("storm")),
                 *layers,
             ]
-        return alt.layer(*layers).properties(height=120, width="container")
+        return alt.layer(*layers).properties(height=95, width="container")
+
+    return [
+        panel(sales_draws, sales_actual, MUTED, "Units sold", "Sales", False, labels=True),
+        panel(
+            forecast.initiations,
+            held_out.initiations,
+            AMBER,
+            "Returns started",
+            "Returns initiated",
+            False,
+        ),
+        panel(
+            forecast.receipts,
+            held_out.receipts,
+            ACCENT,
+            "Returns received",
+            "Returns received",
+            True,
+            storm_shade=True,
+        ),
+    ]
+
+
+def purchase_timeline(unit):
+    """One unit's return, drawn to scale: purchased, return initiated, in transit, received.
+
+    ``unit`` maps ``sold``, ``started`` and ``received`` to timestamps.
+    """
+    wait = (unit["started"] - unit["sold"]).days
+    transit = (unit["received"] - unit["started"]).days
+    left, right, line = 75, 605, 72
+
+    def x(day):
+        return left + day / (wait + transit) * (right - left)
+
+    def stop(day, name, when, color):
+        return (
+            f'<circle cx="{x(day):.1f}" cy="{line}" r="7" fill="{PAPER}" stroke="{color}" '
+            'stroke-width="2.5"/>'
+            f'<text x="{x(day):.1f}" y="28" text-anchor="middle" font-size="14" '
+            f'font-weight="600" fill="{INK}">{name}</text>'
+            f'<text x="{x(day):.1f}" y="47" text-anchor="middle" font-size="12" '
+            f'fill="{MUTED}">{when:%a %b} {when.day} · day {day}</text>'
+        )
+
+    def leg(start, end, color, text):
+        return (
+            f'<line x1="{x(start):.1f}" y1="{line}" x2="{x(end):.1f}" y2="{line}" '
+            f'stroke="{color}" stroke-width="5" stroke-linecap="round"/>'
+            f'<text x="{x((start + end) / 2):.1f}" y="{line + 30}" text-anchor="middle" '
+            f'font-size="13" fill="{color}">{text}</text>'
+        )
+
+    return mo.Html(
+        '<svg class="ttn-journey" viewBox="0 0 680 112" role="img" '
+        'aria-label="One unit: purchased, return initiated, in transit, received" '
+        'style="width: 100%; height: auto; font-family: inherit">'
+        + leg(0, wait, AMBER, f"With the customer · {wait} days")
+        + leg(wait, wait + transit, ACCENT, f"In transit · {transit} days")
+        + stop(0, "Purchased", unit["sold"], INK)
+        + stop(wait, "Return initiated", unit["started"], AMBER)
+        + stop(wait + transit, "Received", unit["received"], ACCENT)
+        + "</svg>"
+    )
+
+
+def convolution_panels(followed, sales, first_date, day):
+    """One forecast sale day followed forward. The top row is units sold per day; below it,
+    each day's returns started and returns received, stacked by the sale day they came from
+    (later sale days darker), so a day's bar is the sum of its contributions. The chosen
+    sale day is black in every panel, and the busiest receipt day is labelled.
+
+    ``followed`` is ``follow_sales`` output (``started`` and ``received``, ``[S, days]``);
+    ``sales`` the ``[S]`` expected units sold per day; ``day`` the highlighted sale day.
+    """
+    days = followed["started"].shape[1]
+    dates = pd.date_range(str(first_date), periods=days)
+    x_scale = alt.Scale(
+        domain=[
+            _local(dates[0] - pd.Timedelta(hours=12)),
+            _local(dates[-1] + pd.Timedelta(days=1)),
+        ]
+    )
+
+    def x(show_axis):
+        return alt.X(
+            "date:T",
+            title=None,
+            scale=x_scale,
+            axis=alt.Axis(format="%b %-d", labels=show_axis, ticks=show_axis),
+        )
+
+    sold = pd.DataFrame({"date": dates[: len(sales)], "units": np.asarray(sales, dtype=float)})
+    sold["end"] = sold.date + pd.Timedelta(hours=20)  # a small gap between days
+    sold["sale"] = np.arange(len(sales))
+    sold["picked"] = np.arange(len(sales)) == day
+    top = (
+        alt.Chart(sold)
+        .mark_rect(clip=True)
+        .encode(
+            x=x(False),
+            x2="end:T",
+            y=alt.Y("units:Q", title="Units sold"),
+            y2=alt.datum(0),
+            color=alt.Color(
+                "picked:N",
+                scale=alt.Scale(domain=[False, True], range=["#d5d8cd", INK]),
+                legend=None,
+            ),
+        )
+        .properties(height=80, width="container")
+    )
+
+    def stage(rows, light, color, title, show_axis, label_peak):
+        long = pd.DataFrame(
+            [
+                {
+                    "date": dates[t],
+                    "end": dates[t] + pd.Timedelta(hours=20),
+                    "sale": s,
+                    "sold": dates[s],
+                    "units": rows[s, t],
+                    "picked": s == day,
+                }
+                for s in range(rows.shape[0])
+                for t in range(rows.shape[1])
+                if rows[s, t] > 0.05
+            ]
+        )
+        # Stack by hand: each segment sits on the sale days before it on the same day.
+        long = long.sort_values(["date", "sale"])
+        long["top"] = long.groupby("date").units.cumsum()
+        long["bottom"] = long.top - long.units
+        chart = (
+            alt.Chart(long)
+            .mark_rect(stroke=PAPER, strokeWidth=0.4, clip=True)
+            .encode(
+                x=x(show_axis),
+                x2="end:T",
+                y=alt.Y("top:Q", title=title),
+                y2="bottom:Q",
+                color=alt.condition(
+                    alt.datum.picked,
+                    alt.value(INK),
+                    alt.Color("sale:Q", scale=alt.Scale(range=[light, color]), legend=None),
+                ),
+                order=alt.Order("sale:Q"),
+                tooltip=[
+                    alt.Tooltip("date:T", title="day", format="%a %b %-d"),
+                    alt.Tooltip("sold:T", title="sold", format="%a %b %-d"),
+                    alt.Tooltip("units:Q", title="returns", format=".1f"),
+                ],
+            )
+        )
+        if label_peak:
+            totals = rows.sum(0)
+            peak = int(np.argmax(totals))
+            sources = int((rows[:, peak] > 0.05).sum())
+            note = pd.DataFrame(
+                {
+                    "date": [dates[peak] + pd.Timedelta(hours=10)],
+                    "units": [totals[peak]],
+                    "text": [f"{dates[peak]:%b %-d}: {totals[peak]:.0f} from {sources} sale days"],
+                }
+            )
+            chart += (
+                alt.Chart(note)
+                .mark_text(align="left", dx=6, dy=-2, fontSize=11, color=INK, baseline="bottom")
+                .encode(x="date:T", y="units:Q", text="text:N")
+            )
+        return chart.properties(height=120, width="container")
+
+    return [
+        top,
+        stage(followed["started"], AMBER_LIGHT, AMBER, "Returns started", False, False),
+        stage(followed["received"], "#cde9d7", ACCENT, "Returns received", True, True),
+    ]
+
+
+def sale_echo(daily, sale, before=7, after=28):
+    """One sale and the returns it brings: units sold, returns started and returns received
+    per day, on one shared date axis, the sale shaded in every panel.
+
+    Receipts are drawn on open (weekday) days only, so the line is not broken by the
+    warehouse's closed weekends.
+    """
+    first = sale.start - pd.Timedelta(days=before)
+    last = min(sale.end + pd.Timedelta(days=after), daily.date.max() + pd.Timedelta(days=1))
+    frame = daily[(daily.date >= first) & (daily.date < last)]
+    shade = (
+        alt.Chart(pd.DataFrame([sale]))
+        .mark_rect(color=SLATE, opacity=0.08)
+        .encode(x="start:T", x2="end:T")
+    )
+
+    def panel(column, color, title, show_axis, rows=frame):
+        return (
+            shade
+            + alt.Chart(rows)
+            .mark_line(color=color, strokeWidth=2)
+            .encode(
+                x=alt.X(
+                    "date:T",
+                    title=None,
+                    scale=alt.Scale(domain=[_local(first), _local(last - pd.Timedelta(days=1))]),
+                    axis=alt.Axis(format="%b %-d", labels=show_axis, ticks=show_axis),
+                ),
+                y=alt.Y(f"{column}:Q", title=title),
+            )
+        ).properties(height=95, width="container")
 
     return mo.vstack(
         [
-            panel(sales_draws, sales_actual, MUTED, "Units sold", False),
-            panel(forecast.initiations, held_out.initiations, AMBER, "Returns started", False),
-            panel(forecast.receipts, held_out.receipts, ACCENT, "Returns received", True, True),
+            panel("Sales", MUTED, "Units sold", False),
+            panel("Returns initiated", AMBER, "Returns started", False),
+            panel(
+                "Returns received",
+                ACCENT,
+                "Returns received",
+                True,
+                rows=frame[frame.date.dt.dayofweek < 5],
+            ),
         ],
         gap=0,
     )
 
 
-def daily_history_chart(daily, spans, training_start):
-    """Six months of daily counts, storms shaded, the sales training window marked."""
-    colors = {"Sales": MUTED, "Returns initiated": AMBER, "Returns received": ACCENT}
-    window = pd.DataFrame({"date": [pd.Timestamp(str(training_start))]})
+def return_fates_chart(fates, marker=14):
+    """Stacked shares of one batch of orders by age: returned so far, will return but
+    hasn't yet, never returns. A dotted line at ``marker`` days shows how much of the
+    silence at that age is still to come."""
+    order = ["Returned so far", "Will return, not yet", "Never returns"]
+    colors = [AMBER, AMBER_LIGHT, "#e3e5da"]
+    long = fates.melt(id_vars="age", value_vars=order, var_name="fate", value_name="share")
+    long["rank"] = long.fate.map(order.index)
+    at = fates[fates.age == marker].iloc[0]
+    rule = pd.DataFrame({"age": [marker]})
+    rate = 1 - float(fates["Never returns"].iloc[0])
+    labels = pd.DataFrame(
+        {
+            "age": [89, 60],
+            "share": [rate, rate * 0.45],
+            "text": [f"The return rate: {rate:.0%}", "Time to event (CDF)"],
+            "color": [INK, PAPER],
+            "baseline": ["bottom", "middle"],
+        }
+    )
+    return (
+        alt.Chart(long)
+        .mark_area(opacity=1)
+        .encode(
+            x=alt.X("age:Q", title="Days since the order", scale=alt.Scale(domain=[0, 90])),
+            y=alt.Y("share:Q", stack=True, title="Return rate", axis=alt.Axis(format="%")),
+            color=alt.Color(
+                "fate:N",
+                scale=alt.Scale(domain=order, range=colors),
+                legend=None,  # the figure's caption is the key
+            ),
+            order=alt.Order("rank:Q"),
+            tooltip=[
+                alt.Tooltip("age:Q", title="day"),
+                alt.Tooltip("fate:N"),
+                alt.Tooltip("share:Q", format=".0%"),
+            ],
+        )
+        + alt.Chart(rule).mark_rule(color=INK, strokeDash=[3, 3]).encode(x="age:Q")
+        + alt.Chart(rule)
+        .mark_text(align="left", dx=5, dy=-4, fontSize=11, color=INK, baseline="bottom")
+        .encode(
+            x="age:Q",
+            y=alt.value(14),
+            text=alt.value(
+                f"day {marker}: {at['Returned so far']:.0%} returned, "
+                f"{at['Will return, not yet']:.0%} still to come"
+            ),
+        )
+        + alt.Chart(pd.DataFrame({"share": [rate]}))
+        .mark_rule(color=INK, strokeWidth=1.2)
+        .encode(y="share:Q")
+        + alt.Chart(labels[labels.baseline == "bottom"])
+        .mark_text(align="right", dy=-5, fontSize=12, fontWeight=600, baseline="bottom")
+        .encode(x="age:Q", y="share:Q", text="text:N", color=alt.Color("color:N", scale=None))
+        + alt.Chart(labels[labels.baseline == "middle"])
+        .mark_text(align="center", fontSize=12, fontWeight=600, baseline="middle")
+        .encode(x="age:Q", y="share:Q", text="text:N", color=alt.Color("color:N", scale=None))
+    ).properties(height=200, width="container")
 
-    def panel(name, height, show_axis):
-        line = (
-            alt.Chart(daily)
-            .mark_line(color=colors[name], strokeWidth=1.6)
+
+def wait_charts(to_start, in_transit):
+    """Histograms of two waits in days: sale to return started, and time in transit."""
+
+    def panel(days, color, title, limit):
+        counts = days.clip(upper=limit).value_counts().sort_index()
+        frame = pd.DataFrame({"start": counts.index - 0.45, "end": counts.index + 0.45})
+        frame["returns"] = counts.to_numpy()
+        return (
+            alt.Chart(frame)
+            .mark_rect(color=color, opacity=0.85)
             .encode(
                 x=alt.X(
-                    "date:T",
-                    title=None,
-                    axis=alt.Axis(
-                        format="%b", tickCount="month", labels=show_axis, ticks=show_axis
-                    ),
+                    "start:Q",
+                    title=title,
+                    scale=alt.Scale(domain=[-0.5, limit + 0.5], nice=False),
+                    axis=alt.Axis(values=list(range(0, limit + 1, 10 if limit > 30 else 5))),
                 ),
-                y=alt.Y(f"{name}:Q", title=name),
-                tooltip=[alt.Tooltip("date:T", format="%a %b %-d"), alt.Tooltip(f"{name}:Q")],
+                x2="end:Q",
+                y=alt.Y("returns:Q", title="Returns"),
+                y2=alt.datum(0),
             )
+            .properties(height=130, width="container")
         )
-        storm = (
-            alt.Chart(spans[spans.start <= daily.date.max()])
-            .mark_rect(color=AMBER, opacity=0.14)
-            .encode(x="start:T", x2="end:T")
-        )
-        rule = alt.Chart(window).mark_rule(color=MUTED, strokeDash=[3, 3]).encode(x="date:T")
-        return (storm + rule + line).properties(height=height, width="container")
 
+    # Stacked, not side by side: two container-width charts in a row overflow narrow pages.
     return mo.vstack(
         [
-            panel("Sales", 110, False),
-            panel("Returns initiated", 110, False),
-            panel("Returns received", 130, True),
+            panel(to_start, AMBER, "Days from sale to return", 90),
+            panel(in_transit, ACCENT, "Days in transit", 30),
         ],
-        gap=0,
+        gap=0.5,
     )
 
 
@@ -521,37 +888,35 @@ def hazard_charts(initiation, receipt):
                 y=alt.Y("mean:Q", title="Daily hazard", axis=alt.Axis(format="%"))
             )
             + base.mark_line(color=INK, strokeDash=[5, 4], strokeWidth=1.4).encode(y="truth:Q")
-        ).properties(height=210, width="container")
+        ).properties(height=150, width="container")
 
-    return mo.hstack(
+    # Stacked, not side by side: two container-width charts in a row overflow narrow pages.
+    return mo.vstack(
         [
             panel(initiation, AMBER, "Days since sale"),
             panel(receipt, ACCENT, "Days since return initiated"),
         ],
-        widths="equal",
-        gap=2,
+        gap=0.5,
     )
 
 
-def forecast_chart(forecast, held_out, spans):
-    """Returns initiated and received against the held-out days, storm shaded on receipts."""
+def forecast_chart(forecast, held_out, spans, promos, recent):
+    """Returns initiated and received: the last weeks of the ledger, then the forecast against
+    the held-out days; storm on receipts, sales on both."""
 
     def panel(draws, actual, color, title, show_axis, storm):
         frame = fan(forecast.dates, draws, title).assign(actual=actual)
-        base = alt.Chart(frame).encode(
-            x=alt.X(
-                "date:T",
-                title=None,
-                axis=alt.Axis(format="%a %b %-d", labels=show_axis, ticks=show_axis, labelAngle=0),
-            )
-        )
+        base = alt.Chart(frame).encode(x=window_x(recent.date.min(), forecast.dates[-1], show_axis))
         shade = (
-            alt.Chart(spans[spans.end > frame.date.min()] if storm else spans[:0])
-            .mark_rect(color=AMBER, opacity=0.14)
+            alt.Chart(spans[spans.end > recent.date.min()] if storm else spans[:0])
+            .mark_rect(color=AMBER, opacity=0.07)
             .encode(x="start:T", x2="end:T")
         )
         return (
-            shade
+            sale_shade(promos, recent.date.min())
+            + shade
+            + snapshot_rule(recent, label=not show_axis)
+            + observed(recent, title)
             + base.mark_area(color=color, opacity=0.14).encode(y="lo90:Q", y2="hi90:Q")
             + base.mark_area(color=color, opacity=0.26).encode(y="lo50:Q", y2="hi50:Q")
             + base.mark_line(color=color, strokeWidth=2).encode(y=alt.Y("mean:Q", title=title))
@@ -589,7 +954,15 @@ def forecast_chart(forecast, held_out, spans):
 
 
 def owed_chart(forecast, eventual_truth):
-    """Where the returns still owed by past sales are: in transit or not yet started."""
+    """Forest plot of the returns still owed by past sales: in transit, not yet started,
+    and their total, each as a mean with its 90% interval against what actually arrived."""
+    in_transit = np.asarray(forecast.expected_open_receipts)
+    not_started = np.asarray(forecast.expected_uninitiated_receipts)
+    rows = [
+        ("In transit", in_transit, eventual_truth["open"], ACCENT),
+        ("Not started yet", not_started, eventual_truth["uninitiated"], AMBER),
+        ("Total still expected", in_transit + not_started, sum(eventual_truth.values()), INK),
+    ]
     parts = pd.DataFrame(
         [
             {
@@ -597,125 +970,223 @@ def owed_chart(forecast, eventual_truth):
                 "mean": float(np.mean(draws)),
                 "lo": float(np.quantile(draws, 0.05)),
                 "hi": float(np.quantile(draws, 0.95)),
-                "truth": eventual_truth[key],
+                "truth": truth,
                 "color": color,
             }
-            for label, key, draws, color in [
-                (
-                    "Returns already in transit",
-                    "open",
-                    forecast.expected_open_receipts,
-                    ACCENT,
-                ),
-                (
-                    "Sales that haven't started a return",
-                    "uninitiated",
-                    forecast.expected_uninitiated_receipts,
-                    AMBER,
-                ),
-            ]
+            for label, draws, truth, color in rows
         ]
     )
+    parts["text"] = [
+        f"{m:,.0f}  [{lo:,.0f}–{hi:,.0f}]" for m, lo, hi in zip(parts["mean"], parts.lo, parts.hi)
+    ]
     base = alt.Chart(parts).encode(
         y=alt.Y(
-            "component:N", title=None, sort=None, axis=alt.Axis(labelLimit=260, labelFontSize=12)
+            "component:N",
+            title=None,
+            sort=None,
+            axis=alt.Axis(labelFontSize=12, labelFontWeight=600, ticks=False, domain=False),
         )
     )
+    color = alt.Color("color:N", scale=None)
     return (
-        base.mark_bar(height=26, opacity=0.85).encode(
-            x=alt.X("mean:Q", title="Expected eventual receipts"),
-            color=alt.Color("color:N", scale=None),
+        base.mark_rule(strokeWidth=3, opacity=0.55).encode(
+            x=alt.X("lo:Q", title="Units that will still come back", scale=alt.Scale(zero=True)),
+            x2="hi:Q",
+            color=color,
         )
-        + base.mark_rule(color=INK, strokeWidth=1.5).encode(x="lo:Q", x2="hi:Q")
-        + base.mark_tick(color=INK, thickness=3, size=34).encode(x="truth:Q")
-    ).properties(height=110, width="container")
+        + base.mark_tick(color=INK, thickness=2, size=22).encode(x="truth:Q")
+        + base.mark_circle(size=120, opacity=1).encode(
+            x="mean:Q",
+            color=color,
+            tooltip=[
+                alt.Tooltip("component:N", title="state"),
+                alt.Tooltip("mean:Q", format=",.0f", title="model mean"),
+                alt.Tooltip("lo:Q", format=",.0f", title="5%"),
+                alt.Tooltip("hi:Q", format=",.0f", title="95%"),
+                alt.Tooltip("truth:Q", title="actually arrived"),
+            ],
+        )
+        + base.mark_text(align="left", dx=10, dy=-12, fontSize=11, color=MUTED).encode(
+            x="hi:Q", text="text:N"
+        )
+    ).properties(height=150, width="container")
 
 
-def drift_chart(forecast, drift_forecast, sales_draws, drift_sales_draws, sales_actual, held_out):
-    """The Part 4 forecast against the drifting-level one, stage by stage."""
+def promotion_chart(planned, canceled, planned_sales, canceled_sales, storm_spans):
+    """One fitted model under two future promotion calendars; no counterfactual actuals."""
 
-    def panel(current, drifting, actual, color, title, show_axis):
-        now = fan(forecast.dates, current, "current")
-        new = fan(forecast.dates, drifting, "drifting level").assign(actual=actual)
+    def panel(current, alternative, title, show_axis, shade_storm=False):
+        now = fan(planned.dates, current, "Promotion planned")
+        new = fan(planned.dates, alternative, "Promotion canceled")
         x = alt.X(
             "date:T",
             title=None,
             axis=alt.Axis(format="%a %b %-d", labels=show_axis, ticks=show_axis, labelAngle=0),
         )
-        return alt.layer(
+        tooltip = [
+            alt.Tooltip("date:T", title="day", format="%a %b %-d"),
+            alt.Tooltip("series:N", title="plan"),
+            alt.Tooltip("mean:Q", title="mean", format=",.0f"),
+            alt.Tooltip("lo90:Q", title="5%", format=",.0f"),
+            alt.Tooltip("hi90:Q", title="95%", format=",.0f"),
+        ]
+        layers = [
             alt.Chart(now)
-            .mark_area(color=color, opacity=0.14)
+            .mark_area(color=ACCENT, opacity=0.14)
             .encode(x=x, y="lo90:Q", y2="hi90:Q"),
             alt.Chart(now)
-            .mark_line(color=color, strokeWidth=2)
-            .encode(x=x, y=alt.Y("mean:Q", title=title)),
+            .mark_line(color=ACCENT, strokeWidth=2)
+            .encode(x=x, y=alt.Y("mean:Q", title=title), tooltip=tooltip),
             alt.Chart(new)
-            .mark_area(color=SLATE, opacity=0.16)
+            .mark_area(color=VIOLET, opacity=0.09)
             .encode(x=x, y="lo90:Q", y2="hi90:Q"),
             alt.Chart(new)
-            .mark_line(color=SLATE, strokeWidth=2.2, strokeDash=[5, 3])
-            .encode(x=x, y="mean:Q"),
-            alt.Chart(new).mark_circle(color=INK, size=30, opacity=0.9).encode(x=x, y="actual:Q"),
-        ).properties(height=130, width="container")
+            .mark_line(color=VIOLET, opacity=0.65, strokeWidth=2.2, strokeDash=[5, 3])
+            .encode(x=x, y="mean:Q", tooltip=tooltip),
+        ]
+        if shade_storm:
+            visible = storm_spans[
+                (storm_spans.end > pd.Timestamp(planned.dates[0]))
+                & (storm_spans.start <= pd.Timestamp(planned.dates[-1]))
+            ]
+            layers.insert(
+                0,
+                alt.Chart(visible)
+                .mark_rect(color=AMBER, opacity=0.07)
+                .encode(x="start:T", x2="end:T"),
+            )
+        return alt.layer(*layers).properties(height=155, width="container")
 
     return mo.vstack(
         [
-            panel(sales_draws, drift_sales_draws, sales_actual, MUTED, "Units sold", False),
+            panel(planned_sales, canceled_sales, "Units sold per day", False),
             panel(
-                forecast.initiations,
-                drift_forecast.initiations,
-                held_out.initiations,
-                AMBER,
-                "Returns started",
-                False,
-            ),
-            panel(
-                forecast.receipts,
-                drift_forecast.receipts,
-                held_out.receipts,
-                ACCENT,
-                "Returns received",
+                planned.receipts,
+                canceled.receipts,
+                "Returns received per day",
                 True,
+                shade_storm=True,
             ),
         ],
         gap=0,
     )
 
 
-def baseline_chart(forecast, held_out, baseline, spans):
-    """Model mean and 90% band against the weekday-average shortcut and the held-out actuals."""
-    frame = fan(forecast.dates, forecast.receipts, MODEL_NAME).assign(
-        weekday_avg=baseline.to_numpy(), actual=held_out.receipts.to_numpy()
-    )
-    x = alt.X("date:T", title=None, axis=alt.Axis(format="%a %b %-d", labelAngle=0))
-    lines = pd.concat(
+def promotion_distribution_chart(draws):
+    """Kernel-smoothed paired draws; mean and interval remain empirical summaries."""
+    draws = np.asarray(draws)
+    lo, hi = np.quantile(draws, [0.05, 0.95])
+    frame = pd.DataFrame({"reduction": draws})
+    summary = pd.DataFrame(
         [
-            frame[["date", "mean"]]
-            .rename(columns={"mean": "value"})
-            .assign(series=f"{MODEL_NAME} mean"),
-            frame[["date", "weekday_avg"]]
-            .rename(columns={"weekday_avg": "value"})
-            .assign(series="Weekday average"),
+            {
+                "lo": lo,
+                "hi": hi,
+                "mid": (lo + hi) / 2,
+                "mean": draws.mean(),
+                "interval": f"90% interval: {lo:,.0f}–{hi:,.0f}",
+                "mean_label": f"Mean {draws.mean():,.0f}",
+            }
+        ]
+    )
+    margin = 0.15 * np.ptp(draws)
+    curve = (
+        alt.Chart(frame)
+        .transform_density(
+            "reduction",
+            as_=["reduction", "density"],
+            counts=False,
+            extent=[float(draws.min() - margin), float(draws.max() + margin)],
+            steps=256,
+        )
+        .encode(
+            x=alt.X(
+                "reduction:Q",
+                scale=alt.Scale(zero=False),
+                title="Fewer receipts over four weeks",
+            ),
+            y=alt.Y(
+                "density:Q",
+                title="Density",
+                axis=alt.Axis(labels=False, ticks=False, domain=False, grid=False),
+            ),
+            tooltip=[
+                alt.Tooltip("reduction:Q", title="Fewer receipts", format=",.0f"),
+                alt.Tooltip("density:Q", title="Density", format=".4f"),
+            ],
+        )
+    )
+    central = curve.transform_filter(
+        (alt.datum.reduction >= float(lo)) & (alt.datum.reduction <= float(hi))
+    )
+    return alt.layer(
+        curve.mark_area(color=ACCENT, opacity=0.10),
+        central.mark_area(color=ACCENT, opacity=0.32),
+        curve.mark_line(color=ACCENT, strokeWidth=2.2),
+        alt.Chart(summary).mark_rule(color=INK, strokeWidth=1.5).encode(x="mean:Q"),
+        alt.Chart(summary)
+        .mark_text(color=MUTED, fontSize=11, baseline="bottom")
+        .encode(x="mid:Q", y=alt.value(-20), text="interval:N"),
+        alt.Chart(summary)
+        .mark_text(color=INK, fontSize=11, align="left", dx=5, baseline="bottom")
+        .encode(x="mean:Q", y=alt.value(-3), text="mean_label:N"),
+    ).properties(height=170, width="container", padding={"top": 35, "bottom": 5})
+
+
+def baseline_chart(forecast, held_out, baselines, spans, promos, recent, colors=None, y_max=None):
+    """The last weeks of observed receipts, then the model mean and 90% band against each
+    shortcut and the held-out actuals. Shortcut lines are dashed and partly transparent so
+    the chain stays in front.
+
+    ``baselines`` maps a legend label to a point forecast. ``colors`` gives one line colour
+    per baseline; by default red, blue, light blue and violet in order. ``y_max`` fixes the
+    top of the y-axis, so switching which shortcut is shown doesn't rescale the chart.
+    """
+    colors = list(colors or [RED, RATE, RATE_LIGHT, VIOLET])[: len(baselines)]
+    frame = fan(forecast.dates, forecast.receipts, MODEL_NAME).assign(
+        actual=held_out.receipts.to_numpy()
+    )
+    x = window_x(recent.date.min(), forecast.dates[-1])
+    model = f"{MODEL_NAME} mean"
+    lines = pd.concat(
+        [frame[["date", "mean"]].rename(columns={"mean": "value"}).assign(series=model)]
+        + [
+            pd.DataFrame({"date": frame.date, "value": np.asarray(point), "series": label})
+            for label, point in baselines.items()
         ]
     )
     return (
-        alt.Chart(spans[spans.end > frame.date.min()])
-        .mark_rect(color=AMBER, opacity=0.14)
+        sale_shade(promos, recent.date.min())
+        + alt.Chart(spans[spans.end > recent.date.min()])
+        .mark_rect(color=AMBER, opacity=0.07)
         .encode(x="start:T", x2="end:T")
+        + snapshot_rule(recent, label=True)
+        + observed(recent, "Returns received")
         + alt.Chart(frame)
         .mark_area(color=ACCENT, opacity=0.14)
         .encode(x=x, y="lo90:Q", y2="hi90:Q")
         + alt.Chart(lines)
-        .mark_line(strokeWidth=2.2)
+        .mark_line()
         .encode(
             x=x,
-            y=alt.Y("value:Q", title="Returns received per day"),
+            y=alt.Y(
+                "value:Q",
+                title="Returns received per day",
+                scale=alt.Scale(domain=[0, y_max]) if y_max else alt.Undefined,
+            ),
             color=alt.Color(
                 "series:N",
                 scale=alt.Scale(
-                    domain=[f"{MODEL_NAME} mean", "Weekday average"], range=[ACCENT, RED]
+                    domain=[model, *baselines],
+                    range=[ACCENT, *colors],
                 ),
+                legend=alt.Legend(labelLimit=0, columns=1),
             ),
+            strokeDash=alt.condition(
+                alt.datum.series == model, alt.value([1, 0]), alt.value([6, 4])
+            ),
+            opacity=alt.condition(alt.datum.series == model, alt.value(1.0), alt.value(0.65)),
+            strokeWidth=alt.condition(alt.datum.series == model, alt.value(2.6), alt.value(2.2)),
         )
         + alt.Chart(frame).mark_circle(color=INK, size=34).encode(x=x, y="actual:Q")
     ).properties(height=240, width="container")

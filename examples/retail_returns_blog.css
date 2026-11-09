@@ -9,9 +9,12 @@
   --ttn-panel: #fffef9;
   --ttn-ink: #292d26;
   --ttn-muted: #62695d;
-  --ttn-accent: #42644d;
-  --ttn-amber: #956017;
-  --ttn-red: #a23c3c;
+  --ttn-accent: #0a8a45;
+  --ttn-link: #0a8a45;
+  --ttn-amber: #d18f00;
+  --ttn-red: #d03b2f;
+  --ttn-blue: #2f6db5;
+  --ttn-violet: #7b52c7;
   --ttn-rule: #dcded1;
   --ttn-band: #f5f5ed;
   --ttn-column: #ecefe4;
@@ -84,8 +87,15 @@
 }
 
 #App [data-cell-name] .markdown a {
-  color: var(--ttn-accent);
+  color: var(--ttn-link);
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-thickness: 1.5px;
   text-underline-offset: 3px;
+}
+
+#App [data-cell-name] .markdown a:hover {
+  color: #066b34;
 }
 
 #App [data-cell-name] .markdown code {
@@ -164,10 +174,10 @@
 .ttn-dek {
   margin: 20px 0 0;
   max-width: 60ch;
-  font-family: var(--ttn-serif);
-  font-size: 20px;
-  line-height: 1.5;
-  color: var(--ttn-muted);
+  font-family: inherit;
+  font-size: 19px;
+  line-height: 1.55;
+  color: var(--ttn-ink);
 }
 
 .ttn-byline {
@@ -444,6 +454,32 @@
   font-weight: 600;
 }
 
+/* A caption written as a key: each row's swatch sits in one left-hand column. */
+.ttn-key {
+  padding: 0;
+  list-style: none;
+}
+
+.ttn-key li {
+  display: grid;
+  grid-template-columns: 24px 1fr;
+  align-items: baseline;
+  margin: 2px 0;
+}
+
+.ttn-key .ttn-swatch {
+  margin: 0;
+}
+
+
+.ttn-range-dates {
+  font-size: 13px;
+  color: var(--ttn-ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+
 .ttn-swatch {
   display: inline-block;
   width: 18px;
@@ -488,181 +524,7 @@
   overflow-wrap: anywhere;
 }
 
-/* Stage cards: what each return stage learns and what it is told. */
 
-.ttn-stages {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
-  gap: 16px;
-  margin: 18px 0 6px;
-}
-
-.ttn-stage {
-  padding: 16px 20px 6px;
-  border: 1px solid var(--ttn-rule);
-  background: var(--ttn-band);
-}
-
-.ttn-stage h4 {
-  margin: 0;
-  font-family: var(--ttn-serif);
-  font-size: 19px;
-  font-weight: 500;
-  color: var(--ttn-ink);
-}
-
-.ttn-stage > code {
-  display: block;
-  margin: 4px 0 10px;
-  font-family: var(--ttn-mono);
-  font-size: 12px;
-  color: var(--ttn-muted);
-  overflow-wrap: anywhere;
-}
-
-.ttn-stage dl {
-  margin: 0;
-}
-
-.ttn-stage dt {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding-top: 10px;
-  border-top: 1px solid var(--ttn-rule);
-  font-size: 12px;
-  font-weight: 650;
-  color: var(--ttn-ink);
-}
-
-.ttn-stage dd {
-  margin: 3px 0 10px;
-  font-size: 14px;
-  line-height: 1.5;
-  color: var(--ttn-ink);
-}
-
-.ttn-stage dd code {
-  font-family: var(--ttn-mono);
-  font-size: 12px;
-}
-
-.ttn-tag {
-  padding: 1px 7px;
-  border-radius: 999px;
-  font-size: 10px;
-  font-weight: 620;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.ttn-tag--learned { color: var(--ttn-accent); background: #e6efe7; }
-.ttn-tag--declared { color: var(--ttn-muted); background: var(--ttn-column); }
-
-/* Where every unit stands: one bar, settled ends and censored middle. */
-
-.ttn-status {
-  margin: 26px 0 6px;
-}
-
-.ttn-status-bar {
-  display: flex;
-  height: 26px;
-  margin-top: 8px;
-  overflow: hidden;
-  border-radius: 3px;
-}
-
-.ttn-status-seg { flex-basis: 0; min-width: 2px; }
-.ttn-status-seg + .ttn-status-seg { border-left: 2px solid var(--ttn-panel); }
-
-.ttn-status-seg--received, .ttn-status-item--received .ttn-status-key { background: var(--ttn-accent); }
-.ttn-status-seg--transit, .ttn-status-item--transit .ttn-status-key { background: var(--ttn-amber); }
-.ttn-status-seg--eligible, .ttn-status-item--eligible .ttn-status-key { background: #8a97a8; }
-.ttn-status-seg--expired, .ttn-status-item--expired .ttn-status-key { background: #c9cdbf; }
-
-/* Censored states are hatched: the clock is still running. */
-.ttn-status-seg--transit,
-.ttn-status-seg--eligible {
-  background-image: repeating-linear-gradient(
-    -45deg, transparent 0 5px, rgba(255, 254, 249, 0.35) 5px 8px
-  );
-}
-
-.ttn-status-legend {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 12px 24px;
-  margin: 14px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.ttn-status-item {
-  font-size: 14px;
-  color: var(--ttn-ink);
-}
-
-.ttn-status-item b {
-  font-family: var(--ttn-serif);
-  font-size: 22px;
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
-}
-
-.ttn-status-key {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  margin-right: 7px;
-  border-radius: 2px;
-}
-
-.ttn-status-state {
-  display: block;
-  margin-top: 2px;
-  font-size: 10px;
-  font-weight: 620;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--ttn-muted);
-}
-
-.ttn-status-item p {
-  margin: 4px 0 0;
-  font-size: 13px;
-  line-height: 1.45;
-  color: var(--ttn-muted);
-}
-
-/* Status checks */
-
-.ttn-checks {
-  margin: 16px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.ttn-checks li {
-  margin: 0 0 8px;
-  padding-left: 12px;
-  border-left: 3px solid var(--ttn-accent);
-  font-size: 14px;
-  color: var(--ttn-ink);
-}
-
-.ttn-checks li.ttn-check--fail {
-  border-left-color: var(--ttn-red);
-  color: var(--ttn-red);
-}
-
-.ttn-checks code {
-  display: block;
-  margin-top: 2px;
-  font-family: var(--ttn-mono);
-  font-size: 12px;
-  color: var(--ttn-muted);
-}
 
 .ttn-footer {
   margin-top: 8px;
